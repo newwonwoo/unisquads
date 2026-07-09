@@ -1,0 +1,303 @@
+"""
+IROS 등기고유번호 API 리졸버 (순수 requests, Playwright 불필요)
+================================================================
+개발자도구 Network 분석으로 확정된 내부 API를 직접 호출한다.
+
+[확정된 API — 실측 근거]
+  POST https://www.iros.go.kr/biz/Pr20ViaRlrgSrchCtrl/retrieveSmplSrchList.do
+  Content-Type: application/json
+  응답: application/json
+  세션 쿠키: PR20SESSIONID 등 (첫 방문 시 발급)
+
+[파라미터 — 쿠키 chk_input_save_simpl 디코딩으로 확정]
+  swrd         = 주소(시/도 제외)  예: "서초구 서초동 967"
+  admin_regn1  = 시/도            예: "서울특별시"
+  rgs_rec_stat = 등기기록상태       "현행"
+  addr_cls     = "3" (지번검색)
+  kind_cls     = "all" (부동산구분 전체)
+  pageUnit     = 10
+  (나머지는 빈 문자열 기본값)
+
+[장점]
+- Playwright/브라우저/EC2 헤드리스 크로미움 불필요 → 초경량, 빠름
+- requests만 있으면 되므로 Vercel 서버리스에도 배포 가능
+
+[주의]
+- 세션 쿠키를 첫 방문(GET)으로 받아야 함. requests.Session이 이를 처리.
+- 일부 쿠키가 JS로만 생성되면 이 방식이 실패할 수 있음 → 그때는 RPA(iros_resolver)로 폴백.
+- 응답 JSON 구조(고유번호 필드명)는 실접속으로 최종 확인 필요. 여러 후보 키를 탐색하고,
+  못 찾으면 응답 전체 텍스트에서 14자리 정규식으로 폴백 추출.
+"""
+
+import re
+import sys
+import time
+import argparse
+from typing import Optional
+
+try:
+    import requests
+except ImportError:
+    print("의존성 필요: pip install requests", file=sys.stderr)
+    raise
+
+# iros_resolver의 시/도 매핑·정규화·데이터클래스 재사용 (중복 방지)
+from iros_resolver import (
+    ResolveResult, normalize_sido, strip_sido,
+)
+
+BASE = "https://www.iros.go.kr"
+ENTRY = f"{BASE}/index.jsp"
+SEARCH_API = f"{BASE}/biz/Pr20ViaRlrgSrchCtrl/retrieveSmplSrchList.do"
+
+# 응답 JSON 실측 구조 (2026-07 확인):
+#   { dataList: [ { pin_land: "110219961011400001"(18자리 무하이픈),
+#                   use_cls_cd: "현행", pin_mid_spe_yn: "Y", ... } ],
+#     paginationInfo: { totalRecordCount: 2 } }
+# pin_land 18자리 = 화면표시 고유번호 14자리 + 일련 4자리
+UNIQUE_KEY_CANDIDATES = ["pin_land", "pin", "real_pin", "realPin", "unique_no", "uniqueNo"]
+GUBUN_KEY_CANDIDATES = ["kind_nm", "kindNm", "kind_cls_nm", "부동산구분", "gubun"]
+STATE_KEY_CANDIDATES = ["use_cls_cd", "rgs_rec_stat", "rgsRecStat", "등기상태", "state"]
+SOJAE_KEY_CANDIDATES = ["real_indi_contents", "rd_addr_detail", "addr", "소재지", "sojae"]
+
+# 화면표시 고유번호: 4-4-6 (하이픈) 또는 무하이픈 14~18자리
+UNIQUE_NO_HYPHEN_RE = re.compile(r"\b(\d{4})\s*-\s*(\d{4})\s*-\s*(\d{6})\b")
+PIN_RAW_RE = re.compile(r"\b(\d{14,18})\b")  # pin_land 등 무하이픈
+
+
+def _fmt_pin(raw: str) -> str:
+    """무하이픈 pin(14~18자리) → 화면표시 14자리 하이픈 형식 (4-4-6).
+    18자리면 뒤 4자리(일련번호)를 떼고 앞 14자리 사용."""
+    digits = re.sub(r"\D", "", raw)
+    core = digits[:14]  # 앞 14자리가 화면표시 고유번호
+    if len(core) == 14:
+        return f"{core[:4]}-{core[4:8]}-{core[8:14]}"
+    return raw  # 예외적 길이는 원본 유지
+
+
+def _build_payload(address: str) -> dict:
+    """정제주소 → 검색 API 요청 본문. 실측 파라미터 구조 그대로."""
+    sido = normalize_sido(address)
+    swrd = strip_sido(address, sido)
+    return {
+        "conn_menu_cls_cd": "01",
+        "prgs_mode_cls_cd": "01",
+        "inet_srch_cls_cd": "PR01",
+        "prgs_stg_cd": "",
+        "move_cls": "",
+        "swrd": swrd,
+        "addr_cls": "3",          # 지번검색
+        "kind_cls": "all",        # 부동산구분 전체
+        "land_bing_yn": "",
+        "rgs_rec_stat": "현행",
+        "admin_regn1": sido or "",
+        "admin_regn2": "",
+        "admin_regn3": "",
+        "lot_no": "",
+        "buld_name": "",
+        "buld_no_buld": "",
+        "buld_no_room": "",
+        "rd_name": "",
+        "rd_buld_no": "",
+        "rd_buld_no2": "",
+        "issue_cls": "5",
+        "pageIndex": "",
+        "pageUnit": 10,
+        "cmort_flag": "",
+        "kap_seq_flag": "",
+        "trade_seq_flag": "",
+        "etdoc_sel_yn": "",
+        "show_cls": "",
+        "real_pin_con": "",
+        "svc_cls_con": "",
+        "item_cls_con": "",
+        "judge_enr_cls_con": "",
+        "cmort_cls_con": "",
+        "trade_cls_con": "",
+        "extend_srch": "N",
+        "usg_cls_con": "",
+    }
+
+
+def _pick(d: dict, keys):
+    for k in keys:
+        if k in d and d[k] not in (None, ""):
+            return str(d[k])
+    return ""
+
+
+def _walk_records(obj):
+    """응답 JSON에서 고유번호(하이픈 또는 무하이픈)를 포함한 레코드(dict) 재귀 수집."""
+    found = []
+    if isinstance(obj, dict):
+        joined = " ".join(str(v) for v in obj.values() if isinstance(v, (str, int)))
+        if UNIQUE_NO_HYPHEN_RE.search(joined) or PIN_RAW_RE.search(joined):
+            found.append(obj)
+        for v in obj.values():
+            found.extend(_walk_records(v))
+    elif isinstance(obj, list):
+        for it in obj:
+            found.extend(_walk_records(it))
+    return found
+
+
+def _rec_to_cand(rec: dict) -> Optional[dict]:
+    """레코드 dict → 후보. pin_land(무하이픈) 우선, 없으면 하이픈/무하이픈 정규식."""
+    pin = _pick(rec, UNIQUE_KEY_CANDIDATES)
+    uno = None
+    if pin:
+        uno = _fmt_pin(pin)
+    else:
+        blob = " ".join(str(v) for v in rec.values() if isinstance(v, (str, int)))
+        mh = UNIQUE_NO_HYPHEN_RE.search(blob)
+        if mh:
+            uno = f"{mh.group(1)}-{mh.group(2)}-{mh.group(3)}"
+        else:
+            mr = PIN_RAW_RE.search(blob)
+            if mr:
+                uno = _fmt_pin(mr.group(1))
+    if not uno:
+        return None
+    return {
+        "unique_no": uno,
+        "gubun": _pick(rec, GUBUN_KEY_CANDIDATES),
+        "state": _pick(rec, STATE_KEY_CANDIDATES),
+        "sojae": _pick(rec, SOJAE_KEY_CANDIDATES),
+    }
+
+
+def _parse_json_response(data) -> list:
+    """응답 JSON → 후보 리스트.
+    실측 구조: data['dataList'] 배열의 각 레코드에 pin_land(고유번호).
+    dataList가 없으면 재귀 탐색 폴백."""
+    out, seen = [], set()
+
+    # 1순위: 확정된 dataList 구조
+    records = []
+    if isinstance(data, dict) and isinstance(data.get("dataList"), list):
+        records = data["dataList"]
+    else:
+        records = _walk_records(data)
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        c = _rec_to_cand(rec)
+        if c and c["unique_no"] not in seen:
+            seen.add(c["unique_no"])
+            out.append(c)
+
+    # 폴백: 아무것도 못 찾으면 전체 텍스트에서 번호
+    if not out:
+        import json as _json
+        text = _json.dumps(data, ensure_ascii=False)
+        for m in UNIQUE_NO_HYPHEN_RE.finditer(text):
+            uno = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+            if uno not in seen:
+                seen.add(uno)
+                out.append({"unique_no": uno, "gubun": "", "state": "", "sojae": ""})
+    return out
+
+
+def make_session() -> requests.Session:
+    """세션 생성 + 첫 방문으로 쿠키(PR20SESSIONID 등) 획득."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept": "application/json",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+        "Origin": BASE,
+        "Referer": ENTRY,
+    })
+    try:
+        s.get(ENTRY, timeout=15)  # 세션 쿠키 발급
+    except Exception:
+        pass
+    return s
+
+
+def resolve_one_api(address: str, session: Optional[requests.Session] = None,
+                    timeout: float = 20.0) -> ResolveResult:
+    """단일 주소 → 고유번호 (API 직결). 세션 재사용 가능."""
+    s = session or make_session()
+    try:
+        payload = _build_payload(address)
+        r = s.post(SEARCH_API, json=payload,
+                   headers={"Content-Type": "application/json; charset=UTF-8"},
+                   timeout=timeout)
+        if r.status_code != 200:
+            return ResolveResult(address, "ERROR",
+                                 message=f"HTTP {r.status_code} (API 직결 실패, RPA 폴백 권장)")
+        try:
+            data = r.json()
+        except ValueError:
+            # JSON 아님 → 텍스트 정규식 폴백
+            data = {"_raw": r.text}
+        cands = _parse_json_response(data)
+        if len(cands) == 0:
+            return ResolveResult(address, "NOT_FOUND",
+                                 message="고유번호 없음(API). 주소 정밀도/미등록 확인.")
+        if len(cands) == 1:
+            c = cands[0]
+            desc = " ".join(filter(None, [c["gubun"], c["state"]]))
+            return ResolveResult(address, "RESOLVED", unique_no=c["unique_no"],
+                                 candidates=cands, message=desc or c["sojae"])
+        return ResolveResult(address, "MULTIPLE", candidates=cands,
+                             message=f"{len(cands)}건(토지/건물 등).")
+    except requests.Timeout:
+        return ResolveResult(address, "ERROR", message="시간초과(API 직결)")
+    except Exception as e:
+        return ResolveResult(address, "ERROR", message=f"{type(e).__name__}: {e}")
+
+
+def resolve_batch_api(addresses, throttle=1.0, timeout=20.0):
+    """일괄 (API 직결). 세션 1회 생성 후 재사용."""
+    s = make_session()
+    out = []
+    n = len(addresses)
+    for i, addr in enumerate(addresses):
+        r = resolve_one_api(addr, session=s, timeout=timeout)
+        out.append(r)
+        print(f"[{i+1}/{n}] {addr} -> {r.status}"
+              + (f" {r.unique_no}" if r.unique_no else ""), file=sys.stderr)
+        if i < n - 1:
+            time.sleep(throttle)
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description="IROS 고유번호 API 리졸버(순수 requests)")
+    ap.add_argument("--addr", help="단일 주소")
+    ap.add_argument("--input", help="주소 목록(xlsx A열 또는 txt)")
+    ap.add_argument("--out", default="iros-api-결과.xlsx")
+    ap.add_argument("--throttle", type=float, default=1.0)
+    args = ap.parse_args()
+
+    addresses = []
+    if args.addr:
+        addresses = [args.addr]
+    elif args.input:
+        if args.input.lower().endswith((".xlsx", ".xls")):
+            import openpyxl
+            ws = openpyxl.load_workbook(args.input).active
+            for row in ws.iter_rows(values_only=True):
+                v = str(row[0] or "").strip() if row else ""
+                if v and not re.search(r"주소|address", v, re.I):
+                    addresses.append(v)
+        else:
+            with open(args.input, encoding="utf-8") as f:
+                addresses = [ln.strip() for ln in f if ln.strip()]
+    else:
+        print("--addr 또는 --input 필요", file=sys.stderr)
+        sys.exit(1)
+
+    results = resolve_batch_api(addresses, throttle=args.throttle)
+    from iros_resolver import write_xlsx
+    write_xlsx(results, args.out)
+    print(f"\n완료: {args.out} ({len(results)}건)", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
