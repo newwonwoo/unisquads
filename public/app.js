@@ -1,53 +1,199 @@
-// storage 심 (Vercel 배포 = 실제 브라우저 → localStorage 정상)
-if (typeof window !== 'undefined' && !window.storage) {
-  window.storage = {
-    get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; },
-    set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; },
-    delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; },
-    list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; },
-  };
-}
+if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
 const { useState, useEffect, useCallback } = React;
 function toHalfWidth(str) {
   return str.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 65248)).replace(/\u3000/g, " ");
 }
-const RE_DONG_HO = /(?:제?\s*(\d{1,4})\s*동)\s*(?:제?\s*(\d{1,4})\s*호)/;
+const HANJA_MAP = {
+  "\u7279\u5225\u5E02": "\uD2B9\uBCC4\uC2DC",
+  "\u5EE3\u57DF\u5E02": "\uAD11\uC5ED\uC2DC",
+  "\u7279\u5225\u81EA\u6CBB\u5E02": "\uD2B9\uBCC4\uC790\uCE58\uC2DC",
+  "\u7279\u5225\u81EA\u6CBB\u9053": "\uD2B9\uBCC4\uC790\uCE58\uB3C4",
+  "\u9053": "\uB3C4",
+  "\u5E02": "\uC2DC",
+  "\u90E1": "\uAD70",
+  "\u5340": "\uAD6C",
+  "\u9091": "\uC74D",
+  "\u9762": "\uBA74",
+  "\u91CC": "\uB9AC",
+  "\u6D1E": "\uB3D9",
+  "\u8857": "\uAC00",
+  "\u8DEF": "\uB85C",
+  "\u756A\u5730": "\uBC88\uC9C0",
+  "\u5C71": "\uC0B0",
+  "\uC11C\uC6B8": "\uC11C\uC6B8",
+  "\u4EAC\u757F": "\uACBD\uAE30",
+  "\u6C5F\u539F": "\uAC15\uC6D0",
+  "\u5FE0\u5317": "\uCDA9\uBD81",
+  "\u5FE0\u5357": "\uCDA9\uB0A8",
+  "\u5168\u5317": "\uC804\uBD81",
+  "\u5168\u5357": "\uC804\uB0A8",
+  "\u6176\u5317": "\uACBD\uBD81",
+  "\u6176\u5357": "\uACBD\uB0A8",
+  "\u6FDF\u5DDE": "\uC81C\uC8FC",
+  "\u91DC\u5C71": "\uBD80\uC0B0",
+  "\u5927\u90B1": "\uB300\uAD6C",
+  "\u4EC1\u5DDD": "\uC778\uCC9C",
+  "\u5149\u5DDE": "\uAD11\uC8FC",
+  "\u5927\u7530": "\uB300\uC804",
+  "\u851A\u5C71": "\uC6B8\uC0B0",
+  "\u4E16\u5B97": "\uC138\uC885",
+  "\u6C5F\u5357": "\uAC15\uB0A8",
+  "\u6C5F\u6771": "\uAC15\uB3D9",
+  "\u6C5F\u897F": "\uAC15\uC11C",
+  "\u677E\u5761": "\uC1A1\uD30C",
+  "\u745E\u8349": "\uC11C\uCD08",
+  "\u937E\u8DEF": "\uC885\uB85C",
+  "\u4E2D": "\uC911",
+  "\u6771": "\uB3D9",
+  "\u897F": "\uC11C",
+  "\u5357": "\uB0A8",
+  "\u5317": "\uBD81"
+};
+function hanjaToHangul(str) {
+  let s = str;
+  for (const [h, k] of Object.entries(HANJA_MAP).sort((a, b) => b[0].length - a[0].length)) {
+    s = s.split(h).join(k);
+  }
+  return s;
+}
+function stripSuffixes(str) {
+  return str.replace(/(\d)\s*번지/g, "$1").replace(/일원|일대|부근|인근|근처/g, " ").replace(/외\s*\d+\s*필지/g, " ").replace(/소재(지)?/g, " ").trim();
+}
+const SIDO_TOKENS = [
+  "\uC11C\uC6B8\uD2B9\uBCC4\uC2DC",
+  "\uC11C\uC6B8\uC2DC",
+  "\uC11C\uC6B8",
+  "\uBD80\uC0B0\uAD11\uC5ED\uC2DC",
+  "\uBD80\uC0B0\uC2DC",
+  "\uBD80\uC0B0",
+  "\uB300\uAD6C\uAD11\uC5ED\uC2DC",
+  "\uB300\uAD6C\uC2DC",
+  "\uB300\uAD6C",
+  "\uC778\uCC9C\uAD11\uC5ED\uC2DC",
+  "\uC778\uCC9C\uC2DC",
+  "\uC778\uCC9C",
+  "\uAD11\uC8FC\uAD11\uC5ED\uC2DC",
+  "\uAD11\uC8FC\uC2DC",
+  "\uAD11\uC8FC",
+  "\uB300\uC804\uAD11\uC5ED\uC2DC",
+  "\uB300\uC804\uC2DC",
+  "\uB300\uC804",
+  "\uC6B8\uC0B0\uAD11\uC5ED\uC2DC",
+  "\uC6B8\uC0B0\uC2DC",
+  "\uC6B8\uC0B0",
+  "\uC138\uC885\uD2B9\uBCC4\uC790\uCE58\uC2DC",
+  "\uC138\uC885\uC2DC",
+  "\uC138\uC885",
+  "\uACBD\uAE30\uB3C4",
+  "\uACBD\uAE30",
+  "\uAC15\uC6D0\uD2B9\uBCC4\uC790\uCE58\uB3C4",
+  "\uAC15\uC6D0\uB3C4",
+  "\uAC15\uC6D0",
+  "\uCDA9\uCCAD\uBD81\uB3C4",
+  "\uCDA9\uBD81",
+  "\uCDA9\uCCAD\uB0A8\uB3C4",
+  "\uCDA9\uB0A8",
+  "\uC804\uBD81\uD2B9\uBCC4\uC790\uCE58\uB3C4",
+  "\uC804\uB77C\uBD81\uB3C4",
+  "\uC804\uBD81",
+  "\uC804\uB77C\uB0A8\uB3C4",
+  "\uC804\uB0A8",
+  "\uACBD\uC0C1\uBD81\uB3C4",
+  "\uACBD\uBD81",
+  "\uACBD\uC0C1\uB0A8\uB3C4",
+  "\uACBD\uB0A8",
+  "\uC81C\uC8FC\uD2B9\uBCC4\uC790\uCE58\uB3C4",
+  "\uC81C\uC8FC\uB3C4",
+  "\uC81C\uC8FC"
+];
+function splitAdminPrefix(str) {
+  let s = str;
+  for (const sido of [...SIDO_TOKENS].sort((a, b) => b.length - a.length)) {
+    if (s.startsWith(sido) && s.length > sido.length && s[sido.length] !== " ") {
+      s = sido + " " + s.slice(sido.length);
+      break;
+    }
+  }
+  const guRe = /([가-힣]{1,3}(?:시|구|군))(?=[가-힣])/g;
+  s = s.replace(guRe, "$1 ").replace(guRe, "$1 ");
+  return s.replace(/\s+/g, " ").trim();
+}
+const JIP_KEYWORDS = /(아파트|apt|빌라|빌리지|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오|아이파크|e편한|이편한|더샵|롯데캐슬|래미안|센트|리버|파크|하이츠|스카이|타워|주상복합|헤리티지|포레|아이유쉘|쉐르빌|베르디움|엘크루|리슈빌|스위첸|데시앙|꿈에그린|우방|한신|현대|삼성|엘지|지에스)/i;
+const JIBUN_CONTEXT = /(동|읍|면|리|로|길|가)\s*$/;
+const RE_DONG_HO = /제?\s*(\d{1,4})\s*동\s*제?\s*(\d{1,4})\s*호/;
+const RE_DONG_ONLY = /제?\s*(\d{1,4})\s*동(?!\s*\d*\s*호)/;
 const RE_HO_ONLY = /제?\s*(\d{1,4})\s*호/;
-const RE_JE_DONG_ONLY = /제\s*(\d{1,4})\s*동/;
+const RE_FLOOR = /(지하\s*\d{1,3}|B\s*\d{1,2}|반지하|[지제]?\s*\d{1,3})\s*층/gi;
+const RE_ALPHA_DONG_HO = /(?:^|\s)([A-Za-z]|[가-힣])동\s*제?\s*(\d{1,4})\s*호/;
 function extractUnit(str) {
   let text = str, dong = null, ho = null;
+  text = text.replace(RE_FLOOR, " ");
   const pair = text.match(RE_DONG_HO);
   if (pair) {
     dong = pair[1];
     ho = pair[2];
     text = text.replace(RE_DONG_HO, " ");
   } else {
-    const hoOnly = text.match(RE_HO_ONLY);
-    if (hoOnly) {
-      ho = hoOnly[1];
-      text = text.replace(RE_HO_ONLY, " ");
-    }
-    const jeDong = text.match(RE_JE_DONG_ONLY);
-    if (jeDong) {
-      dong = jeDong[1];
-      text = text.replace(RE_JE_DONG_ONLY, " ");
+    const alpha = text.match(RE_ALPHA_DONG_HO);
+    if (alpha) {
+      dong = alpha[1];
+      ho = alpha[2];
+      text = text.replace(RE_ALPHA_DONG_HO, " ");
+    } else {
+      const dongOnly = text.match(RE_DONG_ONLY);
+      if (dongOnly) {
+        dong = dongOnly[1];
+        text = text.replace(RE_DONG_ONLY, " ");
+      }
+      const hoOnly = text.match(RE_HO_ONLY);
+      if (hoOnly) {
+        ho = hoOnly[1];
+        text = text.replace(RE_HO_ONLY, " ");
+      }
     }
   }
-  return { text, dong, ho };
+  return { text: text.replace(/\s+/g, " ").trim(), dong, ho };
+}
+function inferUnitFromNumbers(searchText, existing) {
+  if (existing.dong || existing.ho) return existing;
+  const m = searchText.match(/^(.*?)\s+(\d{1,4})\s*[-/]\s*(\d{1,4})\s*$/);
+  if (!m) return existing;
+  const head = m[1].trim();
+  if (JIBUN_CONTEXT.test(head)) return existing;
+  if (JIP_KEYWORDS.test(head)) {
+    return { dong: m[2], ho: m[3], text: head };
+  }
+  return existing;
+}
+function normalizeUnitInput(v) {
+  if (!v) return null;
+  const m = String(v).match(/\d{1,4}/);
+  return m ? m[0] : null;
 }
 function preprocess(raw) {
   if (typeof raw !== "string" || raw.trim() === "")
     return { cleaned: "", searchText: "", unit: { dong: null, ho: null } };
   let s = toHalfWidth(raw);
-  s = s.replace(/街/g, "\uAC00");
+  s = hanjaToHangul(s);
   s = s.replace(/[,·.]/g, " ");
-  s = s.replace(/[^\uAC00-\uD7A3a-zA-Z0-9\s-]/g, " ");
+  s = s.replace(/(\d)\s*의\s*(\d)/g, "$1-$2");
+  s = s.replace(/[()[\]{}]/g, " ");
+  s = s.replace(/[^\uAC00-\uD7A3a-zA-Z0-9\s\-/]/g, " ");
+  s = stripSuffixes(s);
+  s = splitAdminPrefix(s);
   s = s.replace(/산\s*(\d)/g, "\uC0B0 $1");
-  s = s.replace(/([가-힣])(\d+(?:-\d+)?)(?=\s|$)/g, "$1 $2");
+  s = s.replace(/([가-힣])(\d+(?:-\d+)?)(?=\s|$|\/)/g, "$1 $2");
   s = s.replace(/\s+/g, " ").trim();
   const cleaned = s;
-  const { text, dong, ho } = extractUnit(s);
-  return { cleaned, searchText: text.replace(/\s+/g, " ").trim(), unit: { dong, ho } };
+  let { text, dong, ho } = extractUnit(s);
+  const inferred = inferUnitFromNumbers(text, { dong, ho });
+  if (inferred.dong || inferred.ho) {
+    dong = inferred.dong;
+    ho = inferred.ho;
+    text = inferred.text ?? text;
+  }
+  text = text.replace(/\//g, " ").replace(/\s+/g, " ").trim();
+  return { cleaned, searchText: text, unit: { dong, ho } };
 }
 function fromJuso(item) {
   return {
@@ -59,6 +205,8 @@ function fromJuso(item) {
     jibunAddr: item.jibunAddr ?? null,
     bdMgtSn: item.bdMgtSn ?? null,
     bdNm: item.bdNm ?? "",
+    // juso bdKdcd: "1"=공동주택(아파트·연립·다세대), "0"=일반건물
+    isJip: item.bdKdcd === "1" || /아파트|빌라|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오/.test(item.bdNm ?? ""),
     source: "juso"
   };
 }
@@ -192,7 +340,8 @@ function resolve(candidates, pre) {
       bdMgtSn: c.bdMgtSn || null,
       unit,
       irosQuery: buildIrosQuery(c, unit),
-      source: c.source
+      source: c.source,
+      isJip: !!c.isJip
     };
   }
   const prefixLen = commonPrefixLen(deduped.map((c) => c.admCd));
@@ -769,8 +918,10 @@ function AddrRefineTestGui() {
     setRegResult(null);
     try {
       const q = encodeURIComponent(result.jibunAddr || result.irosQuery || "");
+      const d = result.unit?.dong ? `&dong=${encodeURIComponent(result.unit.dong)}` : "";
+      const h = result.unit?.ho ? `&ho=${encodeURIComponent(result.unit.ho)}` : "";
       const r = await fetch(
-        `${BRIDGE}/resolve?addr=${q}`,
+        `${BRIDGE}/resolve?addr=${q}${d}${h}`,
         { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
       );
       setRegResult(await r.json());
@@ -789,9 +940,11 @@ function AddrRefineTestGui() {
     for (let k = 0; k < targets.length; k++) {
       const { idx, row } = targets[k];
       const addr = row.result.jibunAddr || row.result.irosQuery || "";
+      const d = row.result.unit?.dong ? `&dong=${encodeURIComponent(row.result.unit.dong)}` : "";
+      const h = row.result.unit?.ho ? `&ho=${encodeURIComponent(row.result.unit.ho)}` : "";
       try {
         const r = await fetch(
-          `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}`,
+          `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}`,
           { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
         );
         const data = await r.json();
@@ -805,14 +958,34 @@ function AddrRefineTestGui() {
     setBatchRegBusy(false);
   }, [rows, BRIDGE, config.resolverKey]);
   const clients = mode === "mock" ? mockClients : makeRealClients(config.jusoKey, config.kakaoKey);
+  const [unitDong, setUnitDong] = useState("");
+  const [unitHo, setUnitHo] = useState("");
+  const [unitOpen, setUnitOpen] = useState(false);
   const runSingle = useCallback(async (raw) => {
     if (!raw.trim()) return;
     setBusy(true);
     const r = await refineAddress(raw, clients);
+    if (r?.unit?.dong) setUnitDong(r.unit.dong);
+    if (r?.unit?.ho) setUnitHo(r.unit.ho);
+    if (r?.status === "CONFIRMED" && r.isJip) setUnitOpen(true);
     setResult(r);
     setLastRaw(raw);
     setBusy(false);
   }, [clients]);
+  const applyUnit = useCallback((dongVal, hoVal) => {
+    const d = normalizeUnitInput(dongVal);
+    const h = normalizeUnitInput(hoVal);
+    setUnitDong(dongVal.replace(/[^\d]/g, ""));
+    setUnitHo(hoVal.replace(/[^\d]/g, ""));
+    setResult((prev) => {
+      if (!prev || prev.status !== "CONFIRMED") return prev;
+      const unit = { dong: d, ho: h };
+      const parts = [prev.jibunAddr || ""];
+      if (d) parts.push(`${d}\uB3D9`);
+      if (h) parts.push(`${h}\uD638`);
+      return { ...prev, unit, irosQuery: parts.filter(Boolean).join(" ").trim() };
+    });
+  }, []);
   const onRegionPick = useCallback(async (cand) => {
     const region = (cand.sidoSigungu || "").trim();
     const combined = lastRaw.includes(region) ? lastRaw : `${region} ${lastRaw}`;
@@ -1098,7 +1271,53 @@ function AddrRefineTestGui() {
       placeholder: "\uC8FC\uC18C\uB97C \uC544\uBB34 \uD615\uD0DC\uB85C\uB098 \uC785\uB825\uD558\uC138\uC694",
       style: { ...field("100%"), flex: 1, fontSize: 15 }
     }
-  ), /* @__PURE__ */ React.createElement("button", { onClick: () => runSingle(input), disabled: busy, style: { ...btnP, opacity: busy ? 0.6 : 1 } }, busy ? "\uCC98\uB9AC\uC911" : "\uC815\uC81C")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap", justifyContent: "center" } }, ["\uC11C\uC6B8\uFF0A\uAC15\uB0A8\uAD6C\uFF01\uD14C\uD5E4\uB780\uB85C\uFF12\uFF11\uFF12", "\uC2E0\uC815\uB3D9 100", "\uC911\uC559\uB3D9 50", "\uCCAD\uC8FC\uC2DC \uC0B0\uC131\uB3D9 \uC0B012-3", "\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC 101\uB3D9 1502\uD638", "\uC5C6\uB294\uC8FC\uC18C 999"].map((ex) => /* @__PURE__ */ React.createElement(
+  ), /* @__PURE__ */ React.createElement("button", { onClick: () => runSingle(input), disabled: busy, style: { ...btnP, opacity: busy ? 0.6 : 1 } }, busy ? "\uCC98\uB9AC\uC911" : "\uC815\uC81C")), /* @__PURE__ */ React.createElement("div", { style: { marginTop: 10 } }, /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: () => setUnitOpen((v) => !v),
+      style: {
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        color: result?.isJip ? C.cyan : C.dim,
+        fontSize: 12.5,
+        fontFamily: sans,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "4px 2px"
+      }
+    },
+    /* @__PURE__ */ React.createElement("span", { style: { transform: unitOpen ? "rotate(90deg)" : "none", transition: "transform .15s" } }, "\u25B8"),
+    "\uC0C1\uC138\uC8FC\uC18C (\uB3D9\xB7\uD638)",
+    result?.isJip && !unitOpen && /* @__PURE__ */ React.createElement("span", { style: {
+      fontSize: 10.5,
+      color: C.cyan,
+      background: `${C.cyan}1f`,
+      borderRadius: 4,
+      padding: "1px 6px"
+    } }, "\uC9D1\uD569\uAC74\uBB3C \xB7 \uC785\uB825 \uAD8C\uC7A5")
+  ), unitOpen && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 8, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim, minWidth: 20 } }, "\uB3D9"), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      value: unitDong,
+      onChange: (e) => applyUnit(e.target.value, unitHo),
+      inputMode: "numeric",
+      placeholder: "101",
+      maxLength: 4,
+      style: { ...field(80), textAlign: "center", fontFamily: mono }
+    }
+  )), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim, minWidth: 20 } }, "\uD638"), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      value: unitHo,
+      onChange: (e) => applyUnit(unitDong, e.target.value),
+      inputMode: "numeric",
+      placeholder: "1502",
+      maxLength: 4,
+      style: { ...field(80), textAlign: "center", fontFamily: mono }
+    }
+  )), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, color: C.faint } }, "\uC22B\uC790\uB9CC \uC785\uB825 (\uB3D9\xB7\uD638 \uAE00\uC790 \uBD88\uD544\uC694)"))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap", justifyContent: "center" } }, ["\uC11C\uC6B8\uFF0A\uAC15\uB0A8\uAD6C\uFF01\uD14C\uD5E4\uB780\uB85C\uFF12\uFF11\uFF12", "\uC2E0\uC815\uB3D9 100", "\uC911\uC559\uB3D9 50", "\uCCAD\uC8FC\uC2DC \uC0B0\uC131\uB3D9 \uC0B012-3", "\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC 101\uB3D9 1502\uD638", "\uC5C6\uB294\uC8FC\uC18C 999"].map((ex) => /* @__PURE__ */ React.createElement(
     "button",
     {
       key: ex,
@@ -1161,5 +1380,5 @@ function AddrRefineTestGui() {
   })))))))));
 }
 
-const _root = ReactDOM.createRoot(document.getElementById('root'));
+const _root = ReactDOM.createRoot(document.getElementById("root"));
 _root.render(React.createElement(AddrRefineTestGui));

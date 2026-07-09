@@ -44,10 +44,12 @@ class handler(BaseHTTPRequestHandler):
                                     "message": f"resolver import 실패: {_ERR}"})
         qs = parse_qs(urlparse(self.path).query)
         addr = (qs.get("addr", [""])[0]).strip()
+        dong = (qs.get("dong", [""])[0]).strip()
+        ho = (qs.get("ho", [""])[0]).strip()
         if not addr:
             return self._send(400, {"status": "ERROR", "message": "addr 파라미터 필요"})
         try:
-            r = resolve_one_api(addr)
+            r = resolve_one_api(addr, dong=dong, ho=ho)
             self._send(200, {
                 "address": r.address, "status": r.status, "unique_no": r.unique_no,
                 "candidates": r.candidates, "message": r.message,

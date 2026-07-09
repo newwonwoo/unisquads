@@ -50,15 +50,28 @@ BASE = "https://www.iros.go.kr"
 ENTRY = f"{BASE}/index.jsp"
 SEARCH_API = f"{BASE}/biz/Pr20ViaRlrgSrchCtrl/retrieveSmplSrchList.do"
 
+import re as _re_html
+_TAG_RE = _re_html.compile(r"<[^>]+>")
+
+
+def _strip_html(s: str) -> str:
+    """소재지 필드(real_indi_cont 등)에 섞인 <span> 태그 제거."""
+    if not s:
+        return ""
+    return _re_html.sub(_TAG_RE, "", str(s)).strip()
+
+
 # 응답 JSON 실측 구조 (2026-07 확인):
-#   { dataList: [ { pin_land: "110219961011400001"(18자리 무하이픈),
-#                   use_cls_cd: "현행", pin_mid_spe_yn: "Y", ... } ],
-#     paginationInfo: { totalRecordCount: 2 } }
-# pin_land 18자리 = 화면표시 고유번호 14자리 + 일련 4자리
-UNIQUE_KEY_CANDIDATES = ["pin_land", "pin", "real_pin", "realPin", "unique_no", "uniqueNo"]
-GUBUN_KEY_CANDIDATES = ["kind_nm", "kindNm", "kind_cls_nm", "부동산구분", "gubun"]
-STATE_KEY_CANDIDATES = ["use_cls_cd", "rgs_rec_stat", "rgsRecStat", "등기상태", "state"]
-SOJAE_KEY_CANDIDATES = ["real_indi_contents", "rd_addr_detail", "addr", "소재지", "sojae"]
+#   dataList[].pin_land        고유번호 18자리(무하이픈) → 앞14자리가 화면표시
+#   dataList[].real_indi_cont  소재지(HTML 태그 섞임)
+#   dataList[].build_name      건물명
+#   dataList[].buld_no_buld    동 번호,  buld_no_room 호 번호,  buld_no_floor 층
+#   dataList[].use_cls_cd      등기상태(현행/폐쇄)
+#   paginationInfo.totalRecordCount  총건수
+UNIQUE_KEY_CANDIDATES = ["pin_land", "pin", "real_pin", "realPin", "unique_no"]
+STATE_KEY_CANDIDATES = ["use_cls_cd", "rgs_rec_stat", "등기상태", "state"]
+SOJAE_KEY_CANDIDATES = ["real_indi_cont", "real_indi_cont_detail", "rd_addr", "rd_addr_detail", "addr"]
+BULDNM_KEY_CANDIDATES = ["build_name", "buld_name", "건물명"]
 
 # 화면표시 고유번호: 4-4-6 (하이픈) 또는 무하이픈 14~18자리
 UNIQUE_NO_HYPHEN_RE = re.compile(r"\b(\d{4})\s*-\s*(\d{4})\s*-\s*(\d{6})\b")
@@ -75,8 +88,9 @@ def _fmt_pin(raw: str) -> str:
     return raw  # 예외적 길이는 원본 유지
 
 
-def _build_payload(address: str) -> dict:
-    """정제주소 → 검색 API 요청 본문. 실측 파라미터 구조 그대로."""
+def _build_payload(address: str, dong: str = "", ho: str = "") -> dict:
+    """정제주소 → 검색 API 요청 본문. 실측 파라미터 구조 그대로.
+    동·호가 주어지면 buld_no_buld/buld_no_room에 넣어 특정 물건으로 좁힌다."""
     sido = normalize_sido(address)
     swrd = strip_sido(address, sido)
     return {
@@ -95,8 +109,8 @@ def _build_payload(address: str) -> dict:
         "admin_regn3": "",
         "lot_no": "",
         "buld_name": "",
-        "buld_no_buld": "",
-        "buld_no_room": "",
+        "buld_no_buld": str(dong or ""),   # 동 번호 (집합건물 특정)
+        "buld_no_room": str(ho or ""),     # 호 번호 (집합건물 특정)
         "rd_name": "",
         "rd_buld_no": "",
         "rd_buld_no2": "",
@@ -142,7 +156,7 @@ def _walk_records(obj):
 
 
 def _rec_to_cand(rec: dict) -> Optional[dict]:
-    """레코드 dict → 후보. pin_land(무하이픈) 우선, 없으면 하이픈/무하이픈 정규식."""
+    """레코드 dict → 후보. pin_land(무하이픈) 우선. 소재지 HTML 제거, 동·호·층 포함."""
     pin = _pick(rec, UNIQUE_KEY_CANDIDATES)
     uno = None
     if pin:
@@ -158,11 +172,20 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
                 uno = _fmt_pin(mr.group(1))
     if not uno:
         return None
+    sojae = _strip_html(_pick(rec, SOJAE_KEY_CANDIDATES))
+    buldnm = _pick(rec, BULDNM_KEY_CANDIDATES)
+    dong = str(rec.get("buld_no_buld", "") or "")
+    ho = str(rec.get("buld_no_room", "") or "")
+    floor = str(rec.get("buld_no_floor", "") or "")
+    # 집합건물이면 부동산구분을 "집합건물", 아니면 빈값(토지/건물은 목록에 따로)
+    gubun = "집합건물" if rec.get("pin_mid_spe_yn") == "Y" or ho else ""
     return {
         "unique_no": uno,
-        "gubun": _pick(rec, GUBUN_KEY_CANDIDATES),
+        "gubun": gubun,
         "state": _pick(rec, STATE_KEY_CANDIDATES),
-        "sojae": _pick(rec, SOJAE_KEY_CANDIDATES),
+        "sojae": sojae,
+        "buldnm": buldnm,
+        "dong": dong, "ho": ho, "floor": floor,
     }
 
 
@@ -219,11 +242,11 @@ def make_session() -> requests.Session:
 
 
 def resolve_one_api(address: str, session: Optional[requests.Session] = None,
-                    timeout: float = 20.0) -> ResolveResult:
-    """단일 주소 → 고유번호 (API 직결). 세션 재사용 가능."""
+                    dong: str = "", ho: str = "", timeout: float = 20.0) -> ResolveResult:
+    """단일 주소 → 고유번호 (API 직결). 동·호 주어지면 특정 물건으로 좁힘."""
     s = session or make_session()
     try:
-        payload = _build_payload(address)
+        payload = _build_payload(address, dong=dong, ho=ho)
         r = s.post(SEARCH_API, json=payload,
                    headers={"Content-Type": "application/json; charset=UTF-8"},
                    timeout=timeout)
