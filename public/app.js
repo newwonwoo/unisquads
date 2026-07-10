@@ -357,7 +357,8 @@ function resolve(candidates, pre) {
       roadAddr: c.roadAddr,
       bdNm: c.bdNm || null,
       pnu: buildPnu(c),
-      bdMgtSn: c.bdMgtSn || null
+      bdMgtSn: c.bdMgtSn || null,
+      isJip: !!c.isJip
     })),
     message: buildMessage(requireLevel, dongName, deduped)
   };
@@ -989,11 +990,30 @@ function AddrRefineTestGui() {
     });
   }, []);
   const onRegionPick = useCallback(async (cand) => {
+    if (cand.jibunAddr) {
+      const isJip = cand.isJip || !!(cand.bdNm && /아파트|빌라|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오|래미안|센트|아이파크|더샵|로즈빌|베르디움|엘크루|리슈빌|스위첸/.test(cand.bdNm));
+      setResult({
+        status: "CONFIRMED",
+        jibunAddr: cand.jibunAddr,
+        roadAddr: cand.roadAddr || null,
+        bdNm: cand.bdNm || null,
+        pnu: cand.pnu || null,
+        bdMgtSn: cand.bdMgtSn || null,
+        unit: {
+          dong: unitDong ? normalizeUnitInput(unitDong) : null,
+          ho: unitHo ? normalizeUnitInput(unitHo) : null
+        },
+        irosQuery: cand.jibunAddr,
+        source: "juso",
+        isJip
+      });
+      if (isJip) setUnitOpen(true);
+      return;
+    }
     const region = (cand.sidoSigungu || "").trim();
-    const combined = lastRaw.includes(region) ? lastRaw : `${region} ${lastRaw}`;
-    setInput(combined);
-    await runSingle(combined);
-  }, [lastRaw, runSingle]);
+    const base = lastRaw.replace(region, "").trim();
+    await runSingle(`${region} ${base}`.replace(/\s+/g, " ").trim());
+  }, [lastRaw, runSingle, unitDong, unitHo]);
   const onFile = useCallback(async (e) => {
     setFileErr("");
     const file = e.target.files?.[0];
