@@ -46,10 +46,11 @@ class handler(BaseHTTPRequestHandler):
         addr = (qs.get("addr", [""])[0]).strip()
         dong = (qs.get("dong", [""])[0]).strip()
         ho = (qs.get("ho", [""])[0]).strip()
+        bdnm = (qs.get("bdnm", [""])[0]).strip()
         if not addr:
             return self._send(400, {"status": "ERROR", "message": "addr 파라미터 필요"})
         try:
-            r = resolve_one_api(addr, dong=dong, ho=ho)
+            r = resolve_one_api(addr, dong=dong, ho=ho, buld_name=bdnm)
             self._send(200, {
                 "address": r.address, "status": r.status, "unique_no": r.unique_no,
                 "candidates": r.candidates, "message": r.message,

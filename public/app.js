@@ -920,8 +920,9 @@ function AddrRefineTestGui() {
       const q = encodeURIComponent(result.jibunAddr || result.irosQuery || "");
       const d = result.unit?.dong ? `&dong=${encodeURIComponent(result.unit.dong)}` : "";
       const h = result.unit?.ho ? `&ho=${encodeURIComponent(result.unit.ho)}` : "";
+      const b = result.bdNm ? `&bdnm=${encodeURIComponent(result.bdNm)}` : "";
       const r = await fetch(
-        `${BRIDGE}/resolve?addr=${q}${d}${h}`,
+        `${BRIDGE}/resolve?addr=${q}${d}${h}${b}`,
         { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
       );
       setRegResult(await r.json());
@@ -942,9 +943,10 @@ function AddrRefineTestGui() {
       const addr = row.result.jibunAddr || row.result.irosQuery || "";
       const d = row.result.unit?.dong ? `&dong=${encodeURIComponent(row.result.unit.dong)}` : "";
       const h = row.result.unit?.ho ? `&ho=${encodeURIComponent(row.result.unit.ho)}` : "";
+      const b = row.result.bdNm ? `&bdnm=${encodeURIComponent(row.result.bdNm)}` : "";
       try {
         const r = await fetch(
-          `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}`,
+          `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}${b}`,
           { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
         );
         const data = await r.json();

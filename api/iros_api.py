@@ -88,11 +88,52 @@ def _fmt_pin(raw: str) -> str:
     return raw  # 예외적 길이는 원본 유지
 
 
-def _build_payload(address: str, dong: str = "", ho: str = "") -> dict:
-    """정제주소 → 검색 API 요청 본문. 실측 파라미터 구조 그대로.
-    동·호가 주어지면 buld_no_buld/buld_no_room에 넣어 특정 물건으로 좁힌다."""
+def _extract_sigungu(address: str) -> str:
+    """정제주소에서 시군구 토큰 추출 (강남구, 성남시 분당구 등).
+    admin_regn1=all이므로 swrd에 시군구를 넣어 지역 특정."""
     sido = normalize_sido(address)
-    swrd = strip_sido(address, sido)
+    base = strip_sido(address, sido)  # 시도 뗀 나머지
+    # 앞에서부터 '시/군/구'로 끝나는 토큰들을 시군구로 수집 (성남시 분당구 = 2토큰)
+    tokens = base.split()
+    sigungu = []
+    for t in tokens:
+        if t.endswith(("시", "군", "구")):
+            sigungu.append(t)
+        elif sigungu:
+            break  # 시군구 뒤 첫 비-시군구 토큰에서 중단
+    return " ".join(sigungu)
+
+
+def _build_swrd(address: str, dong: str = "", ho: str = "", buld_name: str = "") -> str:
+    """검색어(swrd) 조립. IROS는 '시군구 건물명 N동 N호'를 통째로 넣으면 특정(실측 확인).
+    admin_regn1=all이므로 시군구를 swrd에 포함해 흔한 건물명의 타지역 혼입 방지."""
+    sido = normalize_sido(address)
+    base = strip_sido(address, sido)  # 시도 뗀 지번주소
+    parts = []
+    if buld_name:
+        # 시군구 + 건물명 (흔한 건물명이 타 지역에도 있을 때 지역으로 좁힘)
+        sigungu = _extract_sigungu(address)
+        if sigungu:
+            parts.append(sigungu)
+        parts.append(buld_name.strip())
+    else:
+        parts.append(base)  # 건물명 없으면 지번 전체(시군구 포함)
+    if dong:
+        d = re.sub(r"\D", "", str(dong))
+        if d:
+            parts.append(f"{d}동")
+    if ho:
+        h = re.sub(r"\D", "", str(ho))
+        if h:
+            parts.append(f"{h}호")
+    return " ".join(parts).strip()
+
+
+def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "") -> dict:
+    """정제주소 → 검색 API 요청 본문.
+    핵심(실측): swrd에 '건물명 N동 N호'를 통째로 넣으면 IROS가 1건 특정.
+    동·호를 buld_no_buld/room 별도필드로 쪼개지 않고 검색어 문자열에 자연어처럼 넣음."""
+    swrd = _build_swrd(address, dong=dong, ho=ho, buld_name=buld_name)
     return {
         "conn_menu_cls_cd": "01",
         "prgs_mode_cls_cd": "01",
@@ -104,19 +145,19 @@ def _build_payload(address: str, dong: str = "", ho: str = "") -> dict:
         "kind_cls": "all",        # 부동산구분 전체
         "land_bing_yn": "",
         "rgs_rec_stat": "현행",
-        "admin_regn1": sido or "",
+        "admin_regn1": "all",     # 시/도 코드 매칭 회피(강원특별자치도 등 명칭변경 안전). swrd의 시군구로 지역 특정
         "admin_regn2": "",
         "admin_regn3": "",
         "lot_no": "",
-        "buld_name": "",
-        "buld_no_buld": str(dong or ""),   # 동 번호 (집합건물 특정)
-        "buld_no_room": str(ho or ""),     # 호 번호 (집합건물 특정)
+        "buld_name": "",          # swrd에 건물명 포함하므로 별도 필드는 비움
+        "buld_no_buld": "",       # swrd에 동 포함하므로 비움
+        "buld_no_room": "",       # swrd에 호 포함하므로 비움
         "rd_name": "",
         "rd_buld_no": "",
         "rd_buld_no2": "",
         "issue_cls": "5",
         "pageIndex": "",
-        "pageUnit": 10,
+        "pageUnit": 10,          # 사람과 동일하게 10건씩 (100은 자동화로 티남)
         "cmort_flag": "",
         "kap_seq_flag": "",
         "trade_seq_flag": "",
@@ -241,34 +282,74 @@ def make_session() -> requests.Session:
     return s
 
 
+def _match_unit(c, dong, ho):
+    """레코드가 입력 동·호와 일치하는지. 동·호 없는 레코드(대지권)는 제외."""
+    cd = re.sub(r"\D", "", str(c.get("dong", "")))
+    ch = re.sub(r"\D", "", str(c.get("ho", "")))
+    want_d = re.sub(r"\D", "", str(dong))
+    want_h = re.sub(r"\D", "", str(ho))
+    if want_d and (not cd or cd != want_d):
+        return False
+    if want_h and (not ch or ch != want_h):
+        return False
+    return True
+
+
 def resolve_one_api(address: str, session: Optional[requests.Session] = None,
-                    dong: str = "", ho: str = "", timeout: float = 20.0) -> ResolveResult:
-    """단일 주소 → 고유번호 (API 직결). 동·호 주어지면 특정 물건으로 좁힘."""
+                    dong: str = "", ho: str = "", buld_name: str = "",
+                    timeout: float = 20.0) -> ResolveResult:
+    """단일 주소 → 고유번호 (API 직결).
+    동·호+건물명을 넣어 IROS가 1건으로 특정. 한 지번에 건물 여러개면 건물명이 결정적.
+    건물명 넣어 0건이면(표기 불일치 가능) 건물명 빼고 재시도(안전장치)."""
     s = session or make_session()
-    try:
-        payload = _build_payload(address, dong=dong, ho=ho)
+
+    def _query(bname):
+        payload = _build_payload(address, dong=dong, ho=ho, buld_name=bname)
         r = s.post(SEARCH_API, json=payload,
                    headers={"Content-Type": "application/json; charset=UTF-8"},
                    timeout=timeout)
         if r.status_code != 200:
-            return ResolveResult(address, "ERROR",
-                                 message=f"HTTP {r.status_code} (API 직결 실패, RPA 폴백 권장)")
+            return None, r.status_code
         try:
-            data = r.json()
+            return r.json(), 200
         except ValueError:
-            # JSON 아님 → 텍스트 정규식 폴백
-            data = {"_raw": r.text}
+            return {"_raw": r.text}, 200
+
+    try:
+        # 1차: 건물명 포함 (건물 여러개일 때 특정)
+        data, code = _query(buld_name)
+        if data is None:
+            return ResolveResult(address, "ERROR",
+                                 message=f"HTTP {code} (API 직결 실패, RPA 폴백 권장)")
         cands = _parse_json_response(data)
+
+        # 건물명 넣었는데 0건이면(표기 불일치) → 건물명 빼고 재시도
+        if buld_name and len(cands) == 0:
+            data, code = _query("")
+            if data is not None:
+                cands = _parse_json_response(data)
+
+        # 동·호 정확 매칭 필터 (대지권·다른동 제외)
+        if (dong or ho) and cands:
+            filtered = [c for c in cands if _match_unit(c, dong, ho)]
+            if filtered:
+                cands = filtered
+
         if len(cands) == 0:
             return ResolveResult(address, "NOT_FOUND",
                                  message="고유번호 없음(API). 주소 정밀도/미등록 확인.")
         if len(cands) == 1:
             c = cands[0]
-            desc = " ".join(filter(None, [c["gubun"], c["state"]]))
+            desc = " ".join(filter(None, [c.get("gubun", ""), c.get("state", ""),
+                                          (c.get("dong") and f"{c['dong']}동") or "",
+                                          (c.get("ho") and f"{c['ho']}호") or ""]))
             return ResolveResult(address, "RESOLVED", unique_no=c["unique_no"],
-                                 candidates=cands, message=desc or c["sojae"])
+                                 candidates=cands, message=desc.strip())
+        note = ""
+        if ho and not any(_match_unit(c, dong, ho) for c in cands):
+            note = f" (입력한 {ho}호 미매칭 — 동·호 확인 필요)"
         return ResolveResult(address, "MULTIPLE", candidates=cands,
-                             message=f"{len(cands)}건(토지/건물 등).")
+                             message=f"{len(cands)}건{note}")
     except requests.Timeout:
         return ResolveResult(address, "ERROR", message="시간초과(API 직결)")
     except Exception as e:
