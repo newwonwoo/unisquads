@@ -1,5 +1,5 @@
 if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 function toHalfWidth(str) {
   return str.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 65248)).replace(/\u3000/g, " ");
 }
@@ -442,6 +442,71 @@ const C = {
 };
 const sans = "'Pretendard Variable',Pretendard,-apple-system,'Malgun Gothic',sans-serif";
 const mono = "'JetBrains Mono','SF Mono',Consolas,monospace";
+const IDB_NAME = "addr-refine";
+const IDB_STORE = "batch";
+function idbOpen() {
+  return new Promise((resolve2, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE))
+        db.createObjectStore(IDB_STORE, { keyPath: "key" });
+    };
+    req.onsuccess = () => resolve2(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, value) {
+  try {
+    const db = await idbOpen();
+    return await new Promise((resolve2, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put({ key, value, ts: Date.now() });
+      tx.oncomplete = () => resolve2(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    return false;
+  }
+}
+async function idbGet(key) {
+  try {
+    const db = await idbOpen();
+    return await new Promise((resolve2) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const r = tx.objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve2(r.result?.value ?? null);
+      r.onerror = () => resolve2(null);
+    });
+  } catch {
+    return null;
+  }
+}
+async function idbDel(key) {
+  try {
+    const db = await idbOpen();
+    return await new Promise((resolve2) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).delete(key);
+      tx.oncomplete = () => resolve2(true);
+      tx.onerror = () => resolve2(false);
+    });
+  } catch {
+    return false;
+  }
+}
+const BATCH_KEY = "rows-progress";
+const REG_LABEL = {
+  RESOLVED: "\uC870\uD68C\uC644\uB8CC",
+  REG_MULTI: "\uBCF5\uC218\uACB0\uACFC",
+  REG_NOT_FOUND: "\uAC80\uC0C9\uACB0\uACFC\uC5C6\uC74C",
+  REG_SESSION_ERROR: "\uC138\uC158\uC624\uB958",
+  REG_RATE_LIMIT: "\uC694\uCCAD\uC81C\uD55C",
+  REG_PARSE_ERROR: "\uD30C\uC2F1\uC624\uB958",
+  REG_HTTP_ERROR: "HTTP\uC624\uB958",
+  REG_TIMEOUT: "\uC2DC\uAC04\uCD08\uACFC",
+  REG_ERROR: "\uC870\uD68C\uC624\uB958"
+};
 function CadastralBackdrop() {
   const digitCols = [
     { left: "3%", d: "1168010100", dur: 52 },
@@ -733,6 +798,38 @@ function CodeLine({ label, digits, source, value, color, muted }) {
     letterSpacing: "0.04em"
   } }, source));
 }
+function UnitPicker({ data, onPick, onClose }) {
+  const units = data?.units || [];
+  const hasDong = units.some((u) => u.dong);
+  const dongs = hasDong ? [...new Set(units.map((u) => u.dong).filter(Boolean))] : [];
+  const [sel, setSel] = useState(dongs.length === 1 ? dongs[0] : null);
+  const hoList = hasDong ? units.filter((u) => u.dong === sel) : units;
+  const btn = (active) => ({
+    padding: "9px 4px",
+    borderRadius: 8,
+    cursor: "pointer",
+    background: active ? `${C.cyan}22` : "#0F1420",
+    border: `1px solid ${active ? C.cyan : "#1E2636"}`,
+    color: active ? C.cyan : C.ink,
+    fontSize: 13,
+    fontFamily: mono,
+    fontWeight: active ? 700 : 500,
+    transition: "all .12s"
+  });
+  return /* @__PURE__ */ React.createElement("div", { style: {
+    marginTop: 12,
+    padding: 16,
+    borderRadius: 12,
+    background: "#0C111B",
+    border: `1px solid ${C.cyan}33`
+  } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 } }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { style: { fontSize: 14, fontWeight: 700, color: C.ink, margin: 0 } }, "\u{1F3E2} ", data.name || "\uC138\uB300 \uC120\uD0DD"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.dim, margin: "4px 0 0" } }, "\uC5EC\uB7EC \uC138\uB300\uAC00 \uC788\uC5B4\uC694. \uD574\uB2F9 \uB3D9\xB7\uD638\uB97C \uACE8\uB77C\uC8FC\uC138\uC694.")), onClose && /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: {
+    background: "none",
+    border: "none",
+    color: C.faint,
+    cursor: "pointer",
+    fontSize: 16
+  } }, "\u2715")), hasDong && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 12 } }, /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.dim, margin: "0 0 6px" } }, "\uB3D9 \uC120\uD0DD"), /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(64px, 1fr))", gap: 6 } }, dongs.map((d) => /* @__PURE__ */ React.createElement("button", { key: d, style: btn(sel === d), onClick: () => setSel(d) }, d, "\uB3D9")))), (!hasDong || sel) && /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.dim, margin: "0 0 6px" } }, "\uD638 \uC120\uD0DD", hasDong ? ` (${sel}\uB3D9)` : "", " \xB7 ", hoList.length, "\uC138\uB300"), /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(64px, 1fr))", gap: 6, maxHeight: 240, overflowY: "auto" } }, hoList.map((u, i) => /* @__PURE__ */ React.createElement("button", { key: i, style: btn(false), onClick: () => onPick(u) }, u.ho, "\uD638")))));
+}
 function ResultCard({ r, onRegionPick, bridgeUp, reg, regBusy, onLookup }) {
   if (!r) return null;
   return /* @__PURE__ */ React.createElement("div", { className: "result-in", style: {
@@ -789,7 +886,7 @@ function ResultCard({ r, onRegionPick, bridgeUp, reg, regBusy, onLookup }) {
     letterSpacing: "0.1em",
     textShadow: `0 0 14px ${C.ok}55`,
     marginBottom: 6
-  } }, reg.unique_no), reg?.status === "MULTIPLE" && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: C.warn, marginBottom: 4 } }, reg.candidates.length, "\uAC74 \u2014 \uC18C\uC7AC\uC9C0\uB85C \uAD6C\uBD84"), reg.candidates.map((c, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontFamily: mono, fontSize: 12.5, color: C.ink } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, c.unique_no), /* @__PURE__ */ React.createElement("span", { style: { color: C.dim, marginLeft: 8 } }, c.sojae)))), reg && !["RESOLVED", "MULTIPLE"].includes(reg.status) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: C.err, marginBottom: 6 } }, reg.status, " \u2014 ", reg.message), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, bridgeUp ? /* @__PURE__ */ React.createElement(
+  } }, reg.unique_no), reg?.status === "REG_MULTI" && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: C.warn, marginBottom: 4 } }, reg.candidates.length, "\uAC74 \u2014 \uC18C\uC7AC\uC9C0\uB85C \uAD6C\uBD84"), reg.candidates.map((c, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontFamily: mono, fontSize: 12.5, color: C.ink } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, c.unique_no), /* @__PURE__ */ React.createElement("span", { style: { color: C.dim, marginLeft: 8 } }, c.sojae)))), reg && !["RESOLVED", "REG_MULTI"].includes(reg.status) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: C.err, marginBottom: 6 } }, REG_LABEL[reg.status] || reg.status, " \u2014 ", reg.message), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, bridgeUp ? /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: onLookup,
@@ -862,6 +959,29 @@ function AddrRefineTestGui() {
       } catch {
       }
     })();
+    (async () => {
+      const saved = await idbGet(BATCH_KEY);
+      if (saved && Array.isArray(saved) && saved.length > 0) {
+        const refined = saved.filter((r) => r.result).length;
+        const looked = saved.filter((r) => r.reg).length;
+        if (refined > 0 || looked > 0) {
+          setSavedProgress({ count: saved.length, refined, looked });
+        }
+      }
+    })();
+  }, []);
+  const resumeProgress = useCallback(async () => {
+    const saved = await idbGet(BATCH_KEY);
+    if (saved) {
+      setRows(saved);
+      setBatchDone(saved.filter((r) => r.result).length);
+      setTab("batch");
+    }
+    setSavedProgress(null);
+  }, []);
+  const discardProgress = useCallback(async () => {
+    await idbDel(BATCH_KEY);
+    setSavedProgress(null);
   }, []);
   const saveConfig = useCallback(async (next) => {
     try {
@@ -892,6 +1012,17 @@ function AddrRefineTestGui() {
   const [regResult, setRegResult] = useState(null);
   const [batchRegBusy, setBatchRegBusy] = useState(false);
   const [batchRegDone, setBatchRegDone] = useState(0);
+  const [batchTotal, setBatchTotal] = useState(0);
+  const [savedProgress, setSavedProgress] = useState(null);
+  const [irosHealth, setIrosHealth] = useState({ bad: 0, total: 0, lastCode: "" });
+  const recordRegHealth = useCallback((status) => {
+    const SYSTEM_BAD = ["REG_PARSE_ERROR", "REG_HTTP_ERROR", "REG_SESSION_ERROR", "REG_RATE_LIMIT"];
+    setIrosHealth((h) => {
+      const total = h.total + 1;
+      const bad = SYSTEM_BAD.includes(status) ? h.bad + 1 : 0;
+      return { bad, total, lastCode: status };
+    });
+  }, []);
   useEffect(() => {
     let alive = true;
     const ping = async () => {
@@ -926,44 +1057,103 @@ function AddrRefineTestGui() {
         `${BRIDGE}/resolve?addr=${q}${d}${h}${b}`,
         { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
       );
-      setRegResult(await r.json());
+      const data = await r.json();
+      setRegResult(data);
+      recordRegHealth(data.status);
     } catch {
       setRegResult({ status: "ERROR", message: "\uBE0C\uB9AC\uC9C0 \uC751\uB2F5 \uC5C6\uC74C \u2014 \uBE0C\uB9AC\uC9C0 \uC8FC\uC18C/\uC2E4\uD589 \uC0C1\uD0DC\uB97C \uD655\uC778\uD558\uC138\uC694." });
+      recordRegHealth("REG_HTTP_ERROR");
     } finally {
       setRegBusy(false);
     }
-  }, [result, BRIDGE, config.resolverKey]);
+  }, [result, BRIDGE, config.resolverKey, recordRegHealth]);
+  const [batchStop, setBatchStop] = useState(false);
+  const batchStopRef = useRef(false);
   const lookupBatchUniqueNo = useCallback(async () => {
     const targets = rows.map((row, idx) => ({ idx, row })).filter(({ row }) => row.result?.status === "CONFIRMED");
     if (targets.length === 0) return;
     setBatchRegBusy(true);
     setBatchRegDone(0);
+    setBatchStop(false);
+    batchStopRef.current = false;
     const next = [...rows];
-    for (let k = 0; k < targets.length; k++) {
-      const { idx, row } = targets[k];
+    const cache = /* @__PURE__ */ new Map();
+    const keyOf = (row) => {
+      const p = row.result.pnu || row.result.jibunAddr || "";
+      const d = row.result.unit?.dong || "";
+      const h = row.result.unit?.ho || "";
+      return `${p}|${d}|${h}`;
+    };
+    const groups = /* @__PURE__ */ new Map();
+    for (const t of targets) {
+      const k = keyOf(t.row);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(t);
+    }
+    const uniqueKeys = [...groups.keys()];
+    setBatchTotal(uniqueKeys.length);
+    for (let g = 0; g < uniqueKeys.length; g++) {
+      if (batchStopRef.current) break;
+      const k = uniqueKeys[g];
+      const members = groups.get(k);
+      const prevReg = members[0].row.reg;
+      const retryable = prevReg && ["REG_SESSION_ERROR", "REG_RATE_LIMIT", "REG_TIMEOUT", "REG_HTTP_ERROR", "REG_ERROR", "ERROR"].includes(prevReg.status);
+      if (prevReg && !retryable) {
+        setBatchRegDone(g + 1);
+        continue;
+      }
+      const { row } = members[0];
       const addr = row.result.jibunAddr || row.result.irosQuery || "";
       const d = row.result.unit?.dong ? `&dong=${encodeURIComponent(row.result.unit.dong)}` : "";
       const h = row.result.unit?.ho ? `&ho=${encodeURIComponent(row.result.unit.ho)}` : "";
       const b = row.result.bdNm ? `&bdnm=${encodeURIComponent(row.result.bdNm)}` : "";
-      try {
-        const r = await fetch(
-          `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}${b}`,
-          { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
-        );
-        const data = await r.json();
-        next[idx] = { ...row, reg: data };
-      } catch {
-        next[idx] = { ...row, reg: { status: "ERROR", message: "\uBE0C\uB9AC\uC9C0 \uC751\uB2F5 \uC5C6\uC74C" } };
+      const now = (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ");
+      let data;
+      const regCacheKey = `reg:${k}`;
+      const cached = await idbGet(regCacheKey);
+      if (cached && cached.status === "RESOLVED") {
+        data = cached;
+      } else {
+        try {
+          const r = await fetch(
+            `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}${b}`,
+            { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
+          );
+          data = await r.json();
+          data.at = now;
+          if (data.status === "RESOLVED") await idbSet(regCacheKey, data);
+        } catch {
+          data = { status: "REG_ERROR", message: "\uBE0C\uB9AC\uC9C0 \uC751\uB2F5 \uC5C6\uC74C", at: now };
+        }
       }
-      setBatchRegDone(k + 1);
-      setRows([...next]);
+      for (const m of members) {
+        next[m.idx] = { ...next[m.idx], reg: data };
+      }
+      recordRegHealth(data.status);
+      setBatchRegDone(g + 1);
+      if (g % 50 === 0) {
+        setRows([...next]);
+        await idbSet(BATCH_KEY, next);
+      }
+      if (g < uniqueKeys.length - 1 && !batchStopRef.current) {
+        await new Promise((res) => setTimeout(res, 1e3));
+      }
     }
+    setRows([...next]);
+    await idbSet(BATCH_KEY, next);
     setBatchRegBusy(false);
   }, [rows, BRIDGE, config.resolverKey]);
+  const stopBatch = useCallback(() => {
+    batchStopRef.current = true;
+    setBatchStop(true);
+  }, []);
   const clients = mode === "mock" ? mockClients : makeRealClients(config.jusoKey, config.kakaoKey);
   const [unitDong, setUnitDong] = useState("");
   const [unitHo, setUnitHo] = useState("");
   const [unitOpen, setUnitOpen] = useState(false);
+  const [unitList, setUnitList] = useState(null);
+  const [unitBusy, setUnitBusy] = useState(false);
+  const [unitErr, setUnitErr] = useState("");
   const runSingle = useCallback(async (raw) => {
     if (!raw.trim()) return;
     setBusy(true);
@@ -989,6 +1179,48 @@ function AddrRefineTestGui() {
       return { ...prev, unit, irosQuery: parts.filter(Boolean).join(" ").trim() };
     });
   }, []);
+  const findUnits = useCallback(async () => {
+    if (!result?.pnu) return;
+    setUnitBusy(true);
+    setUnitErr("");
+    setUnitList(null);
+    try {
+      const cacheKey = `units:${result.pnu}`;
+      let data = await idbGet(cacheKey);
+      if (!data) {
+        const r = await fetch(
+          `${BRIDGE}/units?pnu=${encodeURIComponent(result.pnu)}`,
+          { signal: AbortSignal.timeout(15e3) }
+        );
+        data = await r.json();
+        if (data.ok) await idbSet(cacheKey, data);
+      }
+      if (!data.ok) {
+        setUnitErr(data.error || "\uC138\uB300 \uBAA9\uB85D\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC5B4\uC694.");
+        return;
+      }
+      if (data.aptType) setResult((prev) => prev ? { ...prev, aptType: data.aptType } : prev);
+      if (data.count === 0) {
+        setUnitErr("\uB4F1\uB85D\uB41C \uC138\uB300 \uC815\uBCF4\uAC00 \uC5C6\uC5B4\uC694. \uB3D9\xB7\uD638\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
+        return;
+      }
+      if (data.single) {
+        const u = data.units[0];
+        applyUnit(u.dong || "", u.ho || "");
+        return;
+      }
+      setUnitList({ name: data.name, units: data.units });
+    } catch {
+      setUnitErr("\uC138\uB300 \uC870\uD68C \uC2E4\uD328 \u2014 \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694.");
+    } finally {
+      setUnitBusy(false);
+    }
+  }, [result, BRIDGE, applyUnit]);
+  const onUnitPick = useCallback((u) => {
+    applyUnit(u.dong || "", u.ho || "");
+    setUnitList(null);
+    setUnitOpen(true);
+  }, [applyUnit]);
   const onRegionPick = useCallback(async (cand) => {
     if (cand.jibunAddr) {
       const isJip = cand.isJip || !!(cand.bdNm && /아파트|빌라|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오|래미안|센트|아이파크|더샵|로즈빌|베르디움|엘크루|리슈빌|스위첸/.test(cand.bdNm));
@@ -1038,12 +1270,15 @@ function AddrRefineTestGui() {
         extraHeaders2 = Array.from({ length: maxExtra }, (_, i) => `\uC5F4${i + 2}`);
       }
       setExtraHeaders(extraHeaders2);
-      setRows(body.map((r) => ({
+      const newRows = body.map((r) => ({
         raw: String(r[0]).trim(),
         extra: extraHeaders2.map((_, i) => r[i + 1] ?? ""),
         result: null
-      })));
+      }));
+      setRows(newRows);
       setBatchDone(0);
+      await idbDel(BATCH_KEY);
+      setSavedProgress(null);
     } catch {
       setFileErr("\uD30C\uC77C\uC744 \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. xlsx \uB610\uB294 csv \uD615\uC2DD\uC778\uC9C0 \uD655\uC778\uD574\uC8FC\uC138\uC694.");
     } finally {
@@ -1052,66 +1287,219 @@ function AddrRefineTestGui() {
   }, []);
   const runBatch = useCallback(async () => {
     setBatchBusy(true);
-    setBatchDone(0);
-    const next = [];
-    for (let i = 0; i < rows.length; i++) {
-      const r = await refineAddress(rows[i].raw, clients);
-      next.push({ raw: rows[i].raw, extra: rows[i].extra, result: r });
-      setBatchDone(i + 1);
-      setRows([...next, ...rows.slice(i + 1)]);
+    setBatchStop(false);
+    batchStopRef.current = false;
+    const next = [...rows];
+    let done = next.filter((r) => r.result).length;
+    setBatchDone(done);
+    for (let i = 0; i < next.length; i++) {
+      if (batchStopRef.current) break;
+      if (next[i].result) continue;
+      const r = await refineAddress(next[i].raw, clients);
+      next[i] = { ...next[i], result: r };
+      done++;
+      setBatchDone(done);
+      if (done % 100 === 0) {
+        setRows([...next]);
+        await idbSet(BATCH_KEY, next);
+      }
     }
+    setRows([...next]);
+    await idbSet(BATCH_KEY, next);
     setBatchBusy(false);
   }, [rows, clients]);
-  const downloadXlsx = useCallback(() => {
-    const head = ["\uC785\uB825\uC8FC\uC18C", "\uC0C1\uD0DC", "\uC9C0\uBC88\uC8FC\uC18C", "\uB3C4\uB85C\uBA85\uC8FC\uC18C", "PNU", "\uAC74\uBB3C\uAD00\uB9AC\uBC88\uD638", "\uB3D9", "\uD638", "\uAC80\uC0C9\uB2E8\uACC4", "\uBE44\uACE0", "\uD6C4\uBCF4\uC0C1\uC138", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638", "\uB4F1\uAE30\uC870\uD68C", ...extraHeaders];
-    const aoa = [head];
-    for (const row of rows) {
-      const r = row.result;
-      const candDetail = r?.status === "AMBIGUOUS" ? r.candidates.map((c) => c.sidoSigungu).join(" | ") : "";
+  const buildRecords = useCallback(() => {
+    const recs = rows.map((row) => {
+      const r = row.result || {};
       const reg = row.reg;
-      const regNo = reg?.status === "RESOLVED" ? reg.unique_no ?? "" : reg?.status === "MULTIPLE" ? (reg.candidates || []).map((c) => c.unique_no).join(" | ") : "";
-      const regStatus = reg ? reg.status : "";
-      const base = !r ? [row.raw, "\uBBF8\uC2E4\uD589", "", "", "", "", "", "", "", "", ""] : [
-        row.raw,
-        r.status,
-        r.jibunAddr ?? "",
-        r.roadAddr ?? "",
-        r.pnu ?? "",
-        r.bdMgtSn ?? "",
-        r.unit?.dong ?? "",
-        r.unit?.ho ?? "",
-        r.searchLevel ?? "",
-        r.status === "AMBIGUOUS" ? `\uD6C4\uBCF4${r.candidates.length}\uAC74:${r.requireLevel}` : r.reason ?? "",
-        candDetail
-      ];
-      aoa.push([...base, regNo, regStatus, ...row.extra ?? []]);
+      const jibun = r.jibunAddr || "";
+      const sggM = jibun.match(/(?:특별시|광역시|특별자치시|특별자치도|도)\s+([가-힣]+(?:시|군|구)(?:\s+[가-힣]+구)?)/);
+      const sigungu = sggM ? sggM[1] : "";
+      let gubun = "";
+      if (reg?.status === "RESOLVED" && reg.candidates?.[0]) gubun = reg.candidates[0].gubun || "";
+      else if (reg?.candidates?.[0]) gubun = reg.candidates[0].gubun || "";
+      if (!gubun && r.isJip) gubun = "\uC9D1\uD569\uAC74\uBB3C";
+      const aptType = r.aptType || "";
+      const regNo = reg?.status === "RESOLVED" ? reg.unique_no || "" : "";
+      const pnu = r.pnu || "";
+      const pk = regNo || (pnu ? `${pnu}|${r.unit?.dong || ""}|${r.unit?.ho || ""}` : "");
+      let failCode = "";
+      const okStatus = r.status === "\uD655\uC815" || r.status === "CONFIRMED";
+      if (!okStatus) {
+        failCode = r.status === "AMBIGUOUS" ? "\uC8FC\uC18C\uD6C4\uBCF4\uBCF5\uC218" : r.status === "FAILED" ? "\uC8FC\uC18C\uBBF8\uBC1C\uACAC" : "";
+      } else if (reg && reg.status !== "RESOLVED") {
+        failCode = REG_LABEL[reg.status] || reg.status;
+      }
+      const addrSrc = r.source === "kakao" ? "\uCE74\uCE74\uC624\uD3F4\uBC31" : r.searchLevel === "L2" ? "JUSO\uC7AC\uAC80\uC0C9" : "JUSO\uC6D0\uBB38";
+      const unitSrc = r.unit?.dong || r.unit?.ho ? r.aptType ? "VWorld\uC120\uD0DD" : "\uC9C1\uC811\uC785\uB825" : "";
+      return {
+        raw: row.raw,
+        status: r.status || "\uBBF8\uC2E4\uD589",
+        sigungu,
+        gubun,
+        aptType,
+        jibun,
+        road: r.roadAddr || "",
+        dong: r.unit?.dong || "",
+        ho: r.unit?.ho || "",
+        pnu,
+        regNo,
+        regStatus: reg?.status || "",
+        pk,
+        failCode,
+        addrSrc,
+        unitSrc,
+        lookupAt: reg?.at || (reg ? (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ") : ""),
+        note: okStatus ? failCode || "" : r.reason || failCode || "",
+        extra: row.extra || []
+      };
+    });
+    recs.sort((a, b) => (a.sigungu || "\uD7A3").localeCompare(b.sigungu || "\uD7A3") || (a.gubun || "\uD7A3").localeCompare(b.gubun || "\uD7A3") || (a.aptType || "\uD7A3").localeCompare(b.aptType || "\uD7A3") || (a.regNo || "").localeCompare(b.regNo || ""));
+    const groupNo = /* @__PURE__ */ new Map();
+    let gid = 0;
+    for (const rec of recs) {
+      if (!rec.pk) continue;
+      if (!groupNo.has(rec.pk)) groupNo.set(rec.pk, ++gid);
+    }
+    const seen = /* @__PURE__ */ new Set();
+    for (const rec of recs) {
+      if (!rec.pk) {
+        rec.dup = "";
+        rec.grp = "";
+        continue;
+      }
+      rec.grp = groupNo.get(rec.pk);
+      if (seen.has(rec.pk)) {
+        rec.dup = "\uC911\uBCF5";
+      } else {
+        rec.dup = "\uCD5C\uCD08";
+        seen.add(rec.pk);
+      }
+    }
+    return recs;
+  }, [rows]);
+  const HEADERS = ["\uC6D0\uBCF8\uC8FC\uC18C", "\uC815\uC81C\uC0C1\uD0DC", "\uC2DC\uAD70\uAD6C", "\uBD80\uB3D9\uC0B0\uAD6C\uBD84", "\uC8FC\uD0DD\uC720\uD615", "\uC9C0\uBC88\uC8FC\uC18C", "\uB3C4\uB85C\uBA85\uC8FC\uC18C", "\uB3D9", "\uD638", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638", "\uC911\uBCF5\uC5EC\uBD80", "\uC911\uBCF5\uADF8\uB8F9", "\uC8FC\uC18C\uD655\uC815\uC6D0\uCC9C", "\uB3D9\uD638\uC6D0\uCC9C", "\uB4F1\uAE30\uC0C1\uD0DC", "\uC2E4\uD328\uCF54\uB4DC", "\uC870\uD68C\uC77C\uC2DC", "\uBE44\uACE0"];
+  const recToRow = (rec) => [
+    rec.raw,
+    rec.status,
+    rec.sigungu,
+    rec.gubun,
+    rec.aptType,
+    rec.jibun,
+    rec.road,
+    rec.dong,
+    rec.ho,
+    rec.pnu,
+    rec.regNo,
+    rec.dup,
+    rec.grp,
+    rec.addrSrc,
+    rec.unitSrc,
+    REG_LABEL[rec.regStatus] || rec.regStatus || "",
+    rec.failCode,
+    rec.lookupAt,
+    rec.note,
+    ...rec.extra
+  ];
+  const makeSheet = (recs, mode2) => {
+    const head = [...HEADERS, ...extraHeaders];
+    const aoa = [head];
+    for (const rec of recs) {
+      if (mode2 === "unique" && rec.dup === "\uC911\uBCF5") continue;
+      if (mode2 === "fail") {
+        const ok = (rec.status === "\uD655\uC815" || rec.status === "CONFIRMED") && rec.regNo;
+        if (ok) continue;
+      }
+      aoa.push(recToRow(rec));
     }
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     for (let i = 1; i < aoa.length; i++) {
-      for (const col of [4, 5, 11]) {
+      for (const col of [9, 10]) {
         const ref = XLSX.utils.encode_cell({ r: i, c: col });
         if (ws[ref]) ws[ref].t = "s";
       }
     }
     ws["!cols"] = [
-      { wch: 34 },
-      { wch: 11 },
-      { wch: 30 },
-      { wch: 30 },
-      { wch: 21 },
-      { wch: 27 },
-      { wch: 6 },
-      { wch: 6 },
-      { wch: 9 },
-      { wch: 20 },
-      { wch: 28 },
-      { wch: 18 },
-      { wch: 11 },
-      ...extraHeaders.map(() => ({ wch: 14 }))
+      34,
+      9,
+      10,
+      11,
+      11,
+      28,
+      28,
+      6,
+      7,
+      21,
+      17,
+      9,
+      9,
+      13,
+      11,
+      11,
+      12,
+      17,
+      15,
+      ...extraHeaders.map(() => 14)
+    ].map((w) => ({ wch: w }));
+    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+    return ws;
+  };
+  const makeSummary = (recs) => {
+    const ok = recs.filter((r) => r.status === "\uD655\uC815" || r.status === "CONFIRMED");
+    const uniq = new Set(ok.map((r) => r.pk).filter(Boolean)).size;
+    const aoa = [
+      ["\uBD80\uB3D9\uC0B0 \uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC815\uC81C\xB7\uC911\uBCF5\uC81C\uAC70 \uACB0\uACFC"],
+      [],
+      ["\uC804\uCCB4 \uCC98\uB9AC \uAC74\uC218", recs.length],
+      ["\uC815\uC81C \uC131\uACF5(\uD655\uC815)", ok.length],
+      ["\uC815\uC81C \uC2E4\uD328", recs.length - ok.length],
+      ["\uACE0\uC720 \uBD80\uB3D9\uC0B0(\uC911\uBCF5\uC81C\uAC70 \uD6C4)", uniq],
+      ["\uC911\uBCF5 \uC81C\uAC70\uB41C \uAC74\uC218", ok.length - uniq],
+      []
     ];
+    const aggBy = (field2, label) => {
+      const m = /* @__PURE__ */ new Map();
+      for (const r of ok) {
+        const k = r[field2] || "(\uBBF8\uBD84\uB958)";
+        if (!m.has(k)) m.set(k, { cnt: 0, keys: /* @__PURE__ */ new Set() });
+        m.get(k).cnt++;
+        m.get(k).keys.add(r.pk);
+      }
+      aoa.push([`[${label}\uBCC4 \uC9D1\uACC4]`]);
+      aoa.push([label, "\uAC74\uC218", "\uACE0\uC720", "\uC911\uBCF5"]);
+      for (const k of [...m.keys()].sort()) {
+        const { cnt, keys } = m.get(k);
+        aoa.push([k, cnt, keys.size, cnt - keys.size]);
+      }
+      aoa.push([]);
+    };
+    aggBy("sigungu", "\uC2DC\uAD70\uAD6C");
+    aggBy("gubun", "\uBD80\uB3D9\uC0B0\uAD6C\uBD84");
+    aggBy("aptType", "\uC8FC\uD0DD\uC720\uD615");
+    const failM = /* @__PURE__ */ new Map();
+    for (const r of recs) {
+      if ((r.status === "\uD655\uC815" || r.status === "CONFIRMED") && r.regNo) continue;
+      const k = r.failCode || "\uBBF8\uC2E4\uD589";
+      failM.set(k, (failM.get(k) || 0) + 1);
+    }
+    if (failM.size) {
+      aoa.push(["[\uC2E4\uD328\xB7\uBBF8\uD655\uC815 \uC0AC\uC720\uBCC4]"]);
+      aoa.push(["\uC0AC\uC720", "\uAC74\uC218"]);
+      for (const k of [...failM.keys()].sort()) aoa.push([k, failM.get(k)]);
+      aoa.push([]);
+    }
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = [{ wch: 26 }, { wch: 12 }, { wch: 10 }, { wch: 10 }];
+    return ws;
+  };
+  const downloadXlsx = useCallback((mode2) => {
+    const recs = buildRecords();
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "\uC815\uC81C\uACB0\uACFC");
-    XLSX.writeFile(wb, "addr-refine-\uACB0\uACFC.xlsx");
+    XLSX.utils.book_append_sheet(wb, makeSummary(recs), "\uC694\uC57D");
+    const sheetName = mode2 === "unique" ? "\uC911\uBCF5\uC81C\uAC70\uBCF8" : mode2 === "fail" ? "\uC2E4\uD328\xB7\uBBF8\uD655\uC815" : "\uC804\uCCB4(\uC911\uBCF5\uD45C\uC2DC)";
+    XLSX.utils.book_append_sheet(wb, makeSheet(recs, mode2), sheetName);
+    const fileName = mode2 === "unique" ? "\uC815\uC81C\uACB0\uACFC_\uC911\uBCF5\uC81C\uAC70.xlsx" : mode2 === "fail" ? "\uC815\uC81C\uACB0\uACFC_\uC2E4\uD328\uAC74.xlsx" : "\uC815\uC81C\uACB0\uACFC_\uC804\uCCB4.xlsx";
+    XLSX.writeFile(wb, fileName);
   }, [rows, extraHeaders]);
   const stat = rows.reduce((acc, r) => {
     if (r.result) acc[r.result.status] = (acc[r.result.status] || 0) + 1;
@@ -1167,7 +1555,37 @@ function AddrRefineTestGui() {
         input:focus { border-color: ${C.cyan}88 !important; box-shadow: 0 0 0 3px ${C.cyan}22; }
         button:focus-visible, a:focus-visible, input:focus-visible, label:focus-visible { outline: 2px solid ${C.cyan}; outline-offset: 2px; }
         @media (prefers-reduced-motion: reduce) { .pnu-drift, .result-in, .aurora { animation: none !important; } .comet-layer { display: none; } }
-      `), /* @__PURE__ */ React.createElement(CadastralBackdrop, null), /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", top: 14, left: 16, zIndex: 40 } }, /* @__PURE__ */ React.createElement(
+      `), /* @__PURE__ */ React.createElement(CadastralBackdrop, null), irosHealth.bad >= 3 && /* @__PURE__ */ React.createElement("div", { style: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+    background: "linear-gradient(90deg, #7F1D1D, #B91C1C)",
+    borderBottom: "2px solid #F87171",
+    padding: "12px 20px",
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    boxShadow: "0 4px 20px rgba(185,28,28,0.5)"
+  } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 20 } }, "\u26A0\uFE0F"), /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14, fontWeight: 700, color: "#FFF", fontFamily: sans } }, "\uB4F1\uAE30\uC18C(IROS) \uC870\uD68C\uC5D0 \uC5F0\uC18D \uC2E4\uD328\uD558\uACE0 \uC788\uC2B5\uB2C8\uB2E4 \u2014 \uC2DC\uC2A4\uD15C \uC810\uAC80\uC774 \uD544\uC694\uD560 \uC218 \uC788\uC5B4\uC694"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#FECACA", fontFamily: mono, marginTop: 3 } }, "\uC5F0\uC18D ", irosHealth.bad, "\uAC74 \uC2E4\uD328 \xB7 \uB9C8\uC9C0\uB9C9 \uC0AC\uC720: ", REG_LABEL[irosHealth.lastCode] || irosHealth.lastCode, " \xB7 ", "IROS \uC751\uB2F5 \uAD6C\uC870\uAC00 \uBC14\uB00C\uC5C8\uC744 \uAC00\uB2A5\uC131 (\uD30C\uC11C \uC810\uAC80 \uAD8C\uC7A5)")), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: () => setIrosHealth({ bad: 0, total: 0, lastCode: "" }),
+      style: {
+        background: "rgba(0,0,0,0.25)",
+        border: "1px solid #F87171",
+        color: "#FFF",
+        borderRadius: 8,
+        padding: "6px 14px",
+        cursor: "pointer",
+        fontSize: 12.5,
+        fontFamily: sans,
+        whiteSpace: "nowrap"
+      }
+    },
+    "\uD655\uC778 \xB7 \uB2EB\uAE30"
+  )), /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", top: 14, left: 16, zIndex: 40 } }, /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => setBridgeHelpOpen((v) => !v),
@@ -1339,7 +1757,25 @@ function AddrRefineTestGui() {
       maxLength: 4,
       style: { ...field(80), textAlign: "center", fontFamily: mono }
     }
-  )), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, color: C.faint } }, "\uC22B\uC790\uB9CC \uC785\uB825 (\uB3D9\xB7\uD638 \uAE00\uC790 \uBD88\uD544\uC694)"))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap", justifyContent: "center" } }, ["\uC11C\uC6B8\uFF0A\uAC15\uB0A8\uAD6C\uFF01\uD14C\uD5E4\uB780\uB85C\uFF12\uFF11\uFF12", "\uC2E0\uC815\uB3D9 100", "\uC911\uC559\uB3D9 50", "\uCCAD\uC8FC\uC2DC \uC0B0\uC131\uB3D9 \uC0B012-3", "\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC 101\uB3D9 1502\uD638", "\uC5C6\uB294\uC8FC\uC18C 999"].map((ex) => /* @__PURE__ */ React.createElement(
+  )), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, color: C.faint } }, "\uC22B\uC790\uB9CC \uC785\uB825 (\uB3D9\xB7\uD638 \uAE00\uC790 \uBD88\uD544\uC694)"), result?.status === "CONFIRMED" && result?.pnu && /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: findUnits,
+      disabled: unitBusy,
+      style: {
+        fontSize: 11.5,
+        padding: "6px 12px",
+        borderRadius: 7,
+        background: `${C.cyan}1a`,
+        border: `1px solid ${C.cyan}55`,
+        color: C.cyan,
+        cursor: "pointer",
+        fontFamily: sans,
+        opacity: unitBusy ? 0.6 : 1
+      }
+    },
+    unitBusy ? "\uBD88\uB7EC\uC624\uB294 \uC911\u2026" : "\u{1F50D} \uC138\uB300 \uCC3E\uAE30"
+  )), unitErr && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.dim, marginTop: 8 } }, unitErr), unitList && /* @__PURE__ */ React.createElement(UnitPicker, { data: unitList, onPick: onUnitPick, onClose: () => setUnitList(null) })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap", justifyContent: "center" } }, ["\uC11C\uC6B8\uFF0A\uAC15\uB0A8\uAD6C\uFF01\uD14C\uD5E4\uB780\uB85C\uFF12\uFF11\uFF12", "\uC2E0\uC815\uB3D9 100", "\uC911\uC559\uB3D9 50", "\uCCAD\uC8FC\uC2DC \uC0B0\uC131\uB3D9 \uC0B012-3", "\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC 101\uB3D9 1502\uD638", "\uC5C6\uB294\uC8FC\uC18C 999"].map((ex) => /* @__PURE__ */ React.createElement(
     "button",
     {
       key: ex,
@@ -1369,7 +1805,18 @@ function AddrRefineTestGui() {
       regBusy,
       onLookup: lookupUniqueNo
     }
-  ), regResult && (regResult.status === "RESOLVED" || regResult.status === "MULTIPLE") && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, textAlign: "center", marginTop: 10 } }, "\u203B \uB2E8\uC77C \uC870\uD68C \uACB0\uACFC\uB294 \uD654\uBA74 \uD45C\uC2DC\uC6A9\uC785\uB2C8\uB2E4. \uC5D1\uC140 \uC800\uC7A5\uC740 \uC77C\uAD04 \uD0ED\uC5D0\uC11C \uC9C0\uC6D0\uB429\uB2C8\uB2E4.")), tab === "batch" && /* @__PURE__ */ React.createElement("section", null, /* @__PURE__ */ React.createElement("div", { style: {
+  ), regResult && (regResult.status === "RESOLVED" || regResult.status === "MULTIPLE") && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, textAlign: "center", marginTop: 10 } }, "\u203B \uB2E8\uC77C \uC870\uD68C \uACB0\uACFC\uB294 \uD654\uBA74 \uD45C\uC2DC\uC6A9\uC785\uB2C8\uB2E4. \uC5D1\uC140 \uC800\uC7A5\uC740 \uC77C\uAD04 \uD0ED\uC5D0\uC11C \uC9C0\uC6D0\uB429\uB2C8\uB2E4.")), tab === "batch" && /* @__PURE__ */ React.createElement("section", null, savedProgress && /* @__PURE__ */ React.createElement("div", { style: {
+    background: `${C.cyan}12`,
+    border: `1px solid ${C.cyan}55`,
+    borderRadius: 12,
+    padding: "14px 16px",
+    marginBottom: 14,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    flexWrap: "wrap"
+  } }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { style: { margin: 0, fontSize: 13, color: C.ink, fontWeight: 600 } }, "\u{1F504} \uC774\uC804 \uC791\uC5C5\uC774 \uC800\uC7A5\uB418\uC5B4 \uC788\uC5B4\uC694"), /* @__PURE__ */ React.createElement("p", { style: { margin: "4px 0 0", fontSize: 11.5, color: C.dim } }, "\uC804\uCCB4 ", savedProgress.count.toLocaleString(), "\uAC74 \xB7 \uC815\uC81C ", savedProgress.refined.toLocaleString(), " \xB7 \uB4F1\uAE30\uC870\uD68C ", savedProgress.looked.toLocaleString(), " \uC644\uB8CC")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: resumeProgress, style: { ...btnP, padding: "8px 16px", fontSize: 13 } }, "\uC774\uC5B4\uC11C \uD558\uAE30"), /* @__PURE__ */ React.createElement("button", { onClick: discardProgress, style: { ...btnS, padding: "8px 14px", fontSize: 13 } }, "\uC0C8\uB85C \uC2DC\uC791"))), /* @__PURE__ */ React.createElement("div", { style: {
     background: C.card,
     border: `1px dashed ${C.cyan}55`,
     borderRadius: 14,
@@ -1377,19 +1824,55 @@ function AddrRefineTestGui() {
     textAlign: "center",
     backdropFilter: "blur(4px)",
     WebkitBackdropFilter: "blur(4px)"
-  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv \uD30C\uC77C\uC758 ", /* @__PURE__ */ React.createElement("strong", { style: { color: C.ink } }, "A\uC5F4"), "\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4 \uC5C5\uB85C\uB4DC\uD558\uC138\uC694. \uD5E4\uB354 \uD589\uC740 \uC790\uB3D9 \uC778\uC2DD\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `\uCC98\uB9AC\uC911 ${batchDone}/${rows.length}` : `\uC77C\uAD04 \uC815\uC81C (${rows.length}\uAC74)`), bridgeUp && (stat.CONFIRMED || 0) > 0 && /* @__PURE__ */ React.createElement(
+  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv \uD30C\uC77C\uC758 ", /* @__PURE__ */ React.createElement("strong", { style: { color: C.ink } }, "A\uC5F4"), "\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4 \uC5C5\uB85C\uB4DC\uD558\uC138\uC694. \uD5E4\uB354 \uD589\uC740 \uC790\uB3D9 \uC778\uC2DD\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `\uC815\uC81C\uC911 ${batchDone}/${rows.length}` : `\uC77C\uAD04 \uC815\uC81C (${rows.length}\uAC74)`), bridgeUp && (stat.CONFIRMED || 0) > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: lookupBatchUniqueNo,
-      disabled: batchRegBusy || batchDone === 0,
+      disabled: batchDone === 0,
       style: {
         ...btnP,
         background: `linear-gradient(135deg, ${C.ok}, ${C.cyan})`,
-        opacity: batchRegBusy || batchDone === 0 ? 0.5 : 1
+        opacity: batchDone === 0 ? 0.5 : 1
       }
     },
-    batchRegBusy ? `\uB4F1\uAE30\uC870\uD68C\uC911 ${batchRegDone}/${stat.CONFIRMED || 0}` : `\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (${stat.CONFIRMED || 0}\uAC74)`
-  ), /* @__PURE__ */ React.createElement("button", { onClick: downloadXlsx, disabled: batchDone === 0, style: { ...btnS, opacity: batchDone === 0 ? 0.5 : 1 } }, "\uACB0\uACFC \uC5D1\uC140 \uB2E4\uC6B4\uB85C\uB4DC"), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uD655\uC815 ", stat.CONFIRMED || 0, " \xB7 \uD655\uC778\uD544\uC694 ", stat.AMBIGUOUS || 0, " \xB7 \uC2E4\uD328 ", stat.FAILED || 0)), !bridgeUp && batchDone > 0 && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C\uB294 \uB85C\uCEEC \uBE0C\uB9AC\uC9C0(iros_bridge.py) \uC2E4\uD589 \uC2DC \uD65C\uC131\uD654\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
+    "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (",
+    stat.CONFIRMED || 0,
+    "\uAC74)"
+  ), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 13, color: C.cyan } }, "\uB4F1\uAE30\uC870\uD68C ", batchRegDone, "/", batchTotal, " (\uC911\uBCF5\uC81C\uAC70 \uD6C4 \xB7 \uAC74\uB2F9 1\uCD08)"), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: () => downloadXlsx("all"),
+      disabled: batchDone === 0,
+      style: { ...btnS, opacity: batchDone === 0 ? 0.5 : 1 }
+    },
+    "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"
+  ), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: () => downloadXlsx("unique"),
+      disabled: batchDone === 0,
+      style: {
+        ...btnS,
+        opacity: batchDone === 0 ? 0.5 : 1,
+        borderColor: `${C.ok}88`,
+        color: C.ok
+      }
+    },
+    "\uC911\uBCF5\uC81C\uAC70 \uB2E4\uC6B4\uB85C\uB4DC"
+  ), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: () => downloadXlsx("fail"),
+      disabled: batchDone === 0,
+      style: {
+        ...btnS,
+        opacity: batchDone === 0 ? 0.5 : 1,
+        borderColor: `${C.warn}88`,
+        color: C.warn
+      }
+    },
+    "\uC2E4\uD328\uAC74 \uB2E4\uC6B4\uB85C\uB4DC"
+  ), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uD655\uC815 ", stat.CONFIRMED || 0, " \xB7 \uD655\uC778\uD544\uC694 ", stat.AMBIGUOUS || 0, " \xB7 \uC2E4\uD328 ", stat.FAILED || 0)), !bridgeUp && batchDone > 0 && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C\uB294 \uB85C\uCEEC \uBE0C\uB9AC\uC9C0(iros_bridge.py) \uC2E4\uD589 \uC2DC \uD65C\uC131\uD654\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
     padding: "11px 14px",
     borderBottom: `1px solid ${C.cardLine}`,
     fontSize: 10.5,

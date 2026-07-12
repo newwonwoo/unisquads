@@ -105,19 +105,20 @@ def _extract_sigungu(address: str) -> str:
 
 
 def _build_swrd(address: str, dong: str = "", ho: str = "", buld_name: str = "") -> str:
-    """검색어(swrd) 조립. IROS는 '시군구 건물명 N동 N호'를 통째로 넣으면 특정(실측 확인).
-    admin_regn1=all이므로 시군구를 swrd에 포함해 흔한 건물명의 타지역 혼입 방지."""
+    """검색어(swrd) 조립 — 정제된 최종 지번주소를 온전히 사용.
+    핵심: 지번(법정동+번지)을 축으로 유지 → IROS가 그 필지로 특정 → 타 지번/타 건물 혼입 방지.
+    형태: '시군구 법정동 번지 [건물명] [N동] [N호]'
+    (지번을 빼고 건물명만 넣으면 같은 이름 다른 아파트가 섞임 — 예: 영등포푸르지오 vs 당산푸르지오)"""
     sido = normalize_sido(address)
-    base = strip_sido(address, sido)  # 시도 뗀 지번주소
-    parts = []
+    base = strip_sido(address, sido).strip()  # 시도 뗀 정제 지번주소 (예: '영등포구 영등포동 647')
+    parts = [base]  # 정제 지번주소를 그대로 축으로
+
+    # 건물명: 지번주소에 이미 포함돼 있지 않으면 추가 (juso jibunAddr가 건물명 붙여주는 경우 중복 방지)
     if buld_name:
-        # 시군구 + 건물명 (흔한 건물명이 타 지역에도 있을 때 지역으로 좁힘)
-        sigungu = _extract_sigungu(address)
-        if sigungu:
-            parts.append(sigungu)
-        parts.append(buld_name.strip())
-    else:
-        parts.append(base)  # 건물명 없으면 지번 전체(시군구 포함)
+        bn = buld_name.strip()
+        if bn and bn not in base:
+            parts.append(bn)
+
     if dong:
         d = re.sub(r"\D", "", str(dong))
         if d:
@@ -218,6 +219,9 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
     dong = str(rec.get("buld_no_buld", "") or "")
     ho = str(rec.get("buld_no_room", "") or "")
     floor = str(rec.get("buld_no_floor", "") or "")
+    # 지번 정보 (번지 필터용): lot_no=본번, addItem="법정동 번지"
+    lot_no = str(rec.get("lot_no", "") or "")
+    add_item = _strip_html(str(rec.get("addItem", "") or ""))
     # 집합건물이면 부동산구분을 "집합건물", 아니면 빈값(토지/건물은 목록에 따로)
     gubun = "집합건물" if rec.get("pin_mid_spe_yn") == "Y" or ho else ""
     return {
@@ -227,6 +231,7 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
         "sojae": sojae,
         "buldnm": buldnm,
         "dong": dong, "ho": ho, "floor": floor,
+        "lot_no": lot_no, "add_item": add_item,
     }
 
 
@@ -282,6 +287,32 @@ def make_session() -> requests.Session:
     return s
 
 
+def _extract_dong_beonji(address: str):
+    """정제주소에서 법정동명 + 번지(본번-부번) 추출.
+    예: '서울특별시 영등포구 영등포동 647' → ('영등포동', '647')"""
+    dong_m = re.search(r"([가-힣]+(?:동|가|리))(?:\s|$)", address)
+    dong = dong_m.group(1) if dong_m else ""
+    beonji = ""
+    if dong_m:
+        rest = address[dong_m.end():]
+        b_m = re.search(r"(\d+(?:-\d+)?)", rest)
+        if b_m:
+            beonji = b_m.group(1)
+    return dong, beonji
+
+
+def _match_lot(c, want_dong, want_beonji):
+    """후보 지번이 정제 지번과 일치하는지. addItem/sojae/lot_no로 대조. 본번 비교."""
+    if not want_beonji:
+        return True
+    hay = f"{c.get('add_item','')} {c.get('sojae','')} {c.get('lot_no','')}"
+    want_main = want_beonji.split("-")[0]
+    nums = re.findall(r"\d+", hay)
+    if want_dong and want_dong in hay:
+        return want_main in nums
+    return want_main in nums
+
+
 def _match_unit(c, dong, ho):
     """레코드가 입력 동·호와 일치하는지. 동·호 없는 레코드(대지권)는 제외."""
     cd = re.sub(r"\D", "", str(c.get("dong", "")))
@@ -319,15 +350,33 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
         # 1차: 건물명 포함 (건물 여러개일 때 특정)
         data, code = _query(buld_name)
         if data is None:
-            return ResolveResult(address, "ERROR",
-                                 message=f"HTTP {code} (API 직결 실패, RPA 폴백 권장)")
+            # HTTP 상태로 원인 구분
+            if code == 429:
+                return ResolveResult(address, "REG_RATE_LIMIT",
+                                     message=f"요청 제한/일시 차단 (HTTP {code})")
+            if code in (401, 403):
+                return ResolveResult(address, "REG_SESSION_ERROR",
+                                     message=f"세션 만료/인증 실패 (HTTP {code})")
+            return ResolveResult(address, "REG_HTTP_ERROR",
+                                 message=f"HTTP {code} (API 직결 실패)")
+        # 응답이 왔으나 파싱 불가(구조 변경 등)
+        if isinstance(data, dict) and "_raw" in data:
+            return ResolveResult(address, "REG_PARSE_ERROR",
+                                 message="응답 구조 변경/파싱 실패 (수동확인)")
         cands = _parse_json_response(data)
 
         # 건물명 넣었는데 0건이면(표기 불일치) → 건물명 빼고 재시도
         if buld_name and len(cands) == 0:
             data, code = _query("")
-            if data is not None:
+            if data is not None and not (isinstance(data, dict) and "_raw" in data):
                 cands = _parse_json_response(data)
+
+        # 지번(번지) 필터: 건물명 검색으로 다른 번지 건물이 섞여오면 정제 지번으로 걸러냄
+        want_dong, want_beonji = _extract_dong_beonji(address)
+        if want_beonji and cands:
+            lot_filtered = [c for c in cands if _match_lot(c, want_dong, want_beonji)]
+            if lot_filtered:
+                cands = lot_filtered
 
         # 동·호 정확 매칭 필터 (대지권·다른동 제외)
         if (dong or ho) and cands:
@@ -336,8 +385,8 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                 cands = filtered
 
         if len(cands) == 0:
-            return ResolveResult(address, "NOT_FOUND",
-                                 message="고유번호 없음(API). 주소 정밀도/미등록 확인.")
+            return ResolveResult(address, "REG_NOT_FOUND",
+                                 message="검색결과 없음. 주소 정밀도/미등록 확인.")
         if len(cands) == 1:
             c = cands[0]
             desc = " ".join(filter(None, [c.get("gubun", ""), c.get("state", ""),
@@ -348,12 +397,12 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
         note = ""
         if ho and not any(_match_unit(c, dong, ho) for c in cands):
             note = f" (입력한 {ho}호 미매칭 — 동·호 확인 필요)"
-        return ResolveResult(address, "MULTIPLE", candidates=cands,
+        return ResolveResult(address, "REG_MULTI", candidates=cands,
                              message=f"{len(cands)}건{note}")
     except requests.Timeout:
-        return ResolveResult(address, "ERROR", message="시간초과(API 직결)")
+        return ResolveResult(address, "REG_TIMEOUT", message="시간초과(API 직결)")
     except Exception as e:
-        return ResolveResult(address, "ERROR", message=f"{type(e).__name__}: {e}")
+        return ResolveResult(address, "REG_ERROR", message=f"{type(e).__name__}: {e}")
 
 
 def resolve_batch_api(addresses, throttle=1.0, timeout=20.0):
