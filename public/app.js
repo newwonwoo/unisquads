@@ -236,8 +236,9 @@ async function safeCall(fn, ...args) {
   try {
     const r = await fn(...args);
     return Array.isArray(r) ? r : [];
-  } catch {
-    return [];
+  } catch (e) {
+    if (e && e.transient) throw e;   // 분류된 일시 오류(한도/HTTP/네트워크)는 전파 — runBatch가 TRANSIENT로 기록
+    return [];                       // 그 외 알 수 없는 오류는 기존대로 0건 취급(동작 보존)
   }
 }
 async function cascade(pre, clients) {
@@ -311,6 +312,11 @@ function buildMessage(requireLevel, dongName, candidates) {
   if (requireLevel === "sido") return `${target}\uC740(\uB294) ${shown}${more}\uC5D0 \uC788\uC2B5\uB2C8\uB2E4. \uC5B4\uB290 \uC9C0\uC5ED(\uC2DC/\uB3C4)\uC778\uC9C0 \uC54C\uB824\uC8FC\uC138\uC694.`;
   if (requireLevel === "sigungu") return `${target}\uC740(\uB294) ${shown}${more}\uC5D0 \uC788\uC2B5\uB2C8\uB2E4. \uC5B4\uB290 \uC2DC/\uAD70/\uAD6C\uC778\uC9C0 \uC54C\uB824\uC8FC\uC138\uC694.`;
   return `\uAC19\uC740 \uC9C0\uC5ED\uC5D0 \uD6C4\uBCF4\uAC00 ${candidates.length}\uAC74 \uC788\uC2B5\uB2C8\uB2E4. \uBC88\uC9C0 \uB610\uB294 \uAC74\uBB3C\uC744 \uC120\uD0DD\uD574\uC8FC\uC138\uC694.`;
+}
+function normalizeRawKey(s) {
+  // 원문주소 그룹화 키: NFC 통일 + 앞뒤공백 제거 + 연속공백 1칸.
+  // 키'만' 정규화하며 행의 raw 원본은 절대 변경하지 않는다.
+  return String(s).normalize("NFC").trim().replace(/\s+/g, " ");
 }
 function buildIrosQuery(c, unit) {
   const parts = [c.jibunAddr || c.roadAddr || ""];
@@ -396,25 +402,45 @@ const mockClients = {
   kakaoKeyword: async (kw) => MOCK_KAKAO_DB.filter((e) => e.keys.some((k) => kw.includes(k))).map((e) => e.doc),
   kakaoCoord2Region: async () => []
 };
+function transientErr(msg) {
+  // '일시 오류'(네트워크/HTTP/한도/서버) 표식 — 진짜 "검색결과 0건"과 구분해
+  // 재정제 시 선별 재시도가 가능하게 한다(PM-01/02).
+  const e = new Error(msg);
+  e.transient = true;
+  return e;
+}
 function makeRealClients(jusoKey, kakaoKey) {
   return {
     juso: async (kw) => {
+      let res;
       try {
-        const res = await fetch(`/api/juso?keyword=${encodeURIComponent(kw)}`);
-        const data = await res.json();
-        return data?.juso ?? [];
-      } catch {
-        return [];
+        res = await fetch(`/api/juso?keyword=${encodeURIComponent(kw)}`);
+      } catch (e) {
+        throw transientErr("네트워크 오류");
       }
+      if (!res.ok) throw transientErr(`HTTP ${res.status}`);
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        throw transientErr("응답 파싱 실패");
+      }
+      if (data?.error) throw transientErr(String(data.error));
+      const ec = data?.common?.errorCode;
+      if (ec && ec !== "0") throw transientErr(`JUSO ${ec} ${data?.common?.errorMessage || ""}`.trim());
+      return data?.juso ?? [];   // errorCode 0 + 빈 배열 = 진짜 0건(영구 실패로 분류됨)
     },
     kakaoKeyword: async (kw) => {
+      let res;
       try {
-        const res = await fetch(`/api/kakao?type=keyword&query=${encodeURIComponent(kw)}`);
-        const data = await res.json();
-        return data?.documents ?? [];
+        res = await fetch(`/api/kakao?type=keyword&query=${encodeURIComponent(kw)}`);
       } catch {
-        return [];
+        throw transientErr("네트워크 오류(kakao)");
       }
+      if (!res.ok) throw transientErr(`HTTP ${res.status} (kakao)`);
+      const data = await res.json().catch(() => null);
+      if (data == null) throw transientErr("응답 파싱 실패(kakao)");
+      return data?.documents ?? [];
     },
     kakaoCoord2Region: async (x, y) => {
       try {
@@ -969,25 +995,35 @@ function AddrRefineTestGui() {
     })();
     (async () => {
       const saved = await idbGet(BATCH_KEY);
-      if (saved && Array.isArray(saved) && saved.length > 0) {
-        const refined = saved.filter((r) => r.result).length;
-        const looked = saved.filter((r) => r.reg).length;
+      // v2 포맷({rows, extraHeaders}) 우선, 구버전(배열)도 하위호환으로 읽음
+      const savedRows = Array.isArray(saved) ? saved : saved?.rows;
+      if (savedRows && Array.isArray(savedRows) && savedRows.length > 0) {
+        const refined = savedRows.filter((r) => r.result).length;
+        const looked = savedRows.filter((r) => r.reg).length;
         if (refined > 0 || looked > 0) {
-          setSavedProgress({ count: saved.length, refined, looked });
+          setSavedProgress({ count: savedRows.length, refined, looked });
         }
       }
     })();
   }, []);
   const resumeProgress = useCallback(async () => {
     const saved = await idbGet(BATCH_KEY);
-    if (saved) {
-      setRows(saved);
-      setBatchDone(saved.filter((r) => r.result).length);
+    const savedRows = Array.isArray(saved) ? saved : saved?.rows;
+    if (savedRows) {
+      setRows(savedRows);
+      // extraHeaders(부동산번호 등 원본 컬럼명)도 함께 복원 — 이게 없으면
+      // 재개 후 엑셀 출력에서 헤더와 데이터 열이 어긋난다(2026-07-13 버그 수정)
+      if (!Array.isArray(saved) && Array.isArray(saved.extraHeaders)) {
+        setExtraHeaders(saved.extraHeaders);
+      }
+      setBatchDone(savedRows.filter((r) => r.result).length);
       setTab("batch");
     }
     setSavedProgress(null);
   }, []);
   const discardProgress = useCallback(async () => {
+    // 파괴적 동작 — 며칠치 진행분이 클릭 한 번에 사라질 수 있으므로 확인 필수(PM-11)
+    if (!window.confirm("저장된 진행 상황을 완전히 삭제하고 새로 시작할까요?\n(정제·등기조회 결과가 모두 사라지며 되돌릴 수 없습니다)")) return;
     await idbDel(BATCH_KEY);
     setSavedProgress(null);
   }, []);
@@ -1010,7 +1046,12 @@ function AddrRefineTestGui() {
   const [rows, setRows] = useState([]);
   const [batchBusy, setBatchBusy] = useState(false);
   const [batchDone, setBatchDone] = useState(0);
+  const [batchGroupDone, setBatchGroupDone] = useState(0);
+  const [batchGroupTotal, setBatchGroupTotal] = useState(0);
+  const [autoStopMsg, setAutoStopMsg] = useState("");
   const [fileErr, setFileErr] = useState("");
+  const [fileParsing, setFileParsing] = useState(false);
+  const [uploadStats, setUploadStats] = useState(null);
   const [extraHeaders, setExtraHeaders] = useState([]);
   const BRIDGE = config.bridgeUrl || "/api";
   const regHeaders = config.resolverKey ? { "X-Resolver-Key": config.resolverKey } : {};
@@ -1149,16 +1190,16 @@ function AddrRefineTestGui() {
       setBatchRegDone(g + 1);
       if (g % 50 === 0) {
         setRows([...next]);
-        await idbSet(BATCH_KEY, next);
+        await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
       }
       if (g < uniqueKeys.length - 1 && !batchStopRef.current) {
         await new Promise((res) => setTimeout(res, 1e3));
       }
     }
     setRows([...next]);
-    await idbSet(BATCH_KEY, next);
+    await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
     setBatchRegBusy(false);
-  }, [rows, BRIDGE, config.resolverKey]);
+  }, [rows, BRIDGE, config.resolverKey, extraHeaders]);
   const stopBatch = useCallback(() => {
     batchStopRef.current = true;
     setBatchStop(true);
@@ -1170,7 +1211,7 @@ function AddrRefineTestGui() {
   const [unitList, setUnitList] = useState(null);
   const [unitBusy, setUnitBusy] = useState(false);
   const [unitErr, setUnitErr] = useState("");
-  const loadUnitsFor = useCallback(async (pnu) => {
+  const loadUnitsFor = useCallback(async (pnu, fallbackName) => {
     if (!pnu) return;
     setUnitBusy(true);
     setUnitErr("");
@@ -1195,7 +1236,7 @@ function AddrRefineTestGui() {
         setUnitErr("\uB4F1\uB85D\uB41C \uC138\uB300 \uC815\uBCF4\uAC00 \uC5C6\uC5B4\uC694. \uB3D9\xB7\uD638\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
         return;
       }
-      setUnitList({ name: data.name, units: data.units });
+      setUnitList({ name: fallbackName || data.name, units: data.units });
     } catch {
       setUnitErr("\uC138\uB300 \uC870\uD68C \uC2E4\uD328 \u2014 \uB3D9\xB7\uD638\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
     } finally {
@@ -1226,7 +1267,7 @@ function AddrRefineTestGui() {
     setLastRaw(raw);
     setBusy(false);
     if (isJip && r.pnu) {
-      loadUnitsFor(r.pnu);
+      loadUnitsFor(r.pnu, r.bdNm);
     }
   }, [clients, unitDong, unitHo, loadUnitsFor]);
   const applyUnit = useCallback((dongVal, hoVal) => {
@@ -1244,7 +1285,7 @@ function AddrRefineTestGui() {
     });
   }, []);
   const findUnits = useCallback(() => {
-    if (result?.pnu) loadUnitsFor(result.pnu);
+    if (result?.pnu) loadUnitsFor(result.pnu, result.bdNm);
   }, [result, loadUnitsFor]);
   const onUnitPick = useCallback((u) => {
     applyUnit(u.dong || "", u.ho || "");
@@ -1270,7 +1311,7 @@ function AddrRefineTestGui() {
         isJip
       });
       if (isJip) setUnitOpen(true);
-      if (isJip && cand.pnu) loadUnitsFor(cand.pnu);
+      if (isJip && cand.pnu) loadUnitsFor(cand.pnu, cand.bdNm);
       return;
     }
     const region = (cand.sidoSigungu || "").trim();
@@ -1281,64 +1322,197 @@ function AddrRefineTestGui() {
     setFileErr("");
     const file = e.target.files?.[0];
     if (!file) return;
+    setFileParsing(true);   // 실측 결과 XLSX.read 자체가 병목(3만행 기준 약 1.3초) — 여기서부터 표시
+    await new Promise((res) => setTimeout(res, 0));   // "처리 중" 문구가 실제로 화면에 그려질 시간을 줌
+    // (안 그러면 곧바로 XLSX.read가 메인스레드를 막아, 상태 갱신이 화면에
+    // 반영되기 전에 멈춰버려 "처리 중" 문구가 아예 안 보일 수 있음)
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf);
       const ws = wb.Sheets[wb.SheetNames[0]];
       const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-      const filled = data.filter((row) => String(row?.[0] ?? "").trim() !== "");
+      // 주소가 A열이 아닐 수 있으므로, 행에 값이 하나라도 있으면 유효 행으로 봄
+      const filled = data.filter((row) => (row ?? []).some((c) => String(c ?? "").trim() !== ""));
       if (filled.length === 0) {
-        setFileErr("\uCCAB \uBC88\uC9F8 \uC5F4\uC5D0\uC11C \uC8FC\uC18C\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. A\uC5F4\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4\uC8FC\uC138\uC694.");
+        setFileErr("데이터를 찾지 못했습니다. 파일 내용을 확인해주세요.");
         return;
       }
+
+      // 헤더 행에서 패턴에 맞는 열 인덱스를 찾음(제외 패턴에 걸리면 스킵).
+      // 예: "부동산번호(내부관리번호)"는 잡되 "소재지우편번호"는 안 잡아야 하므로
+      // 우편번호 열은 별도로 제외 처리한다.
+      const findColIdx = (headerRow, patterns, excludePatterns = []) => {
+        for (let i = 0; i < headerRow.length; i++) {
+          const h = String(headerRow[i] ?? "");
+          if (excludePatterns.some((p) => p.test(h))) continue;
+          if (patterns.some((p) => p.test(h))) return i;
+        }
+        return -1;
+      };
+
+      const header0 = filled[0].map((h) => String(h ?? ""));
+      // "소재지상세주소"처럼 '상세'가 붙은 열은 상세주소로 먼저 찾고,
+      // 일반 주소열은 그걸 제외하고 찾는다(안 그러면 상세주소열이
+      // 주소열로 잘못 잡힐 수 있음 — '주소'라는 글자가 둘 다에 있으므로).
+      const detailColIdx = findColIdx(header0, [/상세\s*주소/]);
+      const addrColIdx = findColIdx(
+        header0,
+        [/주소|address/i],
+        detailColIdx >= 0 ? [/상세/] : []
+      );
+
       let extraHeaders2 = [];
       let body = filled;
-      if (/주소|address/i.test(String(filled[0][0]))) {
-        extraHeaders2 = filled[0].slice(1).map((h, i) => String(h ?? "").trim() || `\uC5F4${i + 2}`);
+      let addrIdx = 0;      // 주소로 쓸 열 인덱스(기본값: A열 — 헤더 인식 실패 시 폴백)
+      let detailIdx = -1;
+      let extraColIdxs = null; // null이면 기존 방식(A열 다음부터 순서대로)
+
+      if (addrColIdx >= 0) {
+        // 헤더에서 "주소" 포함 열을 찾음 → 이 행을 헤더로 보고 데이터에서 제외
+        addrIdx = addrColIdx;
+        detailIdx = detailColIdx;
+        extraColIdxs = header0.map((_, i) => i).filter((i) => i !== addrIdx && i !== detailIdx);
+        extraHeaders2 = extraColIdxs.map((i) => header0[i].trim() || `열${i + 1}`);
         body = filled.slice(1);
       } else {
+        // 주소 열을 못 찾음 → 기존 방식과 동일하게 폴백(A열=주소, 헤더 없음 가정)
         const maxExtra = Math.max(0, ...filled.map((r) => r.length - 1));
-        extraHeaders2 = Array.from({ length: maxExtra }, (_, i) => `\uC5F4${i + 2}`);
+        extraHeaders2 = Array.from({ length: maxExtra }, (_, i) => `열${i + 2}`);
       }
       setExtraHeaders(extraHeaders2);
-      const newRows = body.map((r) => ({
-        raw: String(r[0]).trim(),
-        extra: extraHeaders2.map((_, i) => r[i + 1] ?? ""),
-        result: null
-      }));
-      setRows(newRows);
+
+      // 실측(3만행 기준: XLSX.read 1,349ms / sheet_to_json 143ms / 이 루프
+      // 63ms) 결과, 이 행 빌드 루프는 전체 소요시간의 4%에 불과해 굳이
+      // 청크로 쪼개거나 %를 표시할 이유가 없다(진짜 병목은 위 XLSX.read).
+      // 가짜 정밀도를 보여주지 않기 위해 단순 map으로 되돌림 —
+      // fileParsing 표시는 onFile 시작부터 끝까지 통째로 켜져 있음.
+      const built = body
+        .map((r) => {
+          const addrVal = String(r[addrIdx] ?? "").trim();
+          const detailVal = detailIdx >= 0 ? String(r[detailIdx] ?? "").trim() : "";
+          const raw = detailVal ? `${addrVal} ${detailVal}`.replace(/\s+/g, " ").trim() : addrVal;
+          const extra = extraColIdxs
+            ? extraColIdxs.map((i) => r[i] ?? "")
+            : extraHeaders2.map((_, i) => r[i + 1] ?? "");
+          return { raw, extra, result: null };
+        })
+        .filter((row) => row.raw !== "");   // 주소가 실제로 비어있는 행은 제외
+      // 사전 분석(API 호출 없음): 정제 시작 전에 호출량·중복 구조를 먼저 파악
+      const statMap = /* @__PURE__ */ new Map();
+      for (const row of built) {
+        const k = normalizeRawKey(row.raw);
+        statMap.set(k, (statMap.get(k) || 0) + 1);
+      }
+      let maxGrp = 0;
+      for (const v of statMap.values()) if (v > maxGrp) maxGrp = v;
+      const colLetter = (i) => i < 26 ? String.fromCharCode(65 + i) + "열" : `${i + 1}번째 열`;
+      setUploadStats({
+        total: built.length,
+        uniq: statMap.size,
+        maxGrp,
+        empty: body.length - built.length,
+        mapping: addrColIdx >= 0
+          ? {
+              mode: "header",
+              addr: `${header0[addrIdx].trim()}(${colLetter(addrIdx)})`,
+              detail: detailIdx >= 0 ? `${header0[detailIdx].trim()}(${colLetter(detailIdx)})` : null
+            }
+          : { mode: "fallback" },
+        sample: (built[0]?.raw || "").slice(0, 40)
+      });
+      setRows(built);
       setBatchDone(0);
       await idbDel(BATCH_KEY);
       setSavedProgress(null);
     } catch {
-      setFileErr("\uD30C\uC77C\uC744 \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. xlsx \uB610\uB294 csv \uD615\uC2DD\uC778\uC9C0 \uD655\uC778\uD574\uC8FC\uC138\uC694.");
+      setFileErr("파일을 읽지 못했습니다. xlsx 또는 csv 형식인지 확인해주세요.");
     } finally {
+      setFileParsing(false);   // 성공/실패 어느 쪽이든 반드시 꺼지도록 finally로 이동
       e.target.value = "";
     }
   }, []);
+  // 정제 결과가 '확정된' 것인지 판정 — 일시 오류(TRANSIENT)는 미확정으로
+  // 보아 재정제 시 다시 시도한다. 진짜 0건(영구 실패)은 재호출하지 않음(PM-02).
+  const isFinalResult = (res) => res && !(res.status === "FAILED" && res.failKind === "TRANSIENT");
   const runBatch = useCallback(async () => {
     setBatchBusy(true);
     setBatchStop(false);
+    setAutoStopMsg("");
     batchStopRef.current = false;
     const next = [...rows];
-    let done = next.filter((r) => r.result).length;
+    let done = next.filter((r) => isFinalResult(r.result)).length;
     setBatchDone(done);
+    // ── 원문주소 선(先)중복제거 (2026-07-13 추가) ─────────────────────
+    // raw 문자열이 완전히 같은 행끼리 그룹화 → 대표 1건만 juso/kakao 호출
+    // → 결과를 그룹 전원에 복사. Stage2(등기조회)가 PNU+동호로 하는 것과
+    // 같은 패턴을 정제 단계에도 적용한 것. 같은 담보 부동산이 여러 채권
+    // 건으로 반복 등장하는 데이터 특성상 실제 API 호출 수가 크게 줄어든다.
+    // (문자열이 달라도 같은 부동산인 중복은 Stage2의 PNU+동호 그룹화가
+    // 마저 잡으므로, 여기서는 '글자가 똑같은 중복'만 담당하면 충분함.)
+    // 그룹 키 정규화: 유니코드 조합형 통일(NFC) + 앞뒤공백 제거 + 연속공백
+    // 1칸 축약. 키'만' 정규화하고 각 행의 raw(원본주소)는 절대 건드리지
+    // 않음 — 결과지의 원본주소는 원 시스템 추적용이라 글자 그대로 보존.
+    // 번지·동·호 표현을 바꾸는 유사도 병합은 하지 않음(그건 Stage2의
+    // PNU+동호 그룹화가 정제 결과 기준으로 정확하게 담당).
+    const groups = /* @__PURE__ */ new Map();   // 정규화키 → [행 인덱스...]
     for (let i = 0; i < next.length; i++) {
+      if (isFinalResult(next[i].result)) continue;   // 확정분만 스킵 — 일시오류는 재시도 대상
+      const k = normalizeRawKey(next[i].raw);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(i);
+    }
+    // 진행률 2종: 작업률(고유주소 = 실제 API 호출 단위) / 반영률(원본 행 수)
+    setBatchGroupTotal(groups.size);
+    let gDone = 0;
+    setBatchGroupDone(0);
+    let consecTransient = 0;   // 연속 '일시 오류' 수 — 한도 소진/장애 감지용(PM-01)
+    for (const [, idxs] of groups) {
       if (batchStopRef.current) break;
-      if (next[i].result) continue;
-      const r = await refineAddress(next[i].raw, clients);
-      next[i] = { ...next[i], result: r };
-      done++;
+      let r;
+      try {
+        r = await refineAddress(next[idxs[0]].raw, clients);  // 대표는 그룹 첫 행의 원본 raw
+        consecTransient = 0;
+      } catch (e) {
+        // 클라이언트가 던진 일시 오류(네트워크/HTTP/한도) — 영구 실패와 구분해 기록
+        r = { status: "FAILED", failKind: "TRANSIENT",
+              message: `일시 오류: ${e && e.message ? e.message : e}` };
+        consecTransient++;
+      }
+      for (const i of idxs) {
+        next[i] = { ...next[i], result: r };
+      }
+      gDone++;
+      setBatchGroupDone(gDone);
+      done += idxs.length;
       setBatchDone(done);
-      if (done % 100 === 0) {
+      if (done % 100 < idxs.length) {            // 100건 경계를 지날 때마다 저장
         setRows([...next]);
-        await idbSet(BATCH_KEY, next);
+        await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
+      }
+      if (consecTransient >= 20) {
+        // 연속 20그룹이 전부 일시오류 = 한도 소진 또는 API 장애 가능성 높음.
+        // 계속 헛호출하지 않고 자동 중단(진행분은 저장돼 있고, 실패분은
+        // TRANSIENT라 '일괄 정제' 재클릭 시 그 지점부터 재시도됨).
+        batchStopRef.current = true;
+        setAutoStopMsg(`연속 오류 ${consecTransient}회 감지 — API 한도 소진 또는 장애 가능성이 있어 자동 중단했습니다. 잠시 후(또는 내일) '일괄 정제'를 다시 누르면 실패분부터 이어서 진행합니다.`);
+        break;
       }
     }
     setRows([...next]);
-    await idbSet(BATCH_KEY, next);
+    await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
+    // 완료 검증(중단이 아닌 자연 완료일 때만): 모든 행에 결과가 반영됐는지
+    if (!batchStopRef.current) {
+      const missing = next.filter((r) => !r.result).length;
+      if (missing > 0) {
+        setFileErr(`검증 경고: ${missing}행에 정제 결과가 반영되지 않았습니다. 다시 정제를 실행해주세요.`);
+      }
+      const transient = next.filter((r) => r.result && r.result.failKind === "TRANSIENT").length;
+      if (transient > 0) {
+        setAutoStopMsg(`일시 오류로 실패한 ${transient}행이 있습니다 — '일괄 정제'를 다시 누르면 해당 행만 재시도합니다.`);
+      }
+    }
     setBatchBusy(false);
-  }, [rows, clients]);
+  }, [rows, clients, extraHeaders]);
   const buildRecords = useCallback(() => {
     const recs = rows.map((row) => {
       const r = row.result || {};
@@ -1374,6 +1548,7 @@ function AddrRefineTestGui() {
         dong: r.unit?.dong || "",
         ho: r.unit?.ho || "",
         pnu,
+        bdMgtSn: r.bdMgtSn || "",
         regNo,
         regStatus: reg?.status || "",
         pk,
@@ -1409,8 +1584,9 @@ function AddrRefineTestGui() {
     }
     return recs;
   }, [rows]);
-  const HEADERS = ["\uC6D0\uBCF8\uC8FC\uC18C", "\uC815\uC81C\uC0C1\uD0DC", "\uC2DC\uAD70\uAD6C", "\uBD80\uB3D9\uC0B0\uAD6C\uBD84", "\uC8FC\uD0DD\uC720\uD615", "\uC9C0\uBC88\uC8FC\uC18C", "\uB3C4\uB85C\uBA85\uC8FC\uC18C", "\uB3D9", "\uD638", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638", "\uC911\uBCF5\uC5EC\uBD80", "\uC911\uBCF5\uADF8\uB8F9", "\uC8FC\uC18C\uD655\uC815\uC6D0\uCC9C", "\uB3D9\uD638\uC6D0\uCC9C", "\uB4F1\uAE30\uC0C1\uD0DC", "\uC2E4\uD328\uCF54\uB4DC", "\uC870\uD68C\uC77C\uC2DC", "\uBE44\uACE0"];
+  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "조회일시", "비고"];
   const recToRow = (rec) => [
+    ...rec.extra,
     rec.raw,
     rec.status,
     rec.sigungu,
@@ -1421,6 +1597,7 @@ function AddrRefineTestGui() {
     rec.dong,
     rec.ho,
     rec.pnu,
+    rec.bdMgtSn,
     rec.regNo,
     rec.dup,
     rec.grp,
@@ -1429,28 +1606,33 @@ function AddrRefineTestGui() {
     REG_LABEL[rec.regStatus] || rec.regStatus || "",
     rec.failCode,
     rec.lookupAt,
-    rec.note,
-    ...rec.extra
+    rec.note
   ];
   const makeSheet = (recs, mode2) => {
-    const head = [...HEADERS, ...extraHeaders];
+    // 부동산번호 등 업로드 원본 열(extraHeaders)을 맨 앞에 배치 — 조인키가
+    // 스크롤 없이 바로 보이도록. 나머지(HEADERS)는 기존 순서 그대로.
+    const head = [...extraHeaders, ...HEADERS];
     const aoa = [head];
     for (const rec of recs) {
-      if (mode2 === "unique" && rec.dup === "\uC911\uBCF5") continue;
+      if (mode2 === "unique" && rec.dup === "중복") continue;
       if (mode2 === "fail") {
-        const ok = (rec.status === "\uD655\uC815" || rec.status === "CONFIRMED") && rec.regNo;
+        const ok = (rec.status === "확정" || rec.status === "CONFIRMED") && rec.regNo;
         if (ok) continue;
       }
       aoa.push(recToRow(rec));
     }
     const ws = XLSX.utils.aoa_to_sheet(aoa);
+    // PNU·건물관리번호·등기고유번호는 선행 0/하이픈 소실 방지를 위해 텍스트
+    // 서식 강제. extraHeaders가 앞에 붙었으므로 그 길이만큼 오프셋을 더함.
+    const offset = extraHeaders.length;
     for (let i = 1; i < aoa.length; i++) {
-      for (const col of [9, 10]) {
+      for (const col of [offset + 9, offset + 10, offset + 11]) {
         const ref = XLSX.utils.encode_cell({ r: i, c: col });
         if (ws[ref]) ws[ref].t = "s";
       }
     }
     ws["!cols"] = [
+      ...extraHeaders.map(() => 14),
       34,
       9,
       10,
@@ -1461,6 +1643,7 @@ function AddrRefineTestGui() {
       6,
       7,
       21,
+      25,
       17,
       9,
       9,
@@ -1469,8 +1652,7 @@ function AddrRefineTestGui() {
       11,
       12,
       17,
-      15,
-      ...extraHeaders.map(() => 14)
+      15
     ].map((w) => ({ wch: w }));
     ws["!freeze"] = { xSplit: 0, ySplit: 1 };
     return ws;
@@ -1525,6 +1707,30 @@ function AddrRefineTestGui() {
   };
   const downloadXlsx = useCallback((mode2) => {
     const recs = buildRecords();
+    // 무결성 검증(다중집합 비교): 출력은 시군구 등으로 의도적으로 재정렬
+    // 되므로 '행 순서'가 아니라 "모든 (원본주소+원본열) 쌍이 업로드된
+    // 횟수만큼 정확히 존재"를 검사한다. 부동산번호 누락·뒤섞임을 잡는다.
+    // (중복제거본·실패본은 의도적 부분집합이라 검사 대상 아님 — 전체본 기준)
+    {
+      const sig = (raw, extra) => raw + "\u0001" + JSON.stringify(extra || []);
+      const cnt = /* @__PURE__ */ new Map();
+      for (const row of rows) {
+        const s = sig(row.raw, row.extra);
+        cnt.set(s, (cnt.get(s) || 0) + 1);
+      }
+      let broken = recs.length !== rows.length;
+      if (!broken) for (const rec of recs) {
+        const s = sig(rec.raw, rec.extra);
+        const c = cnt.get(s);
+        if (!c) { broken = true; break; }
+        cnt.set(s, c - 1);
+      }
+      if (!broken) for (const v of cnt.values()) if (v !== 0) { broken = true; break; }
+      if (broken) {
+        alert(`무결성 오류: 업로드 원본(부동산번호 포함)과 결과가 1:1로 대응하지 않습니다 (업로드 ${rows.length}행 / 결과 ${recs.length}행). 다운로드를 중단합니다 — 새로고침 후 "이어서 하기"로 복구해주세요.`);
+        return;
+      }
+    }
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, makeSummary(recs), "\uC694\uC57D");
     const sheetName = mode2 === "unique" ? "\uC911\uBCF5\uC81C\uAC70\uBCF8" : mode2 === "fail" ? "\uC2E4\uD328\xB7\uBBF8\uD655\uC815" : "\uC804\uCCB4(\uC911\uBCF5\uD45C\uC2DC)";
@@ -1855,7 +2061,7 @@ function AddrRefineTestGui() {
     textAlign: "center",
     backdropFilter: "blur(4px)",
     WebkitBackdropFilter: "blur(4px)"
-  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv \uD30C\uC77C\uC758 ", /* @__PURE__ */ React.createElement("strong", { style: { color: C.ink } }, "A\uC5F4"), "\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4 \uC5C5\uB85C\uB4DC\uD558\uC138\uC694. \uD5E4\uB354 \uD589\uC740 \uC790\uB3D9 \uC778\uC2DD\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `\uC815\uC81C\uC911 ${batchDone}/${rows.length}` : `\uC77C\uAD04 \uC815\uC81C (${rows.length}\uAC74)`), bridgeUp && (stat.CONFIRMED || 0) > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
+  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv \uD30C\uC77C\uC758 ", /* @__PURE__ */ React.createElement("strong", { style: { color: C.ink } }, "A\uC5F4"), "\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4 \uC5C5\uB85C\uB4DC\uD558\uC138\uC694. \uD5E4\uB354 \uD589\uC740 \uC790\uB3D9 \uC778\uC2DD\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileParsing && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.cyan, marginTop: 10 } }, "⏳ 파일 처리 중... (행 수가 많으면 몇 초 걸릴 수 있어요)"), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.dim, marginTop: 12, fontFamily: mono } }, `총 ${uploadStats.total.toLocaleString()}행 · 고유주소 ${uploadStats.uniq.toLocaleString()}건 · 최대 중복그룹 ${uploadStats.maxGrp.toLocaleString()}행` + (uploadStats.empty > 0 ? ` · 빈주소 ${uploadStats.empty.toLocaleString()}행 제외` : "")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 고유주소 ${batchGroupDone}/${batchGroupTotal} · 행 ${batchDone}/${rows.length}` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}건)` : `일괄 정제 (${rows.length}건)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), bridgeUp && (stat.CONFIRMED || 0) > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: lookupBatchUniqueNo,
@@ -1868,8 +2074,8 @@ function AddrRefineTestGui() {
     },
     "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (",
     stat.CONFIRMED || 0,
-    "\uAC74)"
-  ), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 13, color: C.cyan } }, "\uB4F1\uAE30\uC870\uD68C ", batchRegDone, "/", batchTotal, " (\uC911\uBCF5\uC81C\uAC70 \uD6C4 \xB7 \uAC74\uB2F9 1\uCD08)"), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
+    "건)"
+  ), (!batchBusy && rows.length > 0 && batchDone === rows.length && ((stat.CONFIRMED || 0) === 0 || (!batchRegBusy && batchTotal > 0 && batchRegDone >= batchTotal))) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 전체 처리 완료 · 정제 ${batchDone}건`, (stat.CONFIRMED || 0) > 0 ? ` · 등기조회 ${batchRegDone}건` : ""), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 13, color: C.cyan } }, `등기조회 ${batchTotal ? Math.round(batchRegDone / batchTotal * 100) : 0}% (${batchRegDone}/${batchTotal}) · 중복제거 후 · 건당 1초`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => downloadXlsx("all"),
