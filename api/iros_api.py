@@ -365,11 +365,21 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                                  message="응답 구조 변경/파싱 실패 (수동확인)")
         cands = _parse_json_response(data)
 
-        # 건물명 넣었는데 0건이면(표기 불일치) → 건물명 빼고 재시도
+        # 건물명 0건 → 표기 변형으로 재시도 (IROS 등록명과 띄어쓰기가 다를 수 있음)
+        # 예: juso "래미안 원베일리" vs IROS "래미안원베일리"
         if buld_name and len(cands) == 0:
-            data, code = _query("")
-            if data is not None and not (isinstance(data, dict) and "_raw" in data):
+            variants = []
+            nospace = re.sub(r"\s+", "", buld_name)
+            if nospace != buld_name:
+                variants.append(nospace)          # 붙여쓰기
+            variants.append("")                   # 마지막: 건물명 빼고 지번+동호
+            for v in variants:
+                data, code = _query(v)
+                if data is None or (isinstance(data, dict) and "_raw" in data):
+                    continue
                 cands = _parse_json_response(data)
+                if cands:
+                    break
 
         # 지번(번지) 필터: 건물명 검색으로 다른 번지 건물이 섞여오면 정제 지번으로 걸러냄
         want_dong, want_beonji = _extract_dong_beonji(address)

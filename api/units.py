@@ -32,8 +32,16 @@ def _env(name, default=None):
 
 def _http_get(url, timeout=8):
     req = urllib.request.Request(url, headers={"User-Agent": "addr-refine/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        # VWorld는 에러도 본문에 이유를 담아 보냄 → 읽어서 원인 노출
+        try:
+            body = e.read().decode("utf-8", "ignore")[:300]
+        except Exception:
+            body = ""
+        raise RuntimeError(f"HTTP {e.code} — {body or e.reason}") from None
 
 
 def _build_url(pnu, *, key, domain=None, num_rows=1000, page=1):
@@ -104,16 +112,30 @@ def _fetch_units(pnu):
     total = 0
     page = 1
     NUM = 1000
-    MAX_PAGES = 10  # 안전장치 (무한루프 방지: 최대 1만 세대)
+    MAX_PAGES = 10
     prev_len = -1
+    # domain 유무 조합 자동 시도 (VWorld 키 등록 방식에 따라 요구가 다름)
+    domain_opts = [domain, None] if domain else [None, ""]
+    last_err = None
     while page <= MAX_PAGES:
-        url = _build_url(pnu, key=key, domain=domain, num_rows=NUM, page=page)
-        try:
-            raw = _http_get(url)
-        except Exception as e:
+        raw = None
+        for dom in domain_opts:
+            url = _build_url(pnu, key=key, domain=dom, num_rows=NUM, page=page)
+            try:
+                raw = _http_get(url)
+                domain_opts = [dom]  # 성공한 조합으로 고정
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        if raw is None:
             if all_fields:
                 break  # 일부라도 받았으면 그걸로 진행
-            return {"ok": False, "error": f"VWorld 호출 실패: {type(e).__name__}: {e}"}
+            return {"ok": False,
+                    "error": f"VWorld 호출 실패: {last_err}",
+                    "hint": "키가 맞는지, vworld.kr에 등록한 서비스 URL이 배포 주소와 같은지 확인하세요. "
+                            "필요시 Vercel 환경변수 VWORLD_DOMAIN에 등록 URL을 넣어주세요."}
         fields, total, err = _parse_json(raw)
         if err:
             if all_fields:

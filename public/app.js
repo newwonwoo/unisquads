@@ -886,7 +886,15 @@ function ResultCard({ r, onRegionPick, bridgeUp, reg, regBusy, onLookup }) {
     letterSpacing: "0.1em",
     textShadow: `0 0 14px ${C.ok}55`,
     marginBottom: 6
-  } }, reg.unique_no), reg?.status === "REG_MULTI" && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: C.warn, marginBottom: 4 } }, reg.candidates.length, "\uAC74 \u2014 \uC18C\uC7AC\uC9C0\uB85C \uAD6C\uBD84"), reg.candidates.map((c, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontFamily: mono, fontSize: 12.5, color: C.ink } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, c.unique_no), /* @__PURE__ */ React.createElement("span", { style: { color: C.dim, marginLeft: 8 } }, c.sojae)))), reg && !["RESOLVED", "REG_MULTI"].includes(reg.status) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: C.err, marginBottom: 6 } }, REG_LABEL[reg.status] || reg.status, " \u2014 ", reg.message), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, bridgeUp ? /* @__PURE__ */ React.createElement(
+  } }, reg.unique_no), reg?.status === "REG_MULTI" && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: C.warn, marginBottom: 4 } }, reg.candidates.length, "\uAC74 \u2014 \uC18C\uC7AC\uC9C0\uB85C \uAD6C\uBD84"), reg.candidates.map((c, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontFamily: mono, fontSize: 12.5, color: C.ink } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, c.unique_no), /* @__PURE__ */ React.createElement("span", { style: { color: C.dim, marginLeft: 8 } }, c.sojae)))), reg?.status === "NEED_UNIT" && /* @__PURE__ */ React.createElement("div", { style: {
+    fontSize: 12.5,
+    color: C.warn,
+    marginBottom: 6,
+    padding: "8px 12px",
+    background: `${C.warn}15`,
+    border: `1px solid ${C.warn}44`,
+    borderRadius: 8
+  } }, "\u26A0\uFE0F ", reg.message), reg && !["RESOLVED", "REG_MULTI", "NEED_UNIT"].includes(reg.status) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: C.err, marginBottom: 6 } }, REG_LABEL[reg.status] || reg.status, " \u2014 ", reg.message), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } }, bridgeUp ? /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: onLookup,
@@ -1046,6 +1054,14 @@ function AddrRefineTestGui() {
   }, [BRIDGE]);
   const lookupUniqueNo = useCallback(async () => {
     if (!result || result.status !== "CONFIRMED") return;
+    if (result.isJip && !(result.unit?.dong || result.unit?.ho)) {
+      setRegResult({
+        status: "NEED_UNIT",
+        message: "\uC9D1\uD569\uAC74\uBB3C\uC785\uB2C8\uB2E4. \uB3D9\xB7\uD638\uB97C \uC785\uB825\uD574\uC57C \uB4F1\uAE30\uB97C \uD2B9\uC815\uD560 \uC218 \uC788\uC5B4\uC694. (\uB3D9\xB7\uD638 \uC5C6\uC774 \uC870\uD68C\uD558\uBA74 \uACB0\uACFC\uAC00 \uB098\uC624\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4)"
+      });
+      setUnitOpen(true);
+      return;
+    }
     setRegBusy(true);
     setRegResult(null);
     try {
@@ -1154,17 +1170,61 @@ function AddrRefineTestGui() {
   const [unitList, setUnitList] = useState(null);
   const [unitBusy, setUnitBusy] = useState(false);
   const [unitErr, setUnitErr] = useState("");
+  const loadUnitsFor = useCallback(async (pnu) => {
+    if (!pnu) return;
+    setUnitBusy(true);
+    setUnitErr("");
+    setUnitList(null);
+    try {
+      const cacheKey = `units:${pnu}`;
+      let data = await idbGet(cacheKey);
+      if (!data) {
+        const r = await fetch(
+          `${BRIDGE}/units?pnu=${encodeURIComponent(pnu)}`,
+          { signal: AbortSignal.timeout(15e3) }
+        );
+        data = await r.json();
+        if (data.ok) await idbSet(cacheKey, data);
+      }
+      if (!data.ok) {
+        setUnitErr(data.error || "\uC138\uB300 \uBAA9\uB85D\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC5B4\uC694. \uB3D9\xB7\uD638\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
+        return;
+      }
+      if (data.aptType) setResult((prev) => prev ? { ...prev, aptType: data.aptType } : prev);
+      if (data.count === 0) {
+        setUnitErr("\uB4F1\uB85D\uB41C \uC138\uB300 \uC815\uBCF4\uAC00 \uC5C6\uC5B4\uC694. \uB3D9\xB7\uD638\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
+        return;
+      }
+      setUnitList({ name: data.name, units: data.units });
+    } catch {
+      setUnitErr("\uC138\uB300 \uC870\uD68C \uC2E4\uD328 \u2014 \uB3D9\xB7\uD638\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
+    } finally {
+      setUnitBusy(false);
+    }
+  }, [BRIDGE]);
   const runSingle = useCallback(async (raw) => {
     if (!raw.trim()) return;
     setBusy(true);
     const r = await refineAddress(raw, clients);
-    if (r?.unit?.dong) setUnitDong(r.unit.dong);
-    if (r?.unit?.ho) setUnitHo(r.unit.ho);
+    const dongFinal = r?.unit?.dong || normalizeUnitInput(unitDong) || "";
+    const hoFinal = r?.unit?.ho || normalizeUnitInput(unitHo) || "";
+    if (dongFinal) setUnitDong(String(dongFinal).replace(/[^\d]/g, ""));
+    if (hoFinal) setUnitHo(String(hoFinal).replace(/[^\d]/g, ""));
+    if (r && r.status === "CONFIRMED") {
+      r.unit = { dong: dongFinal || null, ho: hoFinal || null };
+      const parts = [r.jibunAddr || ""];
+      if (dongFinal) parts.push(`${dongFinal}\uB3D9`);
+      if (hoFinal) parts.push(`${hoFinal}\uD638`);
+      r.irosQuery = parts.filter(Boolean).join(" ").trim();
+    }
     if (r?.status === "CONFIRMED" && r.isJip) setUnitOpen(true);
     setResult(r);
     setLastRaw(raw);
     setBusy(false);
-  }, [clients]);
+    if (r?.status === "CONFIRMED" && r.isJip && r.pnu) {
+      loadUnitsFor(r.pnu);
+    }
+  }, [clients, unitDong, unitHo, loadUnitsFor]);
   const applyUnit = useCallback((dongVal, hoVal) => {
     const d = normalizeUnitInput(dongVal);
     const h = normalizeUnitInput(hoVal);
@@ -1179,43 +1239,9 @@ function AddrRefineTestGui() {
       return { ...prev, unit, irosQuery: parts.filter(Boolean).join(" ").trim() };
     });
   }, []);
-  const findUnits = useCallback(async () => {
-    if (!result?.pnu) return;
-    setUnitBusy(true);
-    setUnitErr("");
-    setUnitList(null);
-    try {
-      const cacheKey = `units:${result.pnu}`;
-      let data = await idbGet(cacheKey);
-      if (!data) {
-        const r = await fetch(
-          `${BRIDGE}/units?pnu=${encodeURIComponent(result.pnu)}`,
-          { signal: AbortSignal.timeout(15e3) }
-        );
-        data = await r.json();
-        if (data.ok) await idbSet(cacheKey, data);
-      }
-      if (!data.ok) {
-        setUnitErr(data.error || "\uC138\uB300 \uBAA9\uB85D\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC5B4\uC694.");
-        return;
-      }
-      if (data.aptType) setResult((prev) => prev ? { ...prev, aptType: data.aptType } : prev);
-      if (data.count === 0) {
-        setUnitErr("\uB4F1\uB85D\uB41C \uC138\uB300 \uC815\uBCF4\uAC00 \uC5C6\uC5B4\uC694. \uB3D9\xB7\uD638\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
-        return;
-      }
-      if (data.single) {
-        const u = data.units[0];
-        applyUnit(u.dong || "", u.ho || "");
-        return;
-      }
-      setUnitList({ name: data.name, units: data.units });
-    } catch {
-      setUnitErr("\uC138\uB300 \uC870\uD68C \uC2E4\uD328 \u2014 \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694.");
-    } finally {
-      setUnitBusy(false);
-    }
-  }, [result, BRIDGE, applyUnit]);
+  const findUnits = useCallback(() => {
+    if (result?.pnu) loadUnitsFor(result.pnu);
+  }, [result, loadUnitsFor]);
   const onUnitPick = useCallback((u) => {
     applyUnit(u.dong || "", u.ho || "");
     setUnitList(null);
@@ -1240,12 +1266,13 @@ function AddrRefineTestGui() {
         isJip
       });
       if (isJip) setUnitOpen(true);
+      if (isJip && cand.pnu) loadUnitsFor(cand.pnu);
       return;
     }
     const region = (cand.sidoSigungu || "").trim();
     const base = lastRaw.replace(region, "").trim();
     await runSingle(`${region} ${base}`.replace(/\s+/g, " ").trim());
-  }, [lastRaw, runSingle, unitDong, unitHo]);
+  }, [lastRaw, runSingle, unitDong, unitHo, loadUnitsFor]);
   const onFile = useCallback(async (e) => {
     setFileErr("");
     const file = e.target.files?.[0];
@@ -1774,8 +1801,8 @@ function AddrRefineTestGui() {
         opacity: unitBusy ? 0.6 : 1
       }
     },
-    unitBusy ? "\uBD88\uB7EC\uC624\uB294 \uC911\u2026" : "\u{1F50D} \uC138\uB300 \uCC3E\uAE30"
-  )), unitErr && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.dim, marginTop: 8 } }, unitErr), unitList && /* @__PURE__ */ React.createElement(UnitPicker, { data: unitList, onPick: onUnitPick, onClose: () => setUnitList(null) })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap", justifyContent: "center" } }, ["\uC11C\uC6B8\uFF0A\uAC15\uB0A8\uAD6C\uFF01\uD14C\uD5E4\uB780\uB85C\uFF12\uFF11\uFF12", "\uC2E0\uC815\uB3D9 100", "\uC911\uC559\uB3D9 50", "\uCCAD\uC8FC\uC2DC \uC0B0\uC131\uB3D9 \uC0B012-3", "\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC 101\uB3D9 1502\uD638", "\uC5C6\uB294\uC8FC\uC18C 999"].map((ex) => /* @__PURE__ */ React.createElement(
+    unitBusy ? "\uBD88\uB7EC\uC624\uB294 \uC911\u2026" : "\u{1F50D} \uC138\uB300 \uBAA9\uB85D \uB2E4\uC2DC \uBD88\uB7EC\uC624\uAE30"
+  )), unitBusy && !unitList && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: C.cyan, marginTop: 8 } }, "\u{1F3E2} \uC774 \uB2E8\uC9C0\uC758 \uB3D9\xB7\uD638 \uBAA9\uB85D\uC744 \uBD88\uB7EC\uC624\uB294 \uC911\u2026"), unitErr && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.dim, marginTop: 8 } }, unitErr), unitList && /* @__PURE__ */ React.createElement(UnitPicker, { data: unitList, onPick: onUnitPick, onClose: () => setUnitList(null) })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap", justifyContent: "center" } }, ["\uC11C\uC6B8\uFF0A\uAC15\uB0A8\uAD6C\uFF01\uD14C\uD5E4\uB780\uB85C\uFF12\uFF11\uFF12", "\uC2E0\uC815\uB3D9 100", "\uC911\uC559\uB3D9 50", "\uCCAD\uC8FC\uC2DC \uC0B0\uC131\uB3D9 \uC0B012-3", "\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC 101\uB3D9 1502\uD638", "\uC5C6\uB294\uC8FC\uC18C 999"].map((ex) => /* @__PURE__ */ React.createElement(
     "button",
     {
       key: ex,
