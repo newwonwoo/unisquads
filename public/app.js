@@ -1205,11 +1205,15 @@ function AddrRefineTestGui() {
   const runSingle = useCallback(async (raw) => {
     if (!raw.trim()) return;
     setBusy(true);
+    setUnitList(null);
+    setUnitErr("");
+    setRegResult(null);
     const r = await refineAddress(raw, clients);
-    const dongFinal = r?.unit?.dong || normalizeUnitInput(unitDong) || "";
-    const hoFinal = r?.unit?.ho || normalizeUnitInput(unitHo) || "";
-    if (dongFinal) setUnitDong(String(dongFinal).replace(/[^\d]/g, ""));
-    if (hoFinal) setUnitHo(String(hoFinal).replace(/[^\d]/g, ""));
+    const isJip = r?.status === "CONFIRMED" && !!r.isJip;
+    const dongFinal = r?.unit?.dong || (isJip ? normalizeUnitInput(unitDong) : "") || "";
+    const hoFinal = r?.unit?.ho || (isJip ? normalizeUnitInput(unitHo) : "") || "";
+    setUnitDong(dongFinal ? String(dongFinal).replace(/[^\d]/g, "") : "");
+    setUnitHo(hoFinal ? String(hoFinal).replace(/[^\d]/g, "") : "");
     if (r && r.status === "CONFIRMED") {
       r.unit = { dong: dongFinal || null, ho: hoFinal || null };
       const parts = [r.jibunAddr || ""];
@@ -1217,11 +1221,11 @@ function AddrRefineTestGui() {
       if (hoFinal) parts.push(`${hoFinal}\uD638`);
       r.irosQuery = parts.filter(Boolean).join(" ").trim();
     }
-    if (r?.status === "CONFIRMED" && r.isJip) setUnitOpen(true);
+    setUnitOpen(isJip);
     setResult(r);
     setLastRaw(raw);
     setBusy(false);
-    if (r?.status === "CONFIRMED" && r.isJip && r.pnu) {
+    if (isJip && r.pnu) {
       loadUnitsFor(r.pnu);
     }
   }, [clients, unitDong, unitHo, loadUnitsFor]);
@@ -1784,7 +1788,7 @@ function AddrRefineTestGui() {
       maxLength: 4,
       style: { ...field(80), textAlign: "center", fontFamily: mono }
     }
-  )), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, color: C.faint } }, "\uC22B\uC790\uB9CC \uC785\uB825 (\uB3D9\xB7\uD638 \uAE00\uC790 \uBD88\uD544\uC694)"), result?.status === "CONFIRMED" && result?.pnu && /* @__PURE__ */ React.createElement(
+  )), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, color: C.faint } }, "\uC22B\uC790\uB9CC \uC785\uB825 (\uB3D9\xB7\uD638 \uAE00\uC790 \uBD88\uD544\uC694)"), result?.status === "CONFIRMED" && result?.isJip && result?.pnu && !unitList && /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: findUnits,
