@@ -201,6 +201,27 @@ def _walk_records(obj):
     return found
 
 
+_UNIT_DONG_RE = re.compile(r"제?(\d+)동")
+_UNIT_HO_RE = re.compile(r"제?(\d+)호")
+
+
+def _extract_unit_from_text(rec: dict):
+    """레코드 텍스트(부동산표시 등)에서 동·호를 추출하는 폴백(2026-07-13 추가).
+
+    실측: IROS 응답에서 buld_no_buld/buld_no_room 전용 필드가 비어 오는 경우가
+    있고, 동·호는 부동산표시 문장 안에 "제 1 0 1 동 제 1 층 제 103호" 처럼
+    (숫자 사이에 공백까지 섞여) 박혀 있다. 공백을 모두 제거한 뒤 '숫자+동',
+    '숫자+호'를 뽑는다. '반포동' 같은 법정동은 앞이 숫자가 아니므로 매칭되지
+    않고, '제1층'의 층도 대상이 아니라 안전하다.
+    """
+    blob = " ".join(str(v) for v in rec.values() if isinstance(v, (str, int)))
+    blob = _strip_html(blob)
+    flat = re.sub(r"\s+", "", blob)          # "제 1 0 1 동" → "제101동"
+    d = _UNIT_DONG_RE.search(flat)
+    h = _UNIT_HO_RE.search(flat)
+    return (d.group(1) if d else ""), (h.group(1) if h else "")
+
+
 def _rec_to_cand(rec: dict) -> Optional[dict]:
     """레코드 dict → 후보. pin_land(무하이픈) 우선. 소재지 HTML 제거, 동·호·층 포함."""
     pin = _pick(rec, UNIQUE_KEY_CANDIDATES)
@@ -223,6 +244,11 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
     dong = str(rec.get("buld_no_buld", "") or "")
     ho = str(rec.get("buld_no_room", "") or "")
     floor = str(rec.get("buld_no_floor", "") or "")
+    # 전용 필드가 비어있으면 부동산표시 텍스트에서 폴백 추출(위 함수 주석 참고)
+    if not dong or not ho:
+        td, th = _extract_unit_from_text(rec)
+        dong = dong or td
+        ho = ho or th
     # 지번 정보 (번지 필터용): lot_no=본번, addItem="법정동 번지"
     lot_no = str(rec.get("lot_no", "") or "")
     add_item = _strip_html(str(rec.get("addItem", "") or ""))
@@ -339,14 +365,18 @@ def _match_lot(c, want_dong, want_beonji):
 
 
 def _match_unit(c, dong, ho):
-    """레코드가 입력 동·호와 일치하는지. 동·호 없는 레코드(대지권)는 제외."""
-    cd = re.sub(r"\D", "", str(c.get("dong", "")))
-    ch = re.sub(r"\D", "", str(c.get("ho", "")))
-    want_d = re.sub(r"\D", "", str(dong))
-    want_h = re.sub(r"\D", "", str(ho))
-    if want_d and (not cd or cd != want_d):
+    """레코드가 입력 동·호와 일치하는지. 동·호 없는 레코드(대지권)는 제외.
+    숫자'값'으로 비교(문자열 비교 아님) — 등기부 표기가 "0706"처럼 앞자리
+    0이 붙어있어도 입력 "706"과 같은 값으로 인식되게 함(2026-07-13 수정:
+    래미안 원베일리 116동 706호가 이 패턴으로 매칭 실패했음)."""
+    def to_int(s):
+        d = re.sub(r"\D", "", str(s or ""))
+        return int(d) if d != "" else None
+    cd, ch = to_int(c.get("dong", "")), to_int(c.get("ho", ""))
+    want_d, want_h = to_int(dong), to_int(ho)
+    if want_d is not None and (cd is None or cd != want_d):
         return False
-    if want_h and (not ch or ch != want_h):
+    if want_h is not None and (ch is None or ch != want_h):
         return False
     return True
 
@@ -447,10 +477,33 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                 cands = lot_filtered
 
         # 동·호 정확 매칭 필터 (대지권·다른동 제외)
+        # 2026-07-13 수정: 예전엔 `if filtered: cands = filtered` 였는데, 이러면
+        # 매칭이 0건일 때 필터 결과를 버리고 '필터 전 후보 전체'를 그대로 되살려
+        # REG_MULTI(다건)로 내보냈다 → 사용자가 동·호를 정확히 찍었는데도 그 단지의
+        # 모든 세대가 후보로 뜨는 원인(1차 원인인 선행0 매칭실패와 연쇄).
+        # 이제 매칭 0건이면 후보를 되살리지 않고 명확히 실패로 끝낸다.
+        # 단, 후보 중 '동·호 정보를 가진 레코드가 하나도 없는' 경우는 매칭 실패가
+        # 아니라 '필터 불가'(토지 등기만 있거나 IROS 응답 키 변경 등)이므로,
+        # 이때는 잘못된 단정을 피하기 위해 후보를 유지하고 사유를 표시한다.
+        unit_filter_note = ""
         if (dong or ho) and cands:
-            filtered = [c for c in cands if _match_unit(c, dong, ho)]
-            if filtered:
+            has_unit_info = any(
+                str(c.get("dong") or "").strip() or str(c.get("ho") or "").strip()
+                for c in cands
+            )
+            if has_unit_info:
+                filtered = [c for c in cands if _match_unit(c, dong, ho)]
+                if not filtered:
+                    want = " ".join(filter(None, [f"{dong}동" if dong else "",
+                                                  f"{ho}호" if ho else ""]))
+                    return ResolveResult(
+                        address, "REG_UNIT_NOT_FOUND",
+                        candidates=cands,
+                        message=f"해당 지번의 등기는 찾았으나 {want}와 일치하는 세대가 없습니다 "
+                                f"(후보 {len(cands)}건). 동·호를 확인해 주세요.")
                 cands = filtered
+            else:
+                unit_filter_note = " (응답에 동·호 정보가 없어 세대 필터 미적용)"
 
         if len(cands) == 0:
             return ResolveResult(address, "REG_NOT_FOUND",
@@ -462,9 +515,7 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                                           (c.get("ho") and f"{c['ho']}호") or ""]))
             return ResolveResult(address, "RESOLVED", unique_no=c["unique_no"],
                                  candidates=cands, message=desc.strip())
-        note = ""
-        if ho and not any(_match_unit(c, dong, ho) for c in cands):
-            note = f" (입력한 {ho}호 미매칭 — 동·호 확인 필요)"
+        note = unit_filter_note   # 위 필터에서 '동·호 정보 없어 필터 불가'였던 경우만 채워짐
         return ResolveResult(address, "REG_MULTI", candidates=cands,
                              message=f"{len(cands)}건{note}")
     except requests.Timeout:
@@ -522,3 +573,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def debug_raw_records(address: str, buld_name: str = "", timeout: float = 20.0) -> dict:
+    """진단용: IROS 원본 레코드를 가공 없이 반환(2026-07-13 추가).
+
+    파서가 동·호를 어느 필드에서 읽어야 하는지 '추측하지 않고' 확인하기 위한
+    용도. 배포 환경(국내 리전)에서만 IROS 접속이 되므로 여기서만 확인 가능.
+    사용: /api/resolve?addr=서울특별시 서초구 반포동 1&debug=1
+    """
+    s = make_session()
+    pure = _strip_trailing_buldname(address)
+    payload = _build_payload(pure, dong="", ho="", buld_name=buld_name)
+    r = s.post(SEARCH_API, json=payload,
+               headers={"Content-Type": "application/json; charset=UTF-8"},
+               timeout=timeout)
+    out = {"swrd": payload["swrd"], "http": r.status_code}
+    try:
+        data = r.json()
+    except ValueError:
+        out["raw_text_head"] = r.text[:800]
+        return out
+    recs = _walk_records(data)
+    out["record_count"] = len(recs)
+    out["first_records"] = recs[:3]                       # 원본 그대로(키 이름 포함)
+    out["parsed_candidates"] = _parse_json_response(data)[:3]   # 파서가 뽑아낸 결과
+    return out

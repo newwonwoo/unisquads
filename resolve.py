@@ -14,10 +14,11 @@ import sys
 sys.path.append(os.path.dirname(__file__))
 
 try:
-    from iros_api import resolve_one_api
+    from iros_api import resolve_one_api, debug_raw_records
     _ERR = None
 except Exception as e:  # import 실패 원인을 응답에 노출(디버깅용)
     resolve_one_api = None
+    debug_raw_records = None
     _ERR = f"{type(e).__name__}: {e}"
 
 
@@ -44,10 +45,21 @@ class handler(BaseHTTPRequestHandler):
                                     "message": f"resolver import 실패: {_ERR}"})
         qs = parse_qs(urlparse(self.path).query)
         addr = (qs.get("addr", [""])[0]).strip()
+        dong = (qs.get("dong", [""])[0]).strip()
+        ho = (qs.get("ho", [""])[0]).strip()
+        bdnm = (qs.get("bdnm", [""])[0]).strip()
         if not addr:
             return self._send(400, {"status": "ERROR", "message": "addr 파라미터 필요"})
+        # 진단 모드: IROS 원본 레코드를 그대로 반환 — 파서가 어떤 필드를 보고
+        # 있는지 '추측 없이' 확인하기 위한 용도. (예: /api/resolve?addr=...&debug=1)
+        if qs.get("debug", [""])[0] == "1" and debug_raw_records:
+            try:
+                return self._send(200, debug_raw_records(addr, buld_name=bdnm))
+            except Exception as e:
+                return self._send(200, {"status": "ERROR",
+                                        "message": f"{type(e).__name__}: {e}"})
         try:
-            r = resolve_one_api(addr)
+            r = resolve_one_api(addr, dong=dong, ho=ho, buld_name=bdnm)
             self._send(200, {
                 "address": r.address, "status": r.status, "unique_no": r.unique_no,
                 "candidates": r.candidates, "message": r.message,
