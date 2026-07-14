@@ -201,6 +201,27 @@ def _walk_records(obj):
     return found
 
 
+_UNIT_DONG_RE = re.compile(r"제?(\d+)동")
+_UNIT_HO_RE = re.compile(r"제?(\d+)호")
+
+
+def _extract_unit_from_text(rec: dict):
+    """레코드 텍스트(부동산표시 등)에서 동·호를 추출하는 폴백(2026-07-13 추가).
+
+    실측: IROS 응답에서 buld_no_buld/buld_no_room 전용 필드가 비어 오는 경우가
+    있고, 동·호는 부동산표시 문장 안에 "제 1 0 1 동 제 1 층 제 103호" 처럼
+    (숫자 사이에 공백까지 섞여) 박혀 있다. 공백을 모두 제거한 뒤 '숫자+동',
+    '숫자+호'를 뽑는다. '반포동' 같은 법정동은 앞이 숫자가 아니므로 매칭되지
+    않고, '제1층'의 층도 대상이 아니라 안전하다.
+    """
+    blob = " ".join(str(v) for v in rec.values() if isinstance(v, (str, int)))
+    blob = _strip_html(blob)
+    flat = re.sub(r"\s+", "", blob)          # "제 1 0 1 동" → "제101동"
+    d = _UNIT_DONG_RE.search(flat)
+    h = _UNIT_HO_RE.search(flat)
+    return (d.group(1) if d else ""), (h.group(1) if h else "")
+
+
 def _rec_to_cand(rec: dict) -> Optional[dict]:
     """레코드 dict → 후보. pin_land(무하이픈) 우선. 소재지 HTML 제거, 동·호·층 포함."""
     pin = _pick(rec, UNIQUE_KEY_CANDIDATES)
@@ -223,6 +244,11 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
     dong = str(rec.get("buld_no_buld", "") or "")
     ho = str(rec.get("buld_no_room", "") or "")
     floor = str(rec.get("buld_no_floor", "") or "")
+    # 전용 필드가 비어있으면 부동산표시 텍스트에서 폴백 추출(위 함수 주석 참고)
+    if not dong or not ho:
+        td, th = _extract_unit_from_text(rec)
+        dong = dong or td
+        ho = ho or th
     # 지번 정보 (번지 필터용): lot_no=본번, addItem="법정동 번지"
     lot_no = str(rec.get("lot_no", "") or "")
     add_item = _strip_html(str(rec.get("addItem", "") or ""))
@@ -547,3 +573,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def debug_raw_records(address: str, buld_name: str = "", timeout: float = 20.0) -> dict:
+    """진단용: IROS 원본 레코드를 가공 없이 반환(2026-07-13 추가).
+
+    파서가 동·호를 어느 필드에서 읽어야 하는지 '추측하지 않고' 확인하기 위한
+    용도. 배포 환경(국내 리전)에서만 IROS 접속이 되므로 여기서만 확인 가능.
+    사용: /api/resolve?addr=서울특별시 서초구 반포동 1&debug=1
+    """
+    s = make_session()
+    pure = _strip_trailing_buldname(address)
+    payload = _build_payload(pure, dong="", ho="", buld_name=buld_name)
+    r = s.post(SEARCH_API, json=payload,
+               headers={"Content-Type": "application/json; charset=UTF-8"},
+               timeout=timeout)
+    out = {"swrd": payload["swrd"], "http": r.status_code}
+    try:
+        data = r.json()
+    except ValueError:
+        out["raw_text_head"] = r.text[:800]
+        return out
+    recs = _walk_records(data)
+    out["record_count"] = len(recs)
+    out["first_records"] = recs[:3]                       # 원본 그대로(키 이름 포함)
+    out["parsed_candidates"] = _parse_json_response(data)[:3]   # 파서가 뽑아낸 결과
+    return out
