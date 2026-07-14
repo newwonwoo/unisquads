@@ -132,8 +132,12 @@ def _build_swrd(address: str, dong: str = "", ho: str = "", buld_name: str = "")
 
 def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "") -> dict:
     """정제주소 → 검색 API 요청 본문.
-    핵심(실측): swrd에 '건물명 N동 N호'를 통째로 넣으면 IROS가 1건 특정.
-    동·호를 buld_no_buld/room 별도필드로 쪼개지 않고 검색어 문자열에 자연어처럼 넣음."""
+    2026-07-13 개정: 이 함수를 호출하는 resolve_one_api()는 이제 dong/ho를
+    항상 빈 문자열로 넘긴다(swrd에 동/호를 안 넣기로 함 — 이유는
+    resolve_one_api docstring 참고). 아래 buld_no_buld/buld_no_room을
+    "swrd에 포함하므로 비움"이라 적어둔 옛 주석은 더 이상 사실이 아니다 —
+    지금은 그냥 항상 비어있다(구조화 필드 자체를 안 씀). 이 함수 자체는
+    dong/ho 인자를 받는 범용 형태로 남겨둠(다른 호출부 대비)."""
     swrd = _build_swrd(address, dong=dong, ho=ho, buld_name=buld_name)
     return {
         "conn_menu_cls_cd": "01",
@@ -151,8 +155,8 @@ def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = 
         "admin_regn3": "",
         "lot_no": "",
         "buld_name": "",          # swrd에 건물명 포함하므로 별도 필드는 비움
-        "buld_no_buld": "",       # swrd에 동 포함하므로 비움
-        "buld_no_room": "",       # swrd에 호 포함하므로 비움
+        "buld_no_buld": "",       # 구조화 필드 미사용(위 docstring 참고) — 매번 빈값
+        "buld_no_room": "",       # 구조화 필드 미사용(위 docstring 참고) — 매번 빈값
         "rd_name": "",
         "rd_buld_no": "",
         "rd_buld_no2": "",
@@ -287,6 +291,27 @@ def make_session() -> requests.Session:
     return s
 
 
+def _strip_trailing_buldname(address: str) -> str:
+    """지번주소 뒤에 자연스레 붙어있는 건물명을 잘라내 순수
+    '시도 시군구 법정동 번지'만 남긴다(2026-07-13 추가).
+    juso jibunAddr는 보통 '...법정동 번지 건물명' 형태로 오는데(예:
+    '서울특별시 영등포구 영등포동 647 영등포푸르지오'), buld_name 인자를
+    빈 값으로 넘겨도 이 건물명은 address 자체에 이미 포함돼 있어서 그대로
+    검색어에 실린다. IROS 등기부 등록명이 juso 건물명과 다른 경우(예:
+    2006년 개명 전 '대우드림타운') swrd에 이 이름이 남아있으면 매칭이
+    안 될 수 있어, 1차 시도만큼은 이 부분까지 제거해 순수 지번으로 검색한다.
+    번지를 못 찾으면(형식이 다른 주소 등) 원본을 그대로 반환 — 안전 우선."""
+    dong_m = re.search(r"([가-힣]+(?:동|가|리))(?:\s|$)", address)
+    if not dong_m:
+        return address
+    rest = address[dong_m.end():]
+    b_m = re.match(r"\s*(\d+(?:-\d+)?)", rest)
+    if not b_m:
+        return address
+    cut = dong_m.end() + b_m.end()
+    return address[:cut].strip()
+
+
 def _extract_dong_beonji(address: str):
     """정제주소에서 법정동명 + 번지(본번-부번) 추출.
     예: '서울특별시 영등포구 영등포동 647' → ('영등포동', '647')"""
@@ -314,14 +339,18 @@ def _match_lot(c, want_dong, want_beonji):
 
 
 def _match_unit(c, dong, ho):
-    """레코드가 입력 동·호와 일치하는지. 동·호 없는 레코드(대지권)는 제외."""
-    cd = re.sub(r"\D", "", str(c.get("dong", "")))
-    ch = re.sub(r"\D", "", str(c.get("ho", "")))
-    want_d = re.sub(r"\D", "", str(dong))
-    want_h = re.sub(r"\D", "", str(ho))
-    if want_d and (not cd or cd != want_d):
+    """레코드가 입력 동·호와 일치하는지. 동·호 없는 레코드(대지권)는 제외.
+    숫자'값'으로 비교(문자열 비교 아님) — 등기부 표기가 "0706"처럼 앞자리
+    0이 붙어있어도 입력 "706"과 같은 값으로 인식되게 함(2026-07-13 수정:
+    래미안 원베일리 116동 706호가 이 패턴으로 매칭 실패했음)."""
+    def to_int(s):
+        d = re.sub(r"\D", "", str(s or ""))
+        return int(d) if d != "" else None
+    cd, ch = to_int(c.get("dong", "")), to_int(c.get("ho", ""))
+    want_d, want_h = to_int(dong), to_int(ho)
+    if want_d is not None and (cd is None or cd != want_d):
         return False
-    if want_h and (not ch or ch != want_h):
+    if want_h is not None and (ch is None or ch != want_h):
         return False
     return True
 
@@ -330,12 +359,37 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                     dong: str = "", ho: str = "", buld_name: str = "",
                     timeout: float = 20.0) -> ResolveResult:
     """단일 주소 → 고유번호 (API 직결).
-    동·호+건물명을 넣어 IROS가 1건으로 특정. 한 지번에 건물 여러개면 건물명이 결정적.
-    건물명 넣어 0건이면(표기 불일치 가능) 건물명 빼고 재시도(안전장치)."""
-    s = session or make_session()
 
-    def _query(bname):
-        payload = _build_payload(address, dong=dong, ho=ho, buld_name=bname)
+    동/호 처리 방식(2026-07-13 개정): 이전엔 swrd(자연어 검색어)에 "N동 N호"
+    텍스트를 얹어 IROS가 1건으로 특정하게 하는 방식이었다(주석엔 "실측"으로
+    남아있었음). 그런데 실측으로도 이 조합이 안 걸리는 케이스가 나왔고(예:
+    래미안 원베일리 123동 904호 → 0건), 안 걸릴 때마다 건물명 표기만 바꿔
+    재시도하느라 왕복이 늘어나 Vercel 함수 제한시간(호비 플랜 기본 5~10초)을
+    넘겨 타임아웃까지 유발했다.
+    → 그래서 동/호는 검색어(swrd)에 아예 넣지 않는다. 지번+건물명까지만
+    검색해 그 건물의 전체 세대 후보를 한 번에 받고(원래 집합건물은 지번만
+    검색해도 세대 수만큼 다건으로 정상 반환됨), 아래 _match_unit()
+    클라이언트 필터가 동/호로 정확히 좁힌다.
+
+    검색 순서 역전(2026-07-13 추가 개정): "건물명 먼저, 안 되면 지번만"이던
+    순서를 "지번만 먼저, 안 되면 건물명 추가"로 뒤집었다. 이유: juso의
+    건물명과 등기부(IROS)의 등록명이 다른 경우가 실제로 존재한다 — 예를
+    들어 "영등포푸르지오"는 2006년 개명 전 원래 "대우드림타운"으로
+    분양·등기됐는데, 등기부는 원래 이름을 그대로 쓰는 경우가 많다. 이런
+    건물은 "건물명 먼저" 순서에서 매번 1·2차 시도가 실패하고 3차(건물명
+    없음)에서야 성공해 왕복이 항상 3회였다(체감 지연의 주원인). 반대로
+    "지번만 먼저"로 하면 이런 건물도 1회 왕복에 바로 성공한다 — 애초에
+    집합건물 검색은 지번이 축이고 건물명은 "한 지번에 건물이 여러 채일 때"
+    구분하는 보조 수단일 뿐이라, 순서를 뒤집어도 그 보조 역할(안전망)은
+    그대로 유지된다.
+    """
+    s = session or make_session()
+    pure_lot_addr = _strip_trailing_buldname(address)  # 주소 자체의 건물명까지 제거
+
+    def _query(bname, addr_override=None):
+        # 동/호는 항상 미포함 — 좁히는 건 뒤쪽 _match_unit()이 전담
+        a = address if addr_override is None else addr_override
+        payload = _build_payload(a, dong="", ho="", buld_name=bname)
         r = s.post(SEARCH_API, json=payload,
                    headers={"Content-Type": "application/json; charset=UTF-8"},
                    timeout=timeout)
@@ -347,8 +401,9 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
             return {"_raw": r.text}, 200
 
     try:
-        # 1차: 건물명 포함 (건물 여러개일 때 특정)
-        data, code = _query(buld_name)
+        # 1차: 순수 지번만(주소 자체에 실려온 건물명까지 제거) — 가장 빠르고
+        # 안정적인 기본 경로. 동/호도 미포함(위 docstring 참고).
+        data, code = _query("", addr_override=pure_lot_addr)
         if data is None:
             # HTTP 상태로 원인 구분
             if code == 429:
@@ -365,16 +420,23 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                                  message="응답 구조 변경/파싱 실패 (수동확인)")
         cands = _parse_json_response(data)
 
-        # 건물명 0건 → 표기 변형으로 재시도 (IROS 등록명과 띄어쓰기가 다를 수 있음)
-        # 예: juso "래미안 원베일리" vs IROS "래미안원베일리"
-        if buld_name and len(cands) == 0:
-            variants = []
-            nospace = re.sub(r"\s+", "", buld_name)
-            if nospace != buld_name:
-                variants.append(nospace)          # 붙여쓰기
-            variants.append("")                   # 마지막: 건물명 빼고 지번+동호
-            for v in variants:
-                data, code = _query(v)
+        # 순수 지번만으로 0건 → 이름을 붙여 재시도(안전망 — 한 지번에 건물이
+        # 여러 채라 지번만으로는 특정이 안 되는 드문 케이스 구제).
+        # 순서: ①juso가 원래 실어준 원본 주소 그대로(건물명이 자연스레
+        # 포함돼 있음) → ②명시적으로 받은 buld_name → ③그 붙여쓰기.
+        # ①②③은 addr_override 없이(=원본 address 기준) 호출해야 건물명이
+        # 실제로 검색어에 실린다.
+        if len(cands) == 0:
+            fallback_bnames = []
+            if address != pure_lot_addr:
+                fallback_bnames.append("")  # 원본 address 자체에 건물명이 실려있음
+            if buld_name:
+                fallback_bnames.append(buld_name)
+                nospace = re.sub(r"\s+", "", buld_name)
+                if nospace != buld_name:
+                    fallback_bnames.append(nospace)  # 붙여쓰기
+            for v in fallback_bnames:
+                data, code = _query(v)  # addr_override 없음 → 원본 address 사용
                 if data is None or (isinstance(data, dict) and "_raw" in data):
                     continue
                 cands = _parse_json_response(data)
@@ -389,10 +451,33 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                 cands = lot_filtered
 
         # 동·호 정확 매칭 필터 (대지권·다른동 제외)
+        # 2026-07-13 수정: 예전엔 `if filtered: cands = filtered` 였는데, 이러면
+        # 매칭이 0건일 때 필터 결과를 버리고 '필터 전 후보 전체'를 그대로 되살려
+        # REG_MULTI(다건)로 내보냈다 → 사용자가 동·호를 정확히 찍었는데도 그 단지의
+        # 모든 세대가 후보로 뜨는 원인(1차 원인인 선행0 매칭실패와 연쇄).
+        # 이제 매칭 0건이면 후보를 되살리지 않고 명확히 실패로 끝낸다.
+        # 단, 후보 중 '동·호 정보를 가진 레코드가 하나도 없는' 경우는 매칭 실패가
+        # 아니라 '필터 불가'(토지 등기만 있거나 IROS 응답 키 변경 등)이므로,
+        # 이때는 잘못된 단정을 피하기 위해 후보를 유지하고 사유를 표시한다.
+        unit_filter_note = ""
         if (dong or ho) and cands:
-            filtered = [c for c in cands if _match_unit(c, dong, ho)]
-            if filtered:
+            has_unit_info = any(
+                str(c.get("dong") or "").strip() or str(c.get("ho") or "").strip()
+                for c in cands
+            )
+            if has_unit_info:
+                filtered = [c for c in cands if _match_unit(c, dong, ho)]
+                if not filtered:
+                    want = " ".join(filter(None, [f"{dong}동" if dong else "",
+                                                  f"{ho}호" if ho else ""]))
+                    return ResolveResult(
+                        address, "REG_UNIT_NOT_FOUND",
+                        candidates=cands,
+                        message=f"해당 지번의 등기는 찾았으나 {want}와 일치하는 세대가 없습니다 "
+                                f"(후보 {len(cands)}건). 동·호를 확인해 주세요.")
                 cands = filtered
+            else:
+                unit_filter_note = " (응답에 동·호 정보가 없어 세대 필터 미적용)"
 
         if len(cands) == 0:
             return ResolveResult(address, "REG_NOT_FOUND",
@@ -404,9 +489,7 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                                           (c.get("ho") and f"{c['ho']}호") or ""]))
             return ResolveResult(address, "RESOLVED", unique_no=c["unique_no"],
                                  candidates=cands, message=desc.strip())
-        note = ""
-        if ho and not any(_match_unit(c, dong, ho) for c in cands):
-            note = f" (입력한 {ho}호 미매칭 — 동·호 확인 필요)"
+        note = unit_filter_note   # 위 필터에서 '동·호 정보 없어 필터 불가'였던 경우만 채워짐
         return ResolveResult(address, "REG_MULTI", candidates=cands,
                              message=f"{len(cands)}건{note}")
     except requests.Timeout:
