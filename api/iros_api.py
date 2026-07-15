@@ -416,15 +416,28 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
         # 동/호는 항상 미포함 — 좁히는 건 뒤쪽 _match_unit()이 전담
         a = address if addr_override is None else addr_override
         payload = _build_payload(a, dong="", ho="", buld_name=bname)
-        r = s.post(SEARCH_API, json=payload,
-                   headers={"Content-Type": "application/json; charset=UTF-8"},
-                   timeout=timeout)
-        if r.status_code != 200:
-            return None, r.status_code
-        try:
-            return r.json(), 200
-        except ValueError:
-            return {"_raw": r.text}, 200
+        # 네트워크 재시도(2026-07-15): IROS가 대량 요청 중 간헐적으로 연결을
+        # 끊는다(ConnectionResetError: reset by peer). 재시도 없이 바로 실패로
+        # 떨어지면 "거의 못 잡아온다"가 된다. 일시 오류는 짧게 쉬고 최대 3회.
+        last_exc = None
+        for attempt in range(3):
+            try:
+                r = s.post(SEARCH_API, json=payload,
+                           headers={"Content-Type": "application/json; charset=UTF-8"},
+                           timeout=timeout)
+                if r.status_code != 200:
+                    return None, r.status_code
+                try:
+                    return r.json(), 200
+                except ValueError:
+                    return {"_raw": r.text}, 200
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_exc = e
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))   # 0.5s, 1.0s 백오프
+                    continue
+                raise
+        raise last_exc
 
     try:
         # 1차: 순수 지번만(주소 자체에 실려온 건물명까지 제거) — 가장 빠르고
@@ -469,8 +482,38 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                 if cands:
                     break
 
+        # 부번 제거 재시도(2026-07-15): IROS 등기부는 부번 없는 '대표지번'에
+        # 집합건물을 통째로 올려두는 경우가 있다(실측: 부산 기장 만화리 271-8은
+        # 0건, 271은 1건 — 등기 지번이 부번 없는 271). 지번(본번-부번)으로 0건이면
+        # 부번을 떼고 본번만으로 한 번 더 검색한다. 단 이렇게 넓히면 같은 본번의
+        # 다른 부번 건물이 섞일 수 있으므로, 아래 _match_lot은 '원래 부번'이 아니라
+        # 본번 기준으로 비교하도록 want_beonji를 본번으로 완화한다(과탈락 방지).
+        widened_to_main = False
+        if len(cands) == 0:
+            _, orig_beonji = _extract_dong_beonji(address)
+            if orig_beonji and "-" in orig_beonji:
+                main_no = orig_beonji.split("-")[0]
+                addr_main = address.replace(orig_beonji, main_no, 1)
+                pure_main = _strip_trailing_buldname(addr_main)
+                data, code = _query("", addr_override=pure_main)
+                if data is not None and not (isinstance(data, dict) and "_raw" in data):
+                    c2 = _parse_json_response(data)
+                    if c2:
+                        cands = c2
+                        widened_to_main = True
+                # 부번 뗀 뒤에도 0건이면 건물명까지 붙여 마지막 시도
+                if len(cands) == 0 and buld_name:
+                    data, code = _query(buld_name, addr_override=pure_main)
+                    if data is not None and not (isinstance(data, dict) and "_raw" in data):
+                        c3 = _parse_json_response(data)
+                        if c3:
+                            cands = c3
+                            widened_to_main = True
+
         # 지번(번지) 필터: 건물명 검색으로 다른 번지 건물이 섞여오면 정제 지번으로 걸러냄
         want_dong, want_beonji = _extract_dong_beonji(address)
+        if widened_to_main and want_beonji and "-" in want_beonji:
+            want_beonji = want_beonji.split("-")[0]   # 본번으로 넓혀 검색했으니 필터도 본번 기준
         if want_beonji and cands:
             lot_filtered = [c for c in cands if _match_lot(c, want_dong, want_beonji)]
             if lot_filtered:
@@ -493,6 +536,17 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
             )
             if has_unit_info:
                 filtered = [c for c in cands if _match_unit(c, dong, ho)]
+                # 단일 동 건물 구제(2026-07-15): 등기부는 동이 하나뿐인 건물에
+                # 동 표기를 안 하는 경우가 많다(예: 문화파크맨션). 이때 사용자
+                # 입력의 "1동"이 후보(동 없음)와 안 맞아 전멸한다. 후보 전체가
+                # '동은 비었고 호는 있는' 상태면, 동을 무시하고 호로만 재매칭한다.
+                if not filtered and dong and ho:
+                    any_dong = any(str(c.get("dong") or "").strip() for c in cands)
+                    any_ho = any(str(c.get("ho") or "").strip() for c in cands)
+                    if not any_dong and any_ho:
+                        filtered = [c for c in cands if _match_unit(c, "", ho)]
+                        if filtered:
+                            unit_filter_note = " (단일 동 건물 — 동 표기 없이 호로 특정)"
                 if not filtered:
                     want = " ".join(filter(None, [f"{dong}동" if dong else "",
                                                   f"{ho}호" if ho else ""]))
