@@ -629,12 +629,15 @@ if __name__ == "__main__":
     main()
 
 
-def debug_raw_records(address: str, buld_name: str = "", timeout: float = 20.0) -> dict:
-    """진단용: IROS 원본 레코드를 가공 없이 반환(2026-07-13 추가).
+def debug_raw_records(address: str, buld_name: str = "", dong: str = "", ho: str = "",
+                      timeout: float = 20.0) -> dict:
+    """진단용: IROS 원본 레코드 + 파서 결과 + '최종 판정'을 함께 반환.
 
-    파서가 동·호를 어느 필드에서 읽어야 하는지 '추측하지 않고' 확인하기 위한
-    용도. 배포 환경(국내 리전)에서만 IROS 접속이 되므로 여기서만 확인 가능.
-    사용: /api/resolve?addr=서울특별시 서초구 반포동 1&debug=1
+    2026-07-15 개정: 예전엔 동·호를 안 받고 원본 후보만 돌려줘서, 집합건물이면
+    무조건 '다건'으로 보였다(실제 앱은 동·호로 1건 특정하는데도). 이제 동·호를
+    받아 실제 resolve_one_api를 돌려 최종 판정(RESOLVED/REG_MULTI/REG_UNIT_NOT_FOUND
+    등)과 확정된 등기고유번호까지 반환한다 → 진단 결과가 앱의 실제 동작과 일치.
+    사용: /api/resolve?addr=...&dong=105&ho=1403&debug=1
     """
     s = make_session()
     pure = _strip_trailing_buldname(address)
@@ -651,5 +654,17 @@ def debug_raw_records(address: str, buld_name: str = "", timeout: float = 20.0) 
     recs = _walk_records(data)
     out["record_count"] = len(recs)
     out["first_records"] = recs[:3]                       # 원본 그대로(키 이름 포함)
-    out["parsed_candidates"] = _parse_json_response(data)[:3]   # 파서가 뽑아낸 결과
+    out["parsed_candidates"] = _parse_json_response(data)[:5]   # 파서가 뽑아낸 결과
+
+    # 최종 판정: 실제 조회 로직(부번제거·단일동·동호필터 전부 반영)을 그대로 돌린다.
+    try:
+        final = resolve_one_api(address, session=s, dong=dong, ho=ho,
+                                buld_name=buld_name, timeout=timeout)
+        out["final_status"] = final.status
+        out["final_unique_no"] = final.unique_no
+        out["final_message"] = final.message
+        out["final_candidate_count"] = len(final.candidates) if final.candidates else 0
+    except Exception as e:
+        out["final_status"] = "REG_ERROR"
+        out["final_message"] = f"{type(e).__name__}: {e}"
     return out

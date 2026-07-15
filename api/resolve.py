@@ -54,7 +54,7 @@ class handler(BaseHTTPRequestHandler):
         # 있는지 '추측 없이' 확인하기 위한 용도. (예: /api/resolve?addr=...&debug=1)
         if qs.get("debug", [""])[0] == "1" and debug_raw_records:
             try:
-                return self._send(200, debug_raw_records(addr, buld_name=bdnm))
+                return self._send(200, debug_raw_records(addr, buld_name=bdnm, dong=dong, ho=ho))
             except Exception as e:
                 return self._send(200, {"status": "ERROR",
                                         "message": f"{type(e).__name__}: {e}"})
