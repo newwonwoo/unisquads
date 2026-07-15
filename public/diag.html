@@ -73,7 +73,10 @@
 
   <div class="card" id="resultCard" style="display:none">
     <div class="badges" id="badges"></div>
-    <div class="stat" id="progress"></div>
+    <div class="row" style="justify-content:space-between">
+      <div class="stat" id="progress"></div>
+      <button class="btn-go" id="dl" style="display:none;padding:8px 16px;font-size:13px">결과 다운로드 (엑셀)</button>
+    </div>
     <div class="filterbar" id="filters"></div>
     <div style="overflow-x:auto">
       <table id="tbl">
@@ -121,8 +124,8 @@ $('file').addEventListener('change', async e => {
   const {aoa, head} = picked;
   const iRaw = head.findIndex(h => h.includes('원본주소'));
   const iJibun = head.findIndex(h => h.includes('지번주소'));
-  const iDong = head.findIndex(h => h === '동' || h.includes('동'));
-  const iHo = head.findIndex(h => h === '호' || h.includes('호'));
+  const iDong = head.findIndex(h => h.trim() === '동');   // 정확 일치(부동산번호 등 오매칭 방지)
+  const iHo = head.findIndex(h => h.trim() === '호');
   const iState = head.findIndex(h => h.includes('정제상태'));
   const iFail = head.findIndex(h => h.includes('실패코드'));
 
@@ -199,6 +202,31 @@ $('go').addEventListener('click', async () => {
   await Promise.all(Array.from({length:conc}, worker));
   $('go').disabled = false; $('stop').style.display='none';
   $('progress').textContent = `완료 ${done}/${targets.length}` + (stopFlag ? ' (중단됨)' : '');
+  $('dl').style.display = results.length ? 'inline-block' : 'none';
+});
+
+$('dl').addEventListener('click', () => {
+  // 진단 결과를 엑셀로. 원본 응답의 첫 후보 지번/건물명도 함께 기록.
+  const statusKo = {ok:'확정', multi:'다건', fail:'실패', wait:'미조회', running:'미조회'};
+  const aoa = [[
+    '원본주소','조회주소(지번)','동','호',
+    'IROS검색어(swrd)','응답건수','진단결과','등기고유번호',
+    '실패원인','IROS지번(응답)','IROS건물명(응답)','정제상태(원본)','실패코드(원본)'
+  ]];
+  for (const r of results) {
+    const c0 = (r.resp?.parsed_candidates || [])[0] || {};
+    aoa.push([
+      r.raw, r.jibun||'', r.dong||'', r.ho||'',
+      r.swrd||'', r.count ?? '', statusKo[r.status]||r.status, r.uno||'',
+      r.why||'', c0.sojae||'', c0.buldnm||'', r.state||'', r.fail||''
+    ]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [40,40,6,6,30,8,10,18,32,36,20,14,14].map(w=>({wch:w}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'IROS진단');
+  const ts = new Date().toISOString().slice(0,16).replace(/[:T]/g,'').replace(/-/g,'');
+  XLSX.writeFile(wb, `IROS진단결과_${ts}.xlsx`);
 });
 
 function render() {
