@@ -273,7 +273,7 @@ function normalizeUnitInput(v) {
 //       (예: "태원아파트 101-107 평산리 564" → 564가 진짜 지번, 101-107은 동호)
 //   R4. 법정동/리가 중복되면(문산리 문산리) 하나만
 // 지번을 못 찾으면 원문을 그대로 두어(=juso가 알아서 처리하게) 오확정을 피한다.
-const BUILDING_TOKEN = /(아파트|맨션|타운|오피스텔|빌라|빌리지|타워|하이츠|팰리스|캐슬|자이|푸르지오|리버|주공|연립|훼미리|하우스|시티|더샵|이편한|e편한|래미안|힐스|아이파크|드림빌|스타힐스|파크빌|파크|빌딩|프라자|플라자|파밀리에|스타힐스|해링턴|센트럴|센트레빌|엘크루|데시앙|꿈에그린|한신|현대|삼성|대우|롯데|쌍용|우성|경남|한도|금호|신동아|청도)/;
+const BUILDING_TOKEN = /(아파트|맨션|타운|오피스텔|빌라|빌리지|타워|하이츠|팰리스|캐슬|자이|푸르지오|리버|주공|연립|훼미리|하우스|시티|더샵|이편한|e편한|래미안|힐스|아이파크|드림빌|스타힐스|파크빌|파크|빌딩|프라자|플라자|파밀리에|스타힐스|해링턴|센트럴|센트레빌|엘크루|데시앙|꿈에그린|한신|현대|삼성|대우|롯데|쌍용|우성|경남|한도|금호|신동아|청도|상가|근린생활|근생)/;
 const ADMIN_DONG_RI = /^(.+?)(동|리)$/;   // 동/리로 끝나는 행정구역 토큰
 const ADMIN_ANY = /(동|리|읍|면|가|구|시|군)$/;
 
@@ -390,6 +390,11 @@ function preprocess(raw) {
     // 있어야 카카오 폴백이 동작하고, 지번 없는 주소를 억지로 자르면 오히려 실패한다.
     if (jibun && /(동|리|읍|면|가)/.test(core)) {
       text = core;
+    } else if (!jibun && core && /[가-힣]+(동|리|읍|면)(\s|$)/.test(core)) {
+      // 지번은 없지만 core에 '동/리/읍/면'이 온전히 남은 경우(건물명·상가·동호가
+      // 앞서 절단됨). 원본을 그대로 쓰면 '상가'·건물명 잔존물이 juso를 방해하므로
+      // core(행정구역까지)로 교체한다. 단 시/군/구만 남은 건 너무 넓어 제외.
+      text = core;
     }
   }
   return { cleaned, searchText: text, unit: { dong, ho } };
@@ -460,7 +465,11 @@ async function cascade(pre, clients) {
       return { candidates: items.map(fromJuso), level: "L2", jusoQuery: tried.join(" \u25B8 "), count: items.length };
   }
   if (clients.kakaoKeyword) {
-    const docs = await safeCall(clients.kakaoKeyword, searchText || cleaned);
+    // 카카오는 '건물명'으로 장소를 찾는다. 지번 코어(searchText)는 juso를 위해
+    // 건물명을 잘라냈으므로, 카카오엔 건물명이 살아있는 원본(cleaned)을 준다.
+    // (juso 실패의 70%가 원본에 건물명이 있던 건물 — 지번만 보내면 카카오도 0건)
+    const kakaoQuery = cleaned || searchText;
+    const docs = await safeCall(clients.kakaoKeyword, kakaoQuery);
     if (docs.length > 0) {
       const out = [];
       for (const doc of docs) {
@@ -472,7 +481,7 @@ async function cascade(pre, clients) {
         }
         out.push(fromKakao(doc, regionCode));
       }
-      return { candidates: out, level: "L3", jusoQuery: tried.join(" \u25B8 "), count: out.length };
+      return { candidates: out, level: "L3", jusoQuery: tried.join(" \u25B8 ") + " \u25B8 [\uCE74\uCE74\uC624]" + kakaoQuery, count: out.length };
     }
   }
   return { candidates: [], level: null, jusoQuery: tried.join(" \u25B8 "), count: 0 };

@@ -43,6 +43,14 @@ class handler(BaseHTTPRequestHandler):
         params = urllib.parse.urlencode({
             "confmKey": JUSO_KEY, "currentPage": "1", "countPerPage": "10",
             "resultType": "json", "keyword": keyword,
+            # 2026-07-15 추가: 실측상 정제 실패의 99%가 옛 행정구역 주소(평산리→
+            # 평산동, 마산시→창원시 등)였다. juso 기본검색은 현행 주소만 봐서 0건.
+            # hstryYn=Y로 '변동된 주소정보'까지 검색해 옛주소를 현행으로 매칭한다.
+            # firstSort=location: 지번 중심 데이터이므로 지번 포함 결과 우선.
+            # addInfoYn=Y: relJibun(관련지번)·hemdNm(행정동) 확보로 매칭 보강.
+            "hstryYn": "Y",
+            "firstSort": "location",
+            "addInfoYn": "Y",
         })
         try:
             with urllib.request.urlopen(f"{JUSO_URL}?{params}", timeout=10) as resp:
