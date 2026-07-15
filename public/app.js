@@ -57,7 +57,7 @@ function hanjaToHangul(str) {
   return s;
 }
 function stripSuffixes(str) {
-  return str.replace(/(\d)\s*번지/g, "$1").replace(/일원|일대|부근|인근|근처/g, " ").replace(/외\s*\d+\s*필지/g, " ").replace(/소재(지)?/g, " ").trim();
+  return str.replace(/(\d)\s*번지/g, "$1 ").replace(/일원|일대|부근|인근|근처/g, " ").replace(/외\s*\d+\s*필지/g, " ").replace(/소재(지)?/g, " ").trim();
 }
 const SIDO_TOKENS = [
   "\uC11C\uC6B8\uD2B9\uBCC4\uC2DC",
@@ -108,15 +108,106 @@ const SIDO_TOKENS = [
 ];
 function splitAdminPrefix(str) {
   let s = str;
+  // 2026-07-13 수정: 예전엔 긴 시도명이 '이미 띄어쓰기 정상'이면 분리하지 않고
+  // 루프를 계속 돌았고, 그 결과 더 짧은 접두("서울")가 다시 매칭돼
+  // "서울특별시 강남구" → "서울 특별시 강남구" 로 정식 표기를 깨뜨렸다.
+  // 이제 가장 긴 시도명이 매칭되면 (분리 여부와 무관하게) 즉시 종료한다.
+  let sidoFound = false;
   for (const sido of [...SIDO_TOKENS].sort((a, b) => b.length - a.length)) {
-    if (s.startsWith(sido) && s.length > sido.length && s[sido.length] !== " ") {
-      s = sido + " " + s.slice(sido.length);
-      break;
+    if (!s.startsWith(sido)) continue;
+    sidoFound = true;
+    if (s.length > sido.length && s[sido.length] !== " ") {
+      s = sido + " " + s.slice(sido.length);   // 붙어있을 때만 분리
     }
+    break;                                      // 매칭됐으면 더 짧은 접두는 보지 않음
   }
-  const guRe = /([가-힣]{1,3}(?:시|구|군))(?=[가-힣])/g;
-  s = s.replace(guRe, "$1 ").replace(guRe, "$1 ");
+  // 2026-07-13 수정: 예전엔 /([가-힣]{1,3}(?:시|구|군))(?=[가-힣])/g 를 문자열
+  // '전역'에 치환해서, 건물명 한가운데의 '…시'까지 시(市)로 오인했다.
+  //   "서울 송파구 헬리오시티" → "…헬리오시 티"  ← 건물명 파손 → 검색 실패
+  // 이제 (1) 시도가 확인된 주소에서만, (2) 문자열 '앞부분'에서만, (3) 최대 2단계
+  // (시 → 구)까지만 분리한다. 건물명은 앞부분에 오지 않으므로 안전하다.
+  if (sidoFound) {
+    const head = /^([가-힣]{1,3}(?:시|구|군))(?=[가-힣])/;
+    const sp = s.indexOf(" ");
+    let prefix = sp < 0 ? "" : s.slice(0, sp + 1);
+    let rest = sp < 0 ? s : s.slice(sp + 1);
+    for (let i = 0; i < 2; i++) {
+      const m = rest.match(head);
+      if (!m) break;                            // 이미 띄어져 있으면 즉시 중단
+      rest = m[1] + " " + rest.slice(m[1].length);
+      const nx = rest.indexOf(" ");
+      prefix += rest.slice(0, nx + 1);
+      rest = rest.slice(nx + 1);
+    }
+    s = prefix + rest;
+  }
   return s.replace(/\s+/g, " ").trim();
+}
+// ─────────────────────────────────────────────────────────────
+// 시군구 교차검증 (2026-07-13 신설)
+// 카카오 폴백(L3)은 '건물명'으로 검색하므로 동명(同名) 건물이 있는 다른
+// 지역을 물어올 수 있다(영등포푸르지오 vs 당산푸르지오). 결과를 그대로
+// CONFIRMED 처리하면 '틀린 등기고유번호'가 확정된다 — 미확정보다 훨씬 나쁘다.
+// 규칙: 입력과 결과 양쪽에서 지역을 '명확히' 뽑았고 서로 어긋날 때만 강등한다.
+// 한쪽이라도 못 뽑으면 NOT_AVAILABLE(판단보류) — 검증 못 하는 걸 실패로 만들지 않는다.
+const SIDO_CANON = {
+  "\uC11C\uC6B8": "\uC11C\uC6B8", "\uBD80\uC0B0": "\uBD80\uC0B0", "\uB300\uAD6C": "\uB300\uAD6C",
+  "\uC778\uCC9C": "\uC778\uCC9C", "\uAD11\uC8FC": "\uAD11\uC8FC", "\uB300\uC804": "\uB300\uC804",
+  "\uC6B8\uC0B0": "\uC6B8\uC0B0", "\uC138\uC885": "\uC138\uC885", "\uACBD\uAE30": "\uACBD\uAE30",
+  "\uAC15\uC6D0": "\uAC15\uC6D0", "\uCDA9\uBD81": "\uCDA9\uBD81", "\uCDA9\uCCAD\uBD81": "\uCDA9\uBD81",
+  "\uCDA9\uB0A8": "\uCDA9\uB0A8", "\uCDA9\uCCAD\uB0A8": "\uCDA9\uB0A8",
+  "\uC804\uBD81": "\uC804\uBD81", "\uC804\uB77C\uBD81": "\uC804\uBD81",
+  "\uC804\uB0A8": "\uC804\uB0A8", "\uC804\uB77C\uB0A8": "\uC804\uB0A8",
+  "\uACBD\uBD81": "\uACBD\uBD81", "\uACBD\uC0C1\uBD81": "\uACBD\uBD81",
+  "\uACBD\uB0A8": "\uACBD\uB0A8", "\uACBD\uC0C1\uB0A8": "\uACBD\uB0A8",
+  "\uC81C\uC8FC": "\uC81C\uC8FC"
+};
+function canonSido(tok) {
+  if (!tok) return "";
+  // 특별시/광역시/특별자치시/특별자치도/도/시 접미를 벗겨 표준 축약형으로
+  let b = String(tok).replace(/(\uD2B9\uBCC4\uC790\uCE58\uC2DC|\uD2B9\uBCC4\uC790\uCE58\uB3C4|\uD2B9\uBCC4\uC2DC|\uAD11\uC5ED\uC2DC|\uC790\uCE58\uC2DC|\uC790\uCE58\uB3C4|\uB3C4|\uC2DC)$/, "");
+  return SIDO_CANON[b] || b;
+}
+const RE_SGG = /^[\uAC00-\uD7A3]{1,6}(\uC2DC|\uAD70|\uAD6C)$/;
+// 법정동 토큰: 앞부분을 4글자로 제한한다. "래미안원베일리"처럼 '리'로 끝나는
+// 건물명이 법정동으로 오인되던 문제 방지(길이 초과 → 추출 안 함 → 판단보류).
+const RE_BJD = /^[\uAC00-\uD7A3]{1,4}\d*(\uB3D9|\uC74D|\uBA74|\uB9AC|\uAC00)$/;
+// 비교 키: 숫자·말미 '가' 제거 → 역삼1동=역삼동, 명동=명동1가, 종로1가=종로
+const bjdKey = (t) => String(t || "").replace(/\d+/g, "").replace(/\uAC00$/, "");
+function extractRegion(text) {
+  const out = { sido: "", sgg: [], bjd: "" };
+  if (!text) return out;
+  let s = String(text).replace(/\s+/g, " ").trim();
+  for (const sido of [...SIDO_TOKENS].sort((a, b) => b.length - a.length)) {
+    if (s.startsWith(sido)) { out.sido = canonSido(sido); s = s.slice(sido.length).trim(); break; }
+  }
+  for (const t of s.split(" ")) {
+    if (RE_SGG.test(t) && out.sgg.length < 2 && !out.bjd) { out.sgg.push(t); continue; }
+    if (!out.bjd && RE_BJD.test(t)) { out.bjdRaw = t; out.bjd = bjdKey(t); }
+  }
+  return out;
+}
+function validateRegion(inputText, resultJibun) {
+  const a = extractRegion(inputText);
+  const b = extractRegion(resultJibun);
+  const label = (r) => [r.sido, ...r.sgg, r.bjd].filter(Boolean).join(" ");
+  const mk = (status, reason) => ({ status, reason, inputSgg: label(a), resultSgg: label(b) });
+  if (a.sido && b.sido && a.sido !== b.sido) return mk("MISMATCH", `\uC2DC\uB3C4 \uBD88\uC77C\uCE58(${a.sido}\u2260${b.sido})`);
+  if (a.sgg.length && b.sgg.length) {
+    // 입력이 덜 구체적인 건 정상(성남시 ⊂ 성남시 분당구) — 어긋날 때만 불일치
+    const n = Math.min(a.sgg.length, b.sgg.length);
+    for (let i = 0; i < n; i++)
+      if (a.sgg[i] !== b.sgg[i]) return mk("MISMATCH", `\uC2DC\uAD70\uAD6C \uBD88\uC77C\uCE58(${a.sgg[i]}\u2260${b.sgg[i]})`);
+    // 시군구가 같아도 법정동이 어긋나면 오확정(같은 구의 동명 건물) — 계속 검사
+    if (a.bjd && b.bjd && a.bjd !== b.bjd)
+      return mk("MISMATCH", `\uBC95\uC815\uB3D9 \uBD88\uC77C\uCE58(${a.bjdRaw || a.bjd}\u2260${b.bjdRaw || b.bjd})`);
+    return mk("MATCH", a.bjd && b.bjd ? "\uC2DC\uAD70\uAD6C\xB7\uBC95\uC815\uB3D9 \uC77C\uCE58" : "\uC2DC\uAD70\uAD6C \uC77C\uCE58");
+  }
+  if (a.bjd && b.bjd) {
+    if (a.bjd !== b.bjd) return mk("MISMATCH", `\uBC95\uC815\uB3D9 \uBD88\uC77C\uCE58(${a.bjdRaw || a.bjd}\u2260${b.bjdRaw || b.bjd})`);
+    return mk("MATCH", "\uBC95\uC815\uB3D9 \uC77C\uCE58");
+  }
+  return mk("NOT_AVAILABLE", a.sido || a.sgg.length || a.bjd ? "\uACB0\uACFC\uC5D0\uC11C \uC9C0\uC5ED \uCD94\uCD9C \uBD88\uAC00" : "\uC785\uB825\uC5D0\uC11C \uC9C0\uC5ED \uCD94\uCD9C \uBD88\uAC00");
 }
 const JIP_KEYWORDS = /(아파트|apt|빌라|빌리지|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오|아이파크|e편한|이편한|더샵|롯데캐슬|래미안|센트|리버|파크|하이츠|스카이|타워|주상복합|헤리티지|포레|아이유쉘|쉐르빌|베르디움|엘크루|리슈빌|스위첸|데시앙|꿈에그린|우방|한신|현대|삼성|엘지|지에스)/i;
 const JIBUN_CONTEXT = /(동|읍|면|리|로|길|가)\s*$/;
@@ -170,6 +261,99 @@ function normalizeUnitInput(v) {
   const m = String(v).match(/\d{1,4}/);
   return m ? m[0] : null;
 }
+
+// ─────────────────────────────────────────────────────────────
+// 지번 코어 추출 (2026-07-13, 실데이터 2만 실패건 분석 기반)
+// juso가 "지번 + 건물명 + 동 + 호"를 통째로 받으면 못 찾는다. 실패건의 81%가
+// 이 형태였다. 지번까지만 남기고 뒤를 버리되, 동·호를 지번으로 오인하면
+// 오확정이 나므로 규칙을 엄격히 둔다:
+//   R1. 행정구역(동/리/읍/면/가) 토큰 '직후'의 숫자만 지번으로 채택
+//   R2. 건물명(아파트·맨션 등) 토큰을 만나면 이후 숫자는 동·호로 간주(지번 아님)
+//   R3. 단, 건물명 뒤라도 다시 '동/리 + 숫자'가 나오면 그 숫자를 지번으로 되살림
+//       (예: "태원아파트 101-107 평산리 564" → 564가 진짜 지번, 101-107은 동호)
+//   R4. 법정동/리가 중복되면(문산리 문산리) 하나만
+// 지번을 못 찾으면 원문을 그대로 두어(=juso가 알아서 처리하게) 오확정을 피한다.
+const BUILDING_TOKEN = /(아파트|맨션|타운|오피스텔|빌라|빌리지|타워|하이츠|팰리스|캐슬|자이|푸르지오|리버|주공|연립|훼미리|하우스|시티|더샵|이편한|e편한|래미안|힐스|아이파크|드림빌|스타힐스|파크빌|파크|빌딩|프라자|플라자|파밀리에|스타힐스|해링턴|센트럴|센트레빌|엘크루|데시앙|꿈에그린|한신|현대|삼성|대우|롯데|쌍용|우성|경남|한도|금호|신동아|청도)/;
+const ADMIN_DONG_RI = /^(.+?)(동|리)$/;   // 동/리로 끝나는 행정구역 토큰
+const ADMIN_ANY = /(동|리|읍|면|가|구|시|군)$/;
+
+function extractJibunCore(str) {
+  // 노이즈 선제거(B): 쉼표 복수지번, 물결 범위, 말미 점
+  let s = str
+    .replace(/(\d+-\d+)\s*,\s*\d+-\d+/g, "$1")   // 233-67,233-82 → 233-67
+    .replace(/~\s*\d+/g, " ")                       // 200~638 → 200
+    .replace(/(\d)\s*\.(?=\s|$)/g, "$1 ");         // 302-6. → 302-6
+  // 숫자+건물명 완전붙음 분리: 와리251-7금호 → 와리 251-7 금호
+  // 단 "장충동2가"의 2가(법정동)는 깨지 않도록, 숫자 뒤가 '가'면 제외
+  s = s.replace(/([가-힣])(\d)/g, "$1 $2").replace(/(\d)([가-힣])/g, (m, d, k) => k === "\uAC00" ? m : `${d} ${k}`);
+  s = s.replace(/\uC0B0\s+(\d)/g, "\uC0B0$1");   // '산 12-3' → '산12-3' (산 접두 재결합)
+  s = s.replace(/\s+/g, " ").trim();
+
+  const toks = s.split(" ");
+  const out = [];
+  const seenDongRi = new Set();
+  let prevAdmin = false;      // 직전 토큰이 지번을 받을 수 있는 행정구역(동/리/읍/면)인가
+  let hitBuilding = false;    // 건물명을 지났는가
+  let lastAdminWasDongRi = false;
+  let jibun = null;
+
+  const SIDO_TAIL = /(특별시|광역시|특별자치시|특별자치도|^[가-힣]+도$)/;
+  const SIDO_SHORT = /^(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)$/;
+
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (t === "") continue;
+
+    // 시도 토큰(경기도·서울특별시·서울 등)은 무조건 보존, 지번 앵커 아님
+    if (SIDO_TAIL.test(t) || SIDO_SHORT.test(t) || (/(시|도)$/.test(t) && i === 0)) {
+      out.push(t); prevAdmin = false; lastAdminWasDongRi = false; continue;
+    }
+
+    // 건물명 토큰 — '시티'처럼 시(市)로 끝나는 건물명을 시군구보다 먼저 판정
+    if (BUILDING_TOKEN.test(t) && !/^\d/.test(t)) {
+      hitBuilding = true; prevAdmin = false; lastAdminWasDongRi = false;
+      continue;   // R2: 건물명 자체는 검색어에서 제외
+    }
+
+    // 'N가'(종로1가·장충동2가류)는 법정동의 일부 — 지번 아님, 보존
+    if (/가$/.test(t)) {
+      if (!hitBuilding) out.push(t);
+      prevAdmin = true; lastAdminWasDongRi = false; continue;
+    }
+
+    // 행정구역 토큰(숫자 없는)
+    if (ADMIN_ANY.test(t) && !/\d/.test(t)) {
+      const dr = ADMIN_DONG_RI.test(t);
+      if (dr) {
+        if (seenDongRi.has(t)) { prevAdmin = true; lastAdminWasDongRi = true; continue; } // R4 중복
+        seenDongRi.add(t);
+      }
+      if (!hitBuilding) out.push(t);
+      prevAdmin = /(동|리|읍|면)$/.test(t);
+      lastAdminWasDongRi = dr;
+      continue;
+    }
+
+    // 숫자 토큰(지번 후보) — '산12-3'의 산 접두 포함
+    const m = t.match(/^(산?\d+(?:-\d+)?)$/);
+    if (m) {
+      const val = m[1];
+      if ((!hitBuilding && prevAdmin) || (hitBuilding && prevAdmin && lastAdminWasDongRi)) {
+        if (hitBuilding) {
+          const prevTok = out[out.length - 1];
+          if (i >= 1 && ADMIN_DONG_RI.test(toks[i - 1]) && prevTok !== toks[i - 1]) out.push(toks[i - 1]);
+        }
+        out.push(val); jibun = val;
+        break;
+      }
+      prevAdmin = false; continue;
+    }
+    prevAdmin = false;
+  }
+
+  return { core: out.join(" "), jibun };
+}
+
 function preprocess(raw) {
   if (typeof raw !== "string" || raw.trim() === "")
     return { cleaned: "", searchText: "", unit: { dong: null, ho: null } };
@@ -193,6 +377,21 @@ function preprocess(raw) {
     text = inferred.text ?? text;
   }
   text = text.replace(/\//g, " ").replace(/\s+/g, " ").trim();
+
+  // 지번 코어 적용(2026-07-13): "지번 뒤 건물명·동호" 잔존이 juso 실패의 최대
+  // 원인(실측 81%)이므로, 지번형 주소는 지번까지만 남긴다. 단 (1)도로명주소는
+  // 건드리지 않고(로/길 포함 시 skip) (2)지번을 못 찾으면 기존 검색어를 유지해
+  // 오확정을 피한다. 동·호는 위에서 이미 뽑았으므로 코어에서 빠져도 무방.
+  const isRoad = /(\d+번?길|[가-힣]+로\s*\d|[가-힣]+길\s*\d)/.test(text);
+  if (!isRoad) {
+    const { core, jibun } = extractJibunCore(text);
+    // 지번을 실제로 찾았을 때만 코어로 교체(건물명·동호 절단). 지번을 못 찾으면
+    // 원본 검색어를 그대로 둔다 — 건물명만 있는 주소("헬리오시티")는 그 건물명이
+    // 있어야 카카오 폴백이 동작하고, 지번 없는 주소를 억지로 자르면 오히려 실패한다.
+    if (jibun && /(동|리|읍|면|가)/.test(core)) {
+      text = core;
+    }
+  }
   return { cleaned, searchText: text, unit: { dong, ho } };
 }
 function fromJuso(item) {
@@ -225,7 +424,12 @@ function fromKakao(doc, regionCode = null) {
     mnnm,
     slno,
     roadAddr: doc.road_address?.address_name ?? null,
-    jibunAddr: jibun?.address_name ?? doc.address_name ?? null,
+    // 2026-07-15 수정: 예전엔 `jibun?.address_name ?? doc.address_name`이라,
+    // 카카오가 지번 없이 도로명만 준 경우 doc.address_name(장소 표시명=도로명)이
+    // jibunAddr에 들어갔다. 이게 IROS로 넘어가 "경인로 302"처럼 도로명이 지번
+    // 검색어로 쓰여 매칭이 전부 틀어졌다(실사례: 구로구 개봉동 센트레빌).
+    // → 진짜 지번(jibun.address_name)이 있을 때만 jibunAddr을 채운다.
+    jibunAddr: jibun?.address_name ?? null,
     bdMgtSn: null,
     bdNm: doc.place_name ?? "",
     source: "kakao"
@@ -243,11 +447,17 @@ async function safeCall(fn, ...args) {
 }
 async function cascade(pre, clients) {
   const { cleaned, searchText } = pre;
+  // jusoQuery: juso에 '실제로' 전달된 문자열(진단용). 전처리가 주소를 깨뜨렸는지
+  // 원문과 나란히 봐야 판별 가능하므로 결과지에 그대로 남긴다.
+  const tried = [cleaned];
   let items = await safeCall(clients.juso, cleaned);
-  if (items.length > 0) return { candidates: items.map(fromJuso), level: "L1" };
+  if (items.length > 0)
+    return { candidates: items.map(fromJuso), level: "L1", jusoQuery: tried.join(" \u25B8 "), count: items.length };
   if (searchText && searchText !== cleaned) {
+    tried.push(searchText);
     items = await safeCall(clients.juso, searchText);
-    if (items.length > 0) return { candidates: items.map(fromJuso), level: "L2" };
+    if (items.length > 0)
+      return { candidates: items.map(fromJuso), level: "L2", jusoQuery: tried.join(" \u25B8 "), count: items.length };
   }
   if (clients.kakaoKeyword) {
     const docs = await safeCall(clients.kakaoKeyword, searchText || cleaned);
@@ -262,10 +472,10 @@ async function cascade(pre, clients) {
         }
         out.push(fromKakao(doc, regionCode));
       }
-      return { candidates: out, level: "L3" };
+      return { candidates: out, level: "L3", jusoQuery: tried.join(" \u25B8 "), count: out.length };
     }
   }
-  return { candidates: [], level: null };
+  return { candidates: [], level: null, jusoQuery: tried.join(" \u25B8 "), count: 0 };
 }
 function pad4(n) {
   const v = String(n ?? "").replace(/\D/g, "");
@@ -372,9 +582,23 @@ function resolve(candidates, pre) {
 async function refineAddress(raw, clients) {
   const pre = preprocess(raw);
   if (pre.cleaned === "") return resolve([], pre);
-  const { candidates, level } = await cascade(pre, clients);
+  const { candidates, level, jusoQuery, count } = await cascade(pre, clients);
   const result = resolve(candidates, pre);
   result.searchLevel = level;
+  result.jusoQuery = jusoQuery;        // 진단: juso에 실제로 간 검색어
+  result.candCount = count;            // 진단: 원천이 돌려준 후보 수
+  if (result.status === "CONFIRMED") {
+    const v = validateRegion(pre.cleaned, result.jibunAddr);
+    result.validation = v;
+    if (v.status === "MISMATCH") {
+      // 명백한 지역 불일치 → 자동확정 취소. IROS 진입 필터가 CONFIRMED만
+      // 통과시키므로, 이 건은 등기조회로 넘어가지 않고 검토 대상이 된다.
+      result.status = "VALIDATION_FAILED";
+      result.message = `\uC785\uB825 \uC9C0\uC5ED\uACFC \uAC80\uC0C9\uACB0\uACFC \uC9C0\uC5ED\uC774 \uB2E4\uB985\uB2C8\uB2E4 \u2014 ${v.reason}. \uC785\uB825: ${v.inputSgg || "?"} / \uACB0\uACFC: ${v.resultSgg || "?"} (${result.jibunAddr})`;
+    }
+  } else {
+    result.validation = { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" };
+  }
   return result;
 }
 const MOCK_JUSO_DB = [
@@ -522,6 +746,10 @@ async function idbDel(key) {
   }
 }
 const BATCH_KEY = "rows-progress";
+// 결과 목록은 '미리보기'만 렌더링한다(2026-07-13). 이전엔 전 행을 DOM으로
+// 그려서 3만 행이면 노드 십수만 개 + 100행마다 전체 재렌더 → 브라우저 멈춤/강제종료.
+// 전체 결과는 엑셀 다운로드로 확인한다.
+const PREVIEW_ROWS = 50;
 const REG_LABEL = {
   RESOLVED: "\uC870\uD68C\uC644\uB8CC",
   REG_MULTI: "\uBCF5\uC218\uACB0\uACFC",
@@ -669,6 +897,7 @@ function StatusDot({ status, big }) {
   const map = {
     CONFIRMED: ["\uD655\uC815", C.ok],
     AMBIGUOUS: ["\uD655\uC778 \uD544\uC694", C.warn],
+    VALIDATION_FAILED: ["\uAC80\uC99D \uBD88\uC77C\uCE58", C.warn],
     FAILED: ["\uC2E4\uD328", C.err]
   };
   const [t, color] = map[status] || map.FAILED;
@@ -979,7 +1208,7 @@ function ResultCard({ r, onRegionPick, bridgeUp, reg, regBusy, onLookup }) {
     },
     /* @__PURE__ */ React.createElement("strong", { style: { color: C.cyan, minWidth: 108, fontWeight: 700 } }, c.sidoSigungu),
     /* @__PURE__ */ React.createElement("span", { style: { color: C.dim } }, c.jibunAddr)
-  ))), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, marginTop: 9 } }, "\uD6C4\uBCF4 \uC120\uD0DD \uC2DC \uD574\uB2F9 \uC9C0\uC5ED\uC73C\uB85C \uC881\uD600 \uC7AC\uAC80\uC0C9\uD569\uB2C8\uB2E4.")), r.status === "FAILED" && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 14, margin: 0, lineHeight: 1.7, color: C.dim } }, r.message));
+  ))), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, marginTop: 9 } }, "\uD6C4\uBCF4 \uC120\uD0DD \uC2DC \uD574\uB2F9 \uC9C0\uC5ED\uC73C\uB85C \uC881\uD600 \uC7AC\uAC80\uC0C9\uD569\uB2C8\uB2E4.")), (r.status === "FAILED" || r.status === "VALIDATION_FAILED") && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 14, margin: 0, lineHeight: 1.7, color: r.status === "VALIDATION_FAILED" ? C.warn : C.dim } }, r.message));
 }
 function AddrRefineTestGui() {
   const [tab, setTab] = useState("single");
@@ -1532,7 +1761,9 @@ function AddrRefineTestGui() {
       let failCode = "";
       const okStatus = r.status === "\uD655\uC815" || r.status === "CONFIRMED";
       if (!okStatus) {
-        failCode = r.status === "AMBIGUOUS" ? "\uC8FC\uC18C\uD6C4\uBCF4\uBCF5\uC218" : r.status === "FAILED" ? "\uC8FC\uC18C\uBBF8\uBC1C\uACAC" : "";
+        failCode = r.status === "AMBIGUOUS" ? "\uC8FC\uC18C\uD6C4\uBCF4\uBCF5\uC218"
+          : r.status === "VALIDATION_FAILED" ? "\uAC80\uC99D\uBD88\uC77C\uCE58"
+          : r.status === "FAILED" ? (r.failKind === "TRANSIENT" ? "\uC77C\uC2DC\uC624\uB958" : "\uC8FC\uC18C\uBBF8\uBC1C\uACAC") : "";
       } else if (reg && reg.status !== "RESOLVED") {
         failCode = REG_LABEL[reg.status] || reg.status;
       }
@@ -1557,7 +1788,15 @@ function AddrRefineTestGui() {
         addrSrc,
         unitSrc,
         lookupAt: reg?.at || (reg ? (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ") : ""),
-        note: okStatus ? failCode || "" : r.reason || failCode || "",
+        note: okStatus ? failCode || "" : r.message || r.reason || failCode || "",
+        // ── 진단 열(2026-07-13): 전처리 오염 vs 원천 무결과를 눈으로 구분하기 위함 ──
+        jusoQuery: r.jusoQuery || "",
+        candCount: r.candCount ?? "",
+        searchLevel: r.searchLevel || "",
+        inputSgg: r.validation?.inputSgg || "",
+        resultSgg: r.validation?.resultSgg || "",
+        valStatus: r.validation?.status || "",
+        valReason: r.validation?.reason || "",
         extra: row.extra || []
       };
     });
@@ -1585,7 +1824,7 @@ function AddrRefineTestGui() {
     }
     return recs;
   }, [rows]);
-  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "조회일시", "비고"];
+  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "조회일시", "비고", "juso\uAC80\uC0C9\uC5B4", "\uD6C4\uBCF4\uAC74\uC218", "\uAC80\uC0C9\uACBD\uB85C", "\uC785\uB825\uC9C0\uC5ED", "\uACB0\uACFC\uC9C0\uC5ED", "\uAC80\uC99D\uC0C1\uD0DC", "\uAC80\uC99D\uC0AC\uC720"];
   const recToRow = (rec) => [
     ...rec.extra,
     rec.raw,
@@ -1607,7 +1846,14 @@ function AddrRefineTestGui() {
     REG_LABEL[rec.regStatus] || rec.regStatus || "",
     rec.failCode,
     rec.lookupAt,
-    rec.note
+    rec.note,
+    rec.jusoQuery,
+    rec.candCount,
+    rec.searchLevel,
+    rec.inputSgg,
+    rec.resultSgg,
+    rec.valStatus,
+    rec.valReason
   ];
   const makeSheet = (recs, mode2) => {
     // 부동산번호 등 업로드 원본 열(extraHeaders)을 맨 앞에 배치 — 조인키가
@@ -1654,7 +1900,7 @@ function AddrRefineTestGui() {
       12,
       17,
       15
-    ].map((w) => ({ wch: w }));
+    , 40, 8, 8, 16, 20, 12, 22].map((w) => ({ wch: w }));
     ws["!freeze"] = { xSplit: 0, ySplit: 1 };
     return ws;
   };
@@ -1743,6 +1989,17 @@ function AddrRefineTestGui() {
     if (r.result) acc[r.result.status] = (acc[r.result.status] || 0) + 1;
     return acc;
   }, {});
+  // 등기조회 결과 집계(2026-07-15): 화면에 성공/다건/실패가 안 보여 추가.
+  const regStat = rows.reduce((acc, r) => {
+    const s = r.reg?.status;
+    if (!s) return acc;
+    if (s === "RESOLVED") acc.ok++;
+    else if (s === "REG_MULTI" || s === "MULTIPLE") acc.multi++;
+    else if (s === "REG_UNIT_NOT_FOUND") acc.unitNo++;
+    else acc.fail++;   // NOT_FOUND, SESSION_ERROR, RATE_LIMIT 등 전부
+    acc.done++;
+    return acc;
+  }, { ok: 0, multi: 0, unitNo: 0, fail: 0, done: 0 });
   const btnP = {
     padding: "12px 26px",
     fontSize: 14,
@@ -2076,7 +2333,7 @@ function AddrRefineTestGui() {
     "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (",
     stat.CONFIRMED || 0,
     "건)"
-  ), (!batchBusy && rows.length > 0 && batchDone === rows.length && ((stat.CONFIRMED || 0) === 0 || (!batchRegBusy && batchTotal > 0 && batchRegDone >= batchTotal))) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 전체 처리 완료 · 정제 ${batchDone}건`, (stat.CONFIRMED || 0) > 0 ? ` · 등기조회 ${batchRegDone}건` : ""), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 13, color: C.cyan } }, `등기조회 ${batchTotal ? Math.round(batchRegDone / batchTotal * 100) : 0}% (${batchRegDone}/${batchTotal}) · 중복제거 후 · 건당 1초`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
+  ), (!batchBusy && rows.length > 0 && batchDone === rows.length && ((stat.CONFIRMED || 0) === 0 || (!batchRegBusy && batchTotal > 0 && batchRegDone >= batchTotal))) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 전체 처리 완료 · 정제 ${batchDone}건`, (stat.CONFIRMED || 0) > 0 ? ` · 등기조회 ${batchRegDone}건` : ""), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 13, color: C.cyan } }, `등기조회 ${batchTotal ? Math.round(batchRegDone / batchTotal * 100) : 0}% (${batchRegDone}/${batchTotal}) · 중복제거 후 · 건당 1초`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), (regStat.done > 0) && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 \uC131\uACF5 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uB2E4\uAC74 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 \uC2E4\uD328 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => downloadXlsx("all"),
@@ -2110,16 +2367,16 @@ function AddrRefineTestGui() {
       }
     },
     "\uC2E4\uD328\uAC74 \uB2E4\uC6B4\uB85C\uB4DC"
-  ), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uD655\uC815 ", stat.CONFIRMED || 0, " \xB7 \uD655\uC778\uD544\uC694 ", stat.AMBIGUOUS || 0, " \xB7 \uC2E4\uD328 ", stat.FAILED || 0)), !bridgeUp && batchDone > 0 && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C\uB294 \uB85C\uCEEC \uBE0C\uB9AC\uC9C0(iros_bridge.py) \uC2E4\uD589 \uC2DC \uD65C\uC131\uD654\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
+  ), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uD655\uC815 ", stat.CONFIRMED || 0, " \xB7 \uD655\uC778\uD544\uC694 ", stat.AMBIGUOUS || 0, " \xB7 \uC2E4\uD328 ", stat.FAILED || 0)), rows.length > PREVIEW_ROWS && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, `아래 목록은 상위 ${PREVIEW_ROWS}행 미리보기입니다 (전체 ${rows.length.toLocaleString()}행) — 전체 결과는 엑셀 다운로드로 확인하세요`), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
     padding: "11px 14px",
     borderBottom: `1px solid ${C.cardLine}`,
     fontSize: 10.5,
     color: C.faint,
     fontWeight: 700,
     letterSpacing: "0.14em"
-  } }, h)))), /* @__PURE__ */ React.createElement("tbody", null, rows.map((row, i) => {
+  } }, h)))), /* @__PURE__ */ React.createElement("tbody", null, rows.slice(0, PREVIEW_ROWS).map((row, i) => {
     const r = row.result;
-    return /* @__PURE__ */ React.createElement("tr", { key: i, style: { borderBottom: `1px solid rgba(255,255,255,0.045)` } }, /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", fontFamily: mono, fontSize: 11, color: C.faint } }, i + 1), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", maxWidth: 185, wordBreak: "break-all", color: C.ink } }, row.raw), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px" } }, r ? /* @__PURE__ */ React.createElement(StatusDot, { status: r.status }) : /* @__PURE__ */ React.createElement("span", { style: { color: C.faint, fontSize: 11 } }, "\uB300\uAE30")), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", maxWidth: 245, wordBreak: "break-all" } }, r?.status === "CONFIRMED" && /* @__PURE__ */ React.createElement("span", { style: { color: C.ink } }, r.jibunAddr), r?.status === "AMBIGUOUS" && /* @__PURE__ */ React.createElement("span", { style: { color: C.dim } }, r.message), r?.status === "FAILED" && /* @__PURE__ */ React.createElement("span", { style: { color: C.faint } }, r.message)), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", whiteSpace: "nowrap", fontFamily: mono, fontSize: 12, letterSpacing: "0.06em" } }, r?.pnu ? /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("span", { style: { color: C.cyan } }, r.pnu.slice(0, 10)), /* @__PURE__ */ React.createElement("span", { style: { color: C.indigo } }, r.pnu.slice(10, 11)), /* @__PURE__ */ React.createElement("span", { style: { color: "#A78BFA" } }, r.pnu.slice(11, 15)), /* @__PURE__ */ React.createElement("span", { style: { color: "#67E8F9" } }, r.pnu.slice(15, 19))) : ""), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", whiteSpace: "nowrap", fontFamily: mono, fontSize: 12 } }, row.reg?.status === "RESOLVED" && /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, row.reg.unique_no), row.reg?.status === "MULTIPLE" && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, row.reg.candidates.length, "\uAC74"), row.reg && !["RESOLVED", "MULTIPLE"].includes(row.reg.status) && /* @__PURE__ */ React.createElement("span", { style: { color: C.err, fontSize: 11 } }, row.reg.status)));
+    return /* @__PURE__ */ React.createElement("tr", { key: i, style: { borderBottom: `1px solid rgba(255,255,255,0.045)` } }, /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", fontFamily: mono, fontSize: 11, color: C.faint } }, i + 1), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", maxWidth: 185, wordBreak: "break-all", color: C.ink } }, row.raw), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px" } }, r ? /* @__PURE__ */ React.createElement(StatusDot, { status: r.status }) : /* @__PURE__ */ React.createElement("span", { style: { color: C.faint, fontSize: 11 } }, "\uB300\uAE30")), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", maxWidth: 245, wordBreak: "break-all" } }, r?.status === "CONFIRMED" && /* @__PURE__ */ React.createElement("span", { style: { color: C.ink } }, r.jibunAddr), r?.status === "AMBIGUOUS" && /* @__PURE__ */ React.createElement("span", { style: { color: C.dim } }, r.message), r?.status === "FAILED" && /* @__PURE__ */ React.createElement("span", { style: { color: C.faint } }, r.message), r?.status === "VALIDATION_FAILED" && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, r.message)), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", whiteSpace: "nowrap", fontFamily: mono, fontSize: 12, letterSpacing: "0.06em" } }, r?.pnu ? /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("span", { style: { color: C.cyan } }, r.pnu.slice(0, 10)), /* @__PURE__ */ React.createElement("span", { style: { color: C.indigo } }, r.pnu.slice(10, 11)), /* @__PURE__ */ React.createElement("span", { style: { color: "#A78BFA" } }, r.pnu.slice(11, 15)), /* @__PURE__ */ React.createElement("span", { style: { color: "#67E8F9" } }, r.pnu.slice(15, 19))) : ""), /* @__PURE__ */ React.createElement("td", { style: { padding: "9px 14px", whiteSpace: "nowrap", fontFamily: mono, fontSize: 12 } }, row.reg?.status === "RESOLVED" && /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, row.reg.unique_no), row.reg?.status === "MULTIPLE" && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, row.reg.candidates.length, "\uAC74"), row.reg && !["RESOLVED", "MULTIPLE"].includes(row.reg.status) && /* @__PURE__ */ React.createElement("span", { style: { color: C.err, fontSize: 11 } }, row.reg.status)));
   })))))))));
 }
 
