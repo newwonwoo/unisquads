@@ -175,19 +175,32 @@ $('go').addEventListener('click', async () => {
         results[my].resp = data;
         results[my].swrd = data.swrd || '';
         results[my].count = data.record_count ?? (data.parsed_candidates?.length ?? '?');
-        // 성공/실패 판정
+        // 최종 판정(final_status)을 우선 사용 — 앱이 실제로 내리는 결론.
+        // 없으면(구버전 API) 원본 후보수로 대체 판정.
+        const fs = data.final_status;
         if (data.status === 'ERROR') {
           results[my].status = 'fail';
           results[my].why = data.message || '오류';
+        } else if (fs) {
+          if (fs === 'RESOLVED') {
+            results[my].status = 'ok';
+            results[my].uno = data.final_unique_no || '';
+          } else if (fs === 'REG_MULTI' || fs === 'MULTIPLE') {
+            results[my].status = 'multi';
+            results[my].candCount = data.final_candidate_count || data.record_count;
+            results[my].why = data.final_message || '';
+          } else {
+            // REG_NOT_FOUND / REG_UNIT_NOT_FOUND / REG_SESSION_ERROR 등
+            results[my].status = 'fail';
+            results[my].why = (data.final_message || fs);
+          }
         } else if ((data.record_count ?? 0) === 0) {
           results[my].status = 'fail';
           results[my].why = 'IROS 응답 0건 (검색어로 못 찾음)';
         } else {
-          // 파싱 후보에서 동호 매칭 확인
           const cands = data.parsed_candidates || [];
-          const uno = cands[0]?.unique_no;
           results[my].status = cands.length === 1 ? 'ok' : 'multi';
-          results[my].uno = uno;
+          results[my].uno = cands[0]?.unique_no;
           results[my].candCount = cands.length;
         }
       } catch (err) {
@@ -233,11 +246,20 @@ function render() {
   // 배지 집계
   const c = {ok:0, multi:0, fail:0, wait:0, running:0};
   for (const r of results) c[r.status] = (c[r.status]||0)+1;
+  const uploadedN = rows.length;            // 파일 전체
+  const targetN = results.length;           // 조회 대상(최대 조회 건수로 자른 것)
+  const doneN = c.ok + c.multi + c.fail;    // 실제 응답 받은 것
+  const pendingN = c.wait + c.running;      // 남은 것
+  const rate = doneN ? Math.round(c.ok/doneN*100) : 0;
   $('badges').innerHTML =
-    `<span style="color:var(--ok);font-weight:700">✓ 성공 ${c.ok}</span>`
-   +`<span style="color:var(--warn)">◉ 다건 ${c.multi}</span>`
-   +`<span style="color:var(--err)">✕ 실패 ${c.fail}</span>`
-   +`<span style="color:var(--dim)">· 대기 ${c.wait+c.running}</span>`;
+    `<div style="width:100%;display:flex;gap:16px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:8px">`
+     +`<span style="color:var(--dim)">업로드 <b style="color:var(--ink)">${uploadedN.toLocaleString()}</b>건</span>`
+     +`<span style="color:var(--dim)">조회 대상 <b style="color:var(--cyan)">${targetN.toLocaleString()}</b>건</span>`
+     +`<span style="color:var(--dim)">조회 완료 <b style="color:var(--ink)">${doneN.toLocaleString()}</b>${pendingN?` · 남음 ${pendingN.toLocaleString()}`:''}</span>`
+    +`</div>`
+    +`<span style="color:var(--ok);font-weight:700">✓ 성공 ${c.ok.toLocaleString()} (${rate}%)</span>`
+    +`<span style="color:var(--warn)">◉ 다건 ${c.multi.toLocaleString()}</span>`
+    +`<span style="color:var(--err)">✕ 실패 ${c.fail.toLocaleString()}</span>`;
 
   // 필터칩
   const chips = [['all','전체'],['fail','실패만'],['multi','다건만'],['ok','성공만']];
