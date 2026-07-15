@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IROS 진단 일괄 · unisquads</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#0B0E14; --panel:#131722; --ink:#E8EDF4; --dim:#9BA6B8; --faint:#5B6577;
+    --cyan:#22D3EE; --ok:#34D399; --warn:#FBBF24; --err:#F87171; --line:rgba(255,255,255,.08);
+    --mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.6}
+  .wrap{max-width:1200px;margin:0 auto;padding:24px 18px 80px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:var(--dim);font-size:13px;margin:0 0 20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  label.file{display:inline-block;padding:11px 22px;background:linear-gradient(135deg,#22D3EE,#3B82F6);color:#0B0E14;font-weight:700;border-radius:9px;cursor:pointer}
+  input[type=file]{display:none}
+  input[type=text],input[type=number]{background:#0B0E14;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 12px;font-family:var(--mono);font-size:13px}
+  button{padding:11px 22px;font-weight:700;border:none;border-radius:9px;cursor:pointer;font-family:var(--sans);font-size:14px}
+  .btn-go{background:linear-gradient(135deg,#22D3EE,#3B82F6);color:#0B0E14}
+  .btn-go:disabled{opacity:.5;cursor:default}
+  .btn-stop{background:transparent;border:1px solid var(--err);color:var(--err)}
+  .hint{color:var(--faint);font-size:12px;margin-top:8px}
+  .stat{font-family:var(--mono);font-size:13px;color:var(--dim);margin:12px 0}
+  .badges{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:13px;margin:8px 0}
+  table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12.5px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--faint);font-weight:600;font-family:var(--mono);font-size:11px;letter-spacing:.05em;position:sticky;top:0;background:var(--panel)}
+  td.mono{font-family:var(--mono)}
+  .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;font-family:var(--mono)}
+  .t-ok{background:rgba(52,211,153,.15);color:var(--ok)}
+  .t-multi{background:rgba(251,191,36,.15);color:var(--warn)}
+  .t-fail{background:rgba(248,113,113,.15);color:var(--err)}
+  .t-wait{background:rgba(155,166,184,.12);color:var(--dim)}
+  .swrd{color:var(--cyan)}
+  .cnt{color:var(--ink);font-weight:700}
+  .why{color:var(--dim);font-size:11.5px}
+  details{margin-top:4px}
+  summary{cursor:pointer;color:var(--faint);font-size:11px}
+  pre{background:#0B0E14;border:1px solid var(--line);border-radius:6px;padding:8px;overflow-x:auto;font-size:11px;color:var(--dim);margin:4px 0 0;max-height:220px}
+  .filterbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 0}
+  .chip{padding:6px 12px;border:1px solid var(--line);border-radius:20px;background:transparent;color:var(--dim);font-size:12px;cursor:pointer}
+  .chip.on{background:var(--cyan);color:#0B0E14;border-color:var(--cyan);font-weight:700}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>IROS 진단 일괄</h1>
+  <p class="sub">정제결과 엑셀을 올리면 각 주소를 실제 등기소(IROS)에 조회해 <b>검색어 · 응답건수 · 실패원인</b>을 한눈에 봅니다. 오류 원인 파악 전용 — 앱 동작에는 영향 없습니다.</p>
+
+  <div class="card">
+    <div class="row">
+      <label class="file">엑셀 업로드<input type="file" id="file" accept=".xlsx,.xls,.csv"></label>
+      <span id="fileInfo" class="dim"></span>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <span class="dim" style="font-size:12.5px">동시 조회 수</span>
+      <input type="number" id="conc" value="3" min="1" max="6" style="width:60px">
+      <span class="dim" style="font-size:12.5px">· 최대 조회 건수</span>
+      <input type="number" id="limit" value="30" min="1" max="500" style="width:80px">
+      <button class="btn-go" id="go" disabled>진단 시작</button>
+      <button class="btn-stop" id="stop" style="display:none">중단</button>
+    </div>
+    <p class="hint">IROS는 건당 몇 초 걸리고 과도한 요청 시 차단될 수 있어, 소량(30건 내외)부터 권장합니다. 동시 조회 수를 올리면 빠르지만 차단 위험이 커집니다.</p>
+    <p class="hint">API 주소: <span class="mono" id="apiBase">https://unisquads.vercel.app</span> · <b>이 페이지는 같은 도메인(unisquads.vercel.app/diag.html)에 올려서 여세요.</b> 로컬 파일로 열면 CORS로 막힙니다.</p>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none">
+    <div class="badges" id="badges"></div>
+    <div class="stat" id="progress"></div>
+    <div class="filterbar" id="filters"></div>
+    <div style="overflow-x:auto">
+      <table id="tbl">
+        <thead><tr>
+          <th style="width:28px">#</th>
+          <th>원본주소</th>
+          <th>조회주소(지번)</th>
+          <th style="width:52px">동</th>
+          <th style="width:52px">호</th>
+          <th>IROS 검색어(swrd)</th>
+          <th style="width:60px">응답</th>
+          <th style="width:110px">결과</th>
+          <th>등기고유번호 / 원인</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'https://unisquads.vercel.app';
+let rows = [];          // {원본, 지번, 동, 호}
+let results = [];       // 진단 결과
+let stopFlag = false;
+let curFilter = 'all';
+
+const $ = id => document.getElementById(id);
+
+$('file').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const buf = await f.arrayBuffer();
+  const wb = XLSX.read(buf);
+  // 원본주소/지번주소/동/호 열이 있는 시트 찾기
+  let picked = null;
+  for (const name of wb.SheetNames) {
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[name], {header:1});
+    if (!aoa.length) continue;
+    const head = aoa[0].map(x => String(x||''));
+    const iRaw = head.findIndex(h => h.includes('원본주소'));
+    if (iRaw >= 0) { picked = {aoa, head}; break; }
+  }
+  if (!picked) { $('fileInfo').textContent = '원본주소 열을 찾지 못했습니다. 정제결과 엑셀인지 확인하세요.'; return; }
+  const {aoa, head} = picked;
+  const iRaw = head.findIndex(h => h.includes('원본주소'));
+  const iJibun = head.findIndex(h => h.includes('지번주소'));
+  const iDong = head.findIndex(h => h === '동' || h.includes('동'));
+  const iHo = head.findIndex(h => h === '호' || h.includes('호'));
+  const iState = head.findIndex(h => h.includes('정제상태'));
+  const iFail = head.findIndex(h => h.includes('실패코드'));
+
+  rows = [];
+  for (let r = 1; r < aoa.length; r++) {
+    const raw = String(aoa[r][iRaw]||'').trim();
+    if (!raw) continue;
+    rows.push({
+      raw,
+      jibun: iJibun>=0 ? String(aoa[r][iJibun]||'').trim() : '',
+      dong: iDong>=0 ? String(aoa[r][iDong]||'').trim() : '',
+      ho: iHo>=0 ? String(aoa[r][iHo]||'').trim() : '',
+      state: iState>=0 ? String(aoa[r][iState]||'').trim() : '',
+      fail: iFail>=0 ? String(aoa[r][iFail]||'').trim() : '',
+    });
+  }
+  $('fileInfo').textContent = `${f.name} · ${rows.length.toLocaleString()}행 로드`;
+  $('go').disabled = rows.length === 0;
+});
+
+$('stop').addEventListener('click', () => { stopFlag = true; $('stop').textContent = '중단 중…'; });
+
+$('go').addEventListener('click', async () => {
+  stopFlag = false;
+  const limit = Math.min(parseInt($('limit').value)||30, rows.length);
+  const conc = Math.max(1, Math.min(parseInt($('conc').value)||3, 6));
+  const targets = rows.slice(0, limit);
+  results = targets.map(t => ({...t, status:'wait'}));
+  $('resultCard').style.display = 'block';
+  $('go').disabled = true; $('stop').style.display='inline-block'; $('stop').textContent='중단';
+  render();
+
+  let idx = 0, done = 0;
+  async function worker() {
+    while (idx < targets.length && !stopFlag) {
+      const my = idx++;
+      const t = targets[my];
+      results[my].status = 'running';
+      render();
+      try {
+        // 조회주소: 지번주소 있으면 그걸, 없으면 원본에서 시도+지번만 대충
+        const addr = t.jibun || t.raw;
+        const url = `${API}/api/resolve?addr=${encodeURIComponent(addr)}`
+          + `&dong=${encodeURIComponent(t.dong||'')}&ho=${encodeURIComponent(t.ho||'')}&debug=1`;
+        const res = await fetch(url);
+        const data = await res.json();
+        results[my].resp = data;
+        results[my].swrd = data.swrd || '';
+        results[my].count = data.record_count ?? (data.parsed_candidates?.length ?? '?');
+        // 성공/실패 판정
+        if (data.status === 'ERROR') {
+          results[my].status = 'fail';
+          results[my].why = data.message || '오류';
+        } else if ((data.record_count ?? 0) === 0) {
+          results[my].status = 'fail';
+          results[my].why = 'IROS 응답 0건 (검색어로 못 찾음)';
+        } else {
+          // 파싱 후보에서 동호 매칭 확인
+          const cands = data.parsed_candidates || [];
+          const uno = cands[0]?.unique_no;
+          results[my].status = cands.length === 1 ? 'ok' : 'multi';
+          results[my].uno = uno;
+          results[my].candCount = cands.length;
+        }
+      } catch (err) {
+        results[my].status = 'fail';
+        results[my].why = '요청 실패: ' + err.message;
+      }
+      done++;
+      $('progress').textContent = `진행 ${done}/${targets.length}`;
+      render();
+    }
+  }
+  await Promise.all(Array.from({length:conc}, worker));
+  $('go').disabled = false; $('stop').style.display='none';
+  $('progress').textContent = `완료 ${done}/${targets.length}` + (stopFlag ? ' (중단됨)' : '');
+});
+
+function render() {
+  // 배지 집계
+  const c = {ok:0, multi:0, fail:0, wait:0, running:0};
+  for (const r of results) c[r.status] = (c[r.status]||0)+1;
+  $('badges').innerHTML =
+    `<span style="color:var(--ok);font-weight:700">✓ 성공 ${c.ok}</span>`
+   +`<span style="color:var(--warn)">◉ 다건 ${c.multi}</span>`
+   +`<span style="color:var(--err)">✕ 실패 ${c.fail}</span>`
+   +`<span style="color:var(--dim)">· 대기 ${c.wait+c.running}</span>`;
+
+  // 필터칩
+  const chips = [['all','전체'],['fail','실패만'],['multi','다건만'],['ok','성공만']];
+  $('filters').innerHTML = chips.map(([k,label]) =>
+    `<button class="chip ${curFilter===k?'on':''}" data-f="${k}">${label}</button>`).join('');
+  $('filters').querySelectorAll('.chip').forEach(ch =>
+    ch.onclick = () => { curFilter = ch.dataset.f; render(); });
+
+  const tag = s => ({
+    ok:'<span class="tag t-ok">확정</span>',
+    multi:'<span class="tag t-multi">다건</span>',
+    fail:'<span class="tag t-fail">실패</span>',
+    wait:'<span class="tag t-wait">대기</span>',
+    running:'<span class="tag t-wait">조회중</span>',
+  }[s]||s);
+
+  const show = results.filter(r => curFilter==='all' || r.status===curFilter);
+  $('tbody').innerHTML = show.map((r,i) => {
+    const orig = results.indexOf(r)+1;
+    const respTxt = r.count!=null ? `<span class="cnt">${r.count}</span>건` : '';
+    let last = '';
+    if (r.status==='ok') last = `<span class="mono" style="color:var(--ok);font-weight:700">${r.uno||''}</span>`;
+    else if (r.status==='multi') last = `<span class="why">후보 ${r.candCount}건 — 동·호로 특정 필요</span>`;
+    else if (r.status==='fail') last = `<span class="why" style="color:var(--err)">${r.why||''}</span>`;
+    const detail = r.resp ? `<details><summary>원본 응답</summary><pre>${escapeHtml(JSON.stringify(r.resp,null,1))}</pre></details>` : '';
+    return `<tr>
+      <td class="mono faint">${orig}</td>
+      <td>${escapeHtml(r.raw)}</td>
+      <td class="mono">${escapeHtml(r.jibun||'—')}</td>
+      <td class="mono">${escapeHtml(r.dong||'')}</td>
+      <td class="mono">${escapeHtml(r.ho||'')}</td>
+      <td class="mono swrd">${escapeHtml(r.swrd||'')}</td>
+      <td class="mono">${respTxt}</td>
+      <td>${tag(r.status)}</td>
+      <td>${last}${detail}</td>
+    </tr>`;
+  }).join('');
+}
+
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+</script>
+</body>
+</html>
