@@ -1,0 +1,56 @@
+name: temp-sgg-recovery-test
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect 20 raw responses
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, urllib.request, urllib.error, datetime, time
+          tests = json.loads(r'''[{"target": "에이스아파트 (지번 385-1만, 시군구 없음)", "건물만": "에이스아파트", "지번+건물": "385-1 에이스아파트", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EC%97%90%EC%9D%B4%EC%8A%A4%EC%95%84%ED%8C%8C%ED%8A%B8", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=385-1%20%EC%97%90%EC%9D%B4%EC%8A%A4%EC%95%84%ED%8C%8C%ED%8A%B8"}, {"target": "강선마을아파트 (지번 98)", "건물만": "강선마을아파트", "지번+건물": "98 강선마을아파트", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EA%B0%95%EC%84%A0%EB%A7%88%EC%9D%84%EC%95%84%ED%8C%8C%ED%8A%B8", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=98%20%EA%B0%95%EC%84%A0%EB%A7%88%EC%9D%84%EC%95%84%ED%8C%8C%ED%8A%B8"}, {"target": "부천중동역푸르지오 (지번 372)", "건물만": "부천중동역푸르지오", "지번+건물": "372 부천중동역푸르지오", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EB%B6%80%EC%B2%9C%EC%A4%91%EB%8F%99%EC%97%AD%ED%91%B8%EB%A5%B4%EC%A7%80%EC%98%A4", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=372%20%EB%B6%80%EC%B2%9C%EC%A4%91%EB%8F%99%EC%97%AD%ED%91%B8%EB%A5%B4%EC%A7%80%EC%98%A4"}, {"target": "신도아크라티움 (지번 490)", "건물만": "신도아크라티움", "지번+건물": "490 신도아크라티움", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EC%8B%A0%EB%8F%84%EC%95%84%ED%81%AC%EB%9D%BC%ED%8B%B0%EC%9B%80", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=490%20%EC%8B%A0%EB%8F%84%EC%95%84%ED%81%AC%EB%9D%BC%ED%8B%B0%EC%9B%80"}, {"target": "덕일빌리지 (지번 126-4)", "건물만": "덕일빌리지", "지번+건물": "126-4 덕일빌리지", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EB%8D%95%EC%9D%BC%EB%B9%8C%EB%A6%AC%EC%A7%80", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=126-4%20%EB%8D%95%EC%9D%BC%EB%B9%8C%EB%A6%AC%EC%A7%80"}, {"target": "미호아파트 (지번 265-7)", "건물만": "미호아파트", "지번+건물": "265-7 미호아파트", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EB%AF%B8%ED%98%B8%EC%95%84%ED%8C%8C%ED%8A%B8", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=265-7%20%EB%AF%B8%ED%98%B8%EC%95%84%ED%8C%8C%ED%8A%B8"}, {"target": "명성강변아파트 (지번 1548-49)", "건물만": "명성강변아파트", "지번+건물": "1548-49 명성강변아파트", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EB%AA%85%EC%84%B1%EA%B0%95%EB%B3%80%EC%95%84%ED%8C%8C%ED%8A%B8", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=1548-49%20%EB%AA%85%EC%84%B1%EA%B0%95%EB%B3%80%EC%95%84%ED%8C%8C%ED%8A%B8"}, {"target": "남양황실아파트", "건물만": "남양황실아파트", "지번+건물": "640 남양황실아파트", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EB%82%A8%EC%96%91%ED%99%A9%EC%8B%A4%EC%95%84%ED%8C%8C%ED%8A%B8", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=640%20%EB%82%A8%EC%96%91%ED%99%A9%EC%8B%A4%EC%95%84%ED%8C%8C%ED%8A%B8"}, {"target": "코스코밸리아파트 (육일리 726)", "건물만": "코스코밸리아파트", "지번+건물": "육일리 726 코스코밸리아파트", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%EC%BD%94%EC%8A%A4%EC%BD%94%EB%B0%B8%EB%A6%AC%EC%95%84%ED%8C%8C%ED%8A%B8", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=%EC%9C%A1%EC%9D%BC%EB%A6%AC%20726%20%EC%BD%94%EC%8A%A4%EC%BD%94%EB%B0%B8%EB%A6%AC%EC%95%84%ED%8C%8C%ED%8A%B8"}, {"target": "한국아델리움 (지번 70)", "건물만": "한국아델리움", "지번+건물": "70 한국아델리움", "url_건물만": "https://unisquads.vercel.app/api/naver?query=%ED%95%9C%EA%B5%AD%EC%95%84%EB%8D%B8%EB%A6%AC%EC%9B%80", "url_지번건물": "https://unisquads.vercel.app/api/naver?query=70%20%ED%95%9C%EA%B5%AD%EC%95%84%EB%8D%B8%EB%A6%AC%EC%9B%80"}]''')
+          out = {
+              "collected_at": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+              "call_count": 20,
+              "cases": []
+          }
+          for idx, t in enumerate(tests, 1):
+              case = {
+                  "index": idx,
+                  "target": t["target"],
+                  "queries": {
+                      "building_only": t["건물만"],
+                      "lot_building": t["지번+건물"]
+                  },
+                  "responses": {}
+              }
+              for key, urlkey in [("building_only", "url_건물만"), ("lot_building", "url_지번건물")]:
+                  url = t[urlkey]
+                  req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
+                  rec = {"url": url}
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          body = r.read().decode("utf-8", errors="replace")
+                          rec["http_status"] = r.status
+                          rec["raw_text"] = body
+                          try:
+                              rec["json"] = json.loads(body)
+                          except Exception as e:
+                              rec["json_parse_error"] = f"{type(e).__name__}: {e}"
+                  except Exception as e:
+                      rec["transport_error"] = f"{type(e).__name__}: {e}"
+                  case["responses"][key] = rec
+                  time.sleep(0.4)
+              out["cases"].append(case)
+          with open("sgg_recovery_raw_responses.json","w",encoding="utf-8") as f:
+              json.dump(out,f,ensure_ascii=False,indent=2)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sgg-recovery-raw-responses
+          path: sgg_recovery_raw_responses.json
+          retention-days: 1
