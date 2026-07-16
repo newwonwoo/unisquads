@@ -188,8 +188,11 @@ function extractRegion(text) {
   return out;
 }
 function validateRegion(inputText, resultJibun) {
-  const a = extractRegion(inputText);
-  const b = extractRegion(resultJibun);
+  // 옛 시군구 현대화 후 비교(2026-07-15): 입력이 옛 주소(마산시)이고 결과가
+  // 현행(창원시)이면 통폐합이라 정상인데도 불일치로 막히던 문제 해결.
+  // 양쪽 다 현대화하면 마산시·창원시가 모두 창원시로 정규화돼 일치.
+  const a = extractRegion(modernizeSgg(inputText || ""));
+  const b = extractRegion(modernizeSgg(resultJibun || ""));
   const label = (r) => [r.sido, ...r.sgg, r.bjd].filter(Boolean).join(" ");
   const mk = (status, reason) => ({ status, reason, inputSgg: label(a), resultSgg: label(b) });
   if (a.sido && b.sido && a.sido !== b.sido) return mk("MISMATCH", `\uC2DC\uB3C4 \uBD88\uC77C\uCE58(${a.sido}\u2260${b.sido})`);
@@ -273,16 +276,20 @@ function normalizeUnitInput(v) {
 //       (예: "태원아파트 101-107 평산리 564" → 564가 진짜 지번, 101-107은 동호)
 //   R4. 법정동/리가 중복되면(문산리 문산리) 하나만
 // 지번을 못 찾으면 원문을 그대로 두어(=juso가 알아서 처리하게) 오확정을 피한다.
-const BUILDING_TOKEN = /(아파트|맨션|타운|오피스텔|빌라|빌리지|타워|하이츠|팰리스|캐슬|자이|푸르지오|리버|주공|연립|훼미리|하우스|시티|더샵|이편한|e편한|래미안|힐스|아이파크|드림빌|스타힐스|파크빌|파크|빌딩|프라자|플라자|파밀리에|스타힐스|해링턴|센트럴|센트레빌|엘크루|데시앙|꿈에그린|한신|현대|삼성|대우|롯데|쌍용|우성|경남|한도|금호|신동아|청도|상가|근린생활|근생)/;
+const BUILDING_TOKEN = /(아파트|맨션|타운|오피스텔|빌라|빌리지|타워|하이츠|팰리스|캐슬|자이|푸르지오|리버|주공|연립|훼미리|하우스|시티|더샵|이편한|e편한|래미안|힐스|아이파크|드림빌|스타힐스|파크빌|파크|빌딩|프라자|플라자|파밀리에|스타힐스|해링턴|센트럴|센트레빌|엘크루|데시앙|꿈에그린|한신|현대|삼성|대우|롯데|쌍용|우성|경남|한도|금호|신동아|청도|상가|근린생활|근생|apt|APT|Apt)/;
 const ADMIN_DONG_RI = /^(.+?)(동|리)$/;   // 동/리로 끝나는 행정구역 토큰
 const ADMIN_ANY = /(동|리|읍|면|가|구|시|군)$/;
 
 function extractJibunCore(str) {
-  // 노이즈 선제거(B): 쉼표 복수지번, 물결 범위, 말미 점
+  // 노이즈 선제거(B): 쉼표 복수지번, 물결 범위, 말미 점, '외' 필지 표기
   let s = str
     .replace(/(\d+-\d+)\s*,\s*\d+-\d+/g, "$1")   // 233-67,233-82 → 233-67
     .replace(/~\s*\d+/g, " ")                       // 200~638 → 200
-    .replace(/(\d)\s*\.(?=\s|$)/g, "$1 ");         // 302-6. → 302-6
+    .replace(/(\d)\s*\.(?=\s|$)/g, "$1 ")          // 302-6. → 302-6
+    // '외' 필지 표기 제거(2026-07-15): "외N필지"뿐 아니라 "외"만/"외3"도.
+    // 지번 숫자 바로 뒤의 '외 [숫자] [필지]'를 통째로 제거한다.
+    //   300외2필지 → 300 / 300외 → 300 / 300외3 → 300
+    .replace(/(\d)\s*외\s*\d*\s*필?지?/g, "$1");
   // 숫자+건물명 완전붙음 분리: 와리251-7금호 → 와리 251-7 금호
   // 단 "장충동2가"의 2가(법정동)는 깨지 않도록, 숫자 뒤가 '가'면 제외
   s = s.replace(/([가-힣])(\d)/g, "$1 $2").replace(/(\d)([가-힣])/g, (m, d, k) => k === "\uAC00" ? m : `${d} ${k}`);
@@ -325,7 +332,16 @@ function extractJibunCore(str) {
     if (ADMIN_ANY.test(t) && !/\d/.test(t)) {
       const dr = ADMIN_DONG_RI.test(t);
       if (dr) {
-        if (seenDongRi.has(t)) { prevAdmin = true; lastAdminWasDongRi = true; continue; } // R4 중복
+        if (seenDongRi.has(t)) { prevAdmin = true; lastAdminWasDongRi = true; continue; } // R4 같은 리 중복
+        // R5 다른 리/동 연속(2026-07-15): "영천리 반촌리 420" 처럼 서로 다른
+        // 리(동)가 연속으로 오면, 지번에 붙은 '뒤의 것'이 진짜 법정동이다.
+        // 앞 것(직전 리/동)을 out에서 빼고 뒤 것으로 교체한다. 원본 데이터가
+        // 옛 리와 현 리를 함께 적은 오염(실측 486건, 전부 집합건물).
+        if (lastAdminWasDongRi && !hitBuilding && out.length > 0 &&
+            ADMIN_DONG_RI.test(out[out.length - 1]) && out[out.length - 1] !== t) {
+          seenDongRi.delete(out[out.length - 1]);
+          out.pop();
+        }
         seenDongRi.add(t);
       }
       if (!hitBuilding) out.push(t);
@@ -397,7 +413,7 @@ function preprocess(raw) {
       text = core;
     }
   }
-  return { cleaned, searchText: text, unit: { dong, ho } };
+  return { cleaned, searchText: text, unit: { dong, ho }, raw };
 }
 function fromJuso(item) {
   return {
@@ -409,11 +425,35 @@ function fromJuso(item) {
     jibunAddr: item.jibunAddr ?? null,
     bdMgtSn: item.bdMgtSn ?? null,
     bdNm: item.bdNm ?? "",
+    pnuOk: true,   // juso에서 왔으므로 PNU 확보 가능
     // juso bdKdcd: "1"=공동주택(아파트·연립·다세대), "0"=일반건물
     isJip: item.bdKdcd === "1" || /아파트|빌라|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오/.test(item.bdNm ?? ""),
     source: "juso"
   };
 }
+// 네이버 지역검색 결과 → 후보 형식 (2026-07-15)
+// 네이버는 PNU를 안 주므로 주소 정보만 담는다. PNU 확보는 이 주소를 juso에
+// 재조회할 때만 된다. 여기서 만든 후보는 'PNU 미확보'(pnuOk:false) 상태.
+const naverCache = new Map();
+
+function fromNaver(item, naverAddr) {
+  // 네이버 지번주소(address)에서 시군구/동/지번을 추출해 최대한 채운다.
+  const addr = naverAddr || item.address || item.roadAddress || "";
+  return {
+    admCd: null,                 // 법정동코드 미상(juso 재확정에서만 확보)
+    mtYn: "0",
+    mnnm: null,
+    slno: "0",
+    roadAddr: item.roadAddress || null,
+    jibunAddr: item.address || naverAddr || null,   // 네이버 지번주소
+    bdMgtSn: null,
+    bdNm: item.title || "",
+    source: "naver",
+    pnuOk: false,                // PNU 미확보(주소는 정상)
+    naverAddr: addr,
+  };
+}
+
 function fromKakao(doc, regionCode = null) {
   const jibun = doc.address ?? null;
   let mtYn = "0", mnnm = null, slno = "0", admCd = regionCode;
@@ -450,6 +490,65 @@ async function safeCall(fn, ...args) {
     return [];                       // 그 외 알 수 없는 오류는 기존대로 0건 취급(동작 보존)
   }
 }
+// 옛 시군구 → 현재 시군구 (2026-07-15, 실측 3건 + 여유분)
+// 검색 '전에' 원본 주소를 현대화한다(교차검증 예외가 아니라 사전 변환).
+// 실데이터: 청원군159 진해시62 마산시51 + 소수. 나머지 통폐합은 실데이터에 없음.
+const OLD_SGG_MODERNIZE = [
+  [/마산시/g, "창원시"], [/진해시/g, "창원시"], [/창원시\s+창원시/g, "창원시"],
+  [/청원군/g, "청주시"],
+  [/여천시/g, "여수시"], [/여천군/g, "여수시"],
+  [/삼천포시/g, "사천시"], [/충무시/g, "통영시"], [/장승포시/g, "거제시"],
+  [/이리시/g, "익산시"], [/동광양시/g, "광양시"],
+];
+function modernizeSgg(addr) {
+  let s = addr || "";
+  for (const [re, to] of OLD_SGG_MODERNIZE) s = s.replace(re, to);
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// 네이버 검색용 건물명 추출(2026-07-15 재작성): 토큰 매칭이 아니라
+// '행정구역·지번·동호·노이즈를 제거하고 남는 것'을 건물명으로 본다.
+// 토큰 방식은 (1)토큰 없는 아파트명(혜창한마음비치) 누락 (2)"경남"(경상남도
+// 약자)을 브랜드로 오인하는 문제가 있었다.
+// "경남 마산시 진동면 393-2 혜창한마음비치 상가동 101호" → "혜창한마음비치"
+function extractBuildingName(raw) {
+  if (!raw) return "";
+  let s = String(raw)
+    .replace(/\([^)]*\)/g, " ")                       // 괄호 내용 제거
+    .replace(/[,·]/g, " ")
+    // 시도(경남·서울 등) 제거 — 브랜드명 오인 방지
+    .replace(/(경남|경북|전남|전북|충남|충북|강원|경기|제주)(?=\s)/g, " ")
+    .replace(/(서울|부산|대구|인천|광주|대전|울산|세종)(특별시|광역시|특별자치시)?(?=\s)/g, " ")
+    .replace(/[가-힣]+(특별시|광역시|특별자치도|도)(?=\s)/g, " ")
+    // 시군구·읍면동 제거
+    .replace(/[가-힣]+(시|군|구|읍|면|동|리|가)(?=\s)/g, " ")
+    // 지번(숫자-숫자, 외필지) 제거
+    .replace(/\d+(-\d+)?\s*(외\s*\d*\s*필?지?)?/g, " ")
+    // 동/호/층 제거
+    .replace(/제?\s*\d*\s*[동호층]/g, " ")
+    .replace(/상가|지하|대지권없음/g, " ")
+    .replace(/\s+/g, " ").trim();
+  // 남은 것 중 첫 덩어리가 건물명(여러 단어면 첫 2개까지)
+  const toks = s.split(" ").filter(Boolean);
+  if (toks.length === 0) return "";
+  // 건물명 토큰이 포함된 단어가 있으면 그것 우선, 없으면 첫 단어
+  const withToken = toks.find(t => BUILDING_TOKEN.test(t));
+  if (withToken) {
+    const idx = toks.indexOf(withToken);
+    const prev = idx > 0 ? toks[idx - 1] : "";
+    return (prev ? prev + " " : "") + withToken;
+  }
+  return toks.slice(0, 2).join(" ");
+}
+
+// 시군구·읍면동 추출(현대화 후): 캐시키·검색어 조합용
+function extractSggEmd(addr) {
+  const s = modernizeSgg(addr || "");
+  const sgg = (s.match(/([가-힣]+(?:시|군|구))/) || [])[1] || "";
+  const emd = (s.match(/([가-힣]+(?:읍|면|동))(?=\s|\d|$)/) || [])[1] || "";
+  return { sgg, emd };
+}
+
 async function cascade(pre, clients) {
   const { cleaned, searchText } = pre;
   // jusoQuery: juso에 '실제로' 전달된 문자열(진단용). 전처리가 주소를 깨뜨렸는지
@@ -482,6 +581,68 @@ async function cascade(pre, clients) {
         out.push(fromKakao(doc, regionCode));
       }
       return { candidates: out, level: "L3", jusoQuery: tried.join(" \u25B8 ") + " \u25B8 [\uCE74\uCE74\uC624]" + kakaoQuery, count: out.length };
+    }
+  }
+  // ── L4: 네이버 지역검색 (2026-07-15) ──────────────────────────────
+  // juso·카카오 모두 실패 + 건물명 있을 때만. 네이버를 '최종 정상주소 판정
+  // 엔진'으로 사용한다: 네이버가 주소를 주면 그걸 정상주소로 채택하고, juso는
+  // PNU 확보 목적으로만 재조회한다(주소 판정과 PNU 확보 분리).
+  if (clients.naverLocal) {
+    const bldName = extractBuildingName(pre.raw || cleaned);
+    if (bldName) {
+      const { sgg, emd } = extractSggEmd(pre.raw || cleaned);
+      // 검색어 3단계화(보완사항 3): 좁은 것부터. 3단계 다 0건이어야 인적오류 확정.
+      const queries = [
+        [sgg, emd, bldName].filter(Boolean).join(" "),   // 1차: 시군구+읍면동+건물명
+        [sgg, bldName].filter(Boolean).join(" "),        // 2차: 시군구+건물명
+        bldName,                                          // 3차: 건물명만
+      ].filter((q, i, arr) => q && arr.indexOf(q) === i);  // 중복 제거
+
+      let naverItems = null;
+      for (const q of queries) {
+        // 캐시키(보완사항 2): 시군구+건물명. 건물명 단독 캐싱 금지(동명 타지역 방지).
+        const cacheKey = `${sgg}|${bldName}|${q}`;
+        if (naverCache.has(cacheKey)) {
+          naverItems = naverCache.get(cacheKey);
+        } else {
+          naverItems = await safeCall(clients.naverLocal, q);  // 시스템오류면 throw→상위 재시도
+          naverCache.set(cacheKey, naverItems);
+        }
+        if (naverItems && naverItems.length > 0) break;   // 잡히면 다음 단계 안 감
+      }
+
+      if (naverItems && naverItems.length > 0) {
+        const top = naverItems[0];
+        const naverAddr = top.roadAddress || top.address || "";   // 도로명 우선
+        // ★ 주소는 네이버로 확정. juso는 PNU 확보용으로만 재조회(실패해도 주소는 유효).
+        let cand = null;
+        if (naverAddr) {
+          const reAddr = modernizeSgg(naverAddr);
+          const jusoItems = await safeCall(clients.juso, reAddr);
+          if (jusoItems.length > 0) {
+            cand = fromJuso(jusoItems[0]);           // PNU까지 확보
+          } else {
+            // PNU 미확보지만 네이버 주소는 정상 → 별도 상태로 남긴다
+            cand = fromNaver(top, naverAddr);
+          }
+        }
+        if (cand) {
+          return {
+            candidates: [cand], level: "L4",
+            jusoQuery: tried.join(" \u25B8 ") + " \u25B8 [\uB124\uC774\uBC84]" + bldName,
+            count: 1,
+            naverAddr,                                 // 진단: 네이버가 준 주소
+            naverPnuOk: !!cand.pnuOk,                  // PNU 확보 여부
+          };
+        }
+      } else {
+        // 3단계 모두 정상 호출 + 0건 → 인적 입력오류(보완사항 1: 시스템오류와 구분됨)
+        return {
+          candidates: [], level: "L4_NORESULT",
+          jusoQuery: tried.join(" \u25B8 ") + " \u25B8 [\uB124\uC774\uBC84:0\uAC74]" + bldName,
+          count: 0, humanInputError: true,
+        };
+      }
     }
   }
   return { candidates: [], level: null, jusoQuery: tried.join(" \u25B8 "), count: 0 };
@@ -591,7 +752,54 @@ function resolve(candidates, pre) {
 async function refineAddress(raw, clients) {
   const pre = preprocess(raw);
   if (pre.cleaned === "") return resolve([], pre);
-  const { candidates, level, jusoQuery, count } = await cascade(pre, clients);
+  let cascadeResult;
+  try {
+    cascadeResult = await cascade(pre, clients);
+  } catch (e) {
+    // safeCall이 시스템오류(네이버 API 장애 등)를 throw로 전파 → SYSTEM_ERROR
+    return {
+      status: "SYSTEM_ERROR",
+      reason: "SYSTEM_ERROR",
+      message: `\uC870\uD68C \uC2DC\uC2A4\uD15C \uC624\uB958 \u2014 \uC7AC\uC2DC\uB3C4 \uD544\uC694 (${e?.message || e})`,
+      searchLevel: null, jusoQuery: pre.cleaned, candCount: 0,
+      validation: { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" },
+    };
+  }
+  const { candidates, level, jusoQuery, count, humanInputError, naverAddr, naverPnuOk } = cascadeResult;
+
+  // ── L4 네이버 최종 판정 결과 처리 (2026-07-15) ──────────────────
+  // 네이버는 '최종 정상주소 판정 엔진'. 주소 판정과 PNU 확보를 분리한다.
+  if (level === "L4") {
+    if (naverPnuOk) {
+      // 네이버 주소 + juso로 PNU 확보 → 완전 확정. 아래 일반 CONFIRMED 경로로.
+    } else {
+      // 네이버 주소는 정상이나 PNU 미확보 → 별도 상태(주소는 유효)
+      const c = candidates[0] || {};
+      return {
+        status: "NAVER_CONFIRMED_PNU_FAILED",
+        jibunAddr: c.jibunAddr || naverAddr || null,
+        roadAddr: c.roadAddr || null,
+        bdNm: c.bdNm || null,
+        pnu: null, bdMgtSn: null,
+        unit: pre.unit,
+        searchLevel: "L4", jusoQuery, candCount: count,
+        naverAddr,
+        message: `\uB124\uC774\uBC84 \uC8FC\uC18C \uD655\uC778(PNU \uBBF8\uD655\uBCF4): ${naverAddr || c.jibunAddr || ""}`,
+        validation: { status: "NOT_AVAILABLE", reason: "네이버 확정", inputSgg: "", resultSgg: "" },
+      };
+    }
+  }
+  if (humanInputError) {
+    // 네이버 3단계 정상호출 + 전부 0건 → 인적 입력오류(주소 자체가 틀림)
+    return {
+      status: "HUMAN_INPUT_ERROR",
+      reason: "HUMAN_INPUT_ERROR",
+      message: "\uB124\uC774\uBC84 \uC815\uC0C1 \uC870\uD68C\uD588\uC73C\uB098 \uACB0\uACFC \uC5C6\uC74C \u2014 \uC785\uB825 \uC8FC\uC18C \uD655\uC778 \uD544\uC694(\uC624\uD0C0/\uC874\uC7AC\uD558\uC9C0 \uC54A\uB294 \uC8FC\uC18C)",
+      searchLevel: "L4", jusoQuery, candCount: 0,
+      validation: { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" },
+    };
+  }
+
   const result = resolve(candidates, pre);
   result.searchLevel = level;
   result.jusoQuery = jusoQuery;        // 진단: juso에 실제로 간 검색어
@@ -644,6 +852,23 @@ function transientErr(msg) {
 }
 function makeRealClients(jusoKey, kakaoKey) {
   return {
+    naverLocal: async (query) => {
+      let res;
+      try {
+        res = await fetch(`/api/naver?query=${encodeURIComponent(query)}`);
+      } catch {
+        throw transientErr("네이버 네트워크 오류");   // 시스템 오류 → 재시도
+      }
+      if (!res.ok) throw transientErr(`네이버 HTTP ${res.status}`);
+      let data;
+      try { data = await res.json(); } catch { throw transientErr("네이버 응답 파싱 실패"); }
+      // ok:false = API 장애(인증/한도/타임아웃/서버). 시스템 오류로 전파 → 재시도.
+      // 인적 오류(결과 0건)와 절대 섞지 않는다(보완사항 1).
+      if (data && data.ok === false) {
+        throw transientErr(`네이버 ${data.error_kind || "ERROR"}: ${data.error || ""}`.trim());
+      }
+      return data?.items ?? [];   // ok:true + 빈 배열 = 진짜 0건(HUMAN_INPUT_ERROR로 분류)
+    },
     juso: async (kw) => {
       let res;
       try {
@@ -905,8 +1130,11 @@ function PnuHero({ pnu }) {
 function StatusDot({ status, big }) {
   const map = {
     CONFIRMED: ["\uD655\uC815", C.ok],
+    NAVER_CONFIRMED_PNU_FAILED: ["\uB124\uC774\uBC84\uD655\uC815(PNU\uBBF8\uD655\uBCF4)", C.cyan],
     AMBIGUOUS: ["\uD655\uC778 \uD544\uC694", C.warn],
     VALIDATION_FAILED: ["\uAC80\uC99D \uBD88\uC77C\uCE58", C.warn],
+    HUMAN_INPUT_ERROR: ["\uC785\uB825\uC624\uB958", C.warn],
+    SYSTEM_ERROR: ["\uC2DC\uC2A4\uD15C\uC624\uB958(\uC7AC\uC2DC\uB3C4)", C.err],
     FAILED: ["\uC2E4\uD328", C.err]
   };
   const [t, color] = map[status] || map.FAILED;
@@ -1772,11 +2000,14 @@ function AddrRefineTestGui() {
       if (!okStatus) {
         failCode = r.status === "AMBIGUOUS" ? "\uC8FC\uC18C\uD6C4\uBCF4\uBCF5\uC218"
           : r.status === "VALIDATION_FAILED" ? "\uAC80\uC99D\uBD88\uC77C\uCE58"
+          : r.status === "NAVER_CONFIRMED_PNU_FAILED" ? "\uB124\uC774\uBC84\uD655\uC815\uBBF8PNU"
+          : r.status === "HUMAN_INPUT_ERROR" ? "\uC785\uB825\uC624\uB958"
+          : r.status === "SYSTEM_ERROR" ? "\uC2DC\uC2A4\uD15C\uC624\uB958"
           : r.status === "FAILED" ? (r.failKind === "TRANSIENT" ? "\uC77C\uC2DC\uC624\uB958" : "\uC8FC\uC18C\uBBF8\uBC1C\uACAC") : "";
       } else if (reg && reg.status !== "RESOLVED") {
         failCode = REG_LABEL[reg.status] || reg.status;
       }
-      const addrSrc = r.source === "kakao" ? "\uCE74\uCE74\uC624\uD3F4\uBC31" : r.searchLevel === "L2" ? "JUSO\uC7AC\uAC80\uC0C9" : "JUSO\uC6D0\uBB38";
+      const addrSrc = r.source === "naver" ? "\uB124\uC774\uBC84L4" : r.source === "kakao" ? "\uCE74\uCE74\uC624\uD3F4\uBC31" : r.searchLevel === "L2" ? "JUSO\uC7AC\uAC80\uC0C9" : r.searchLevel === "L4" ? "\uB124\uC774\uBC84L4" : "JUSO\uC6D0\uBB38";
       const unitSrc = r.unit?.dong || r.unit?.ho ? r.aptType ? "VWorld\uC120\uD0DD" : "\uC9C1\uC811\uC785\uB825" : "";
       return {
         raw: row.raw,
