@@ -187,7 +187,7 @@ function extractRegion(text) {
   }
   return out;
 }
-function validateRegion(inputText, resultJibun) {
+function validateRegion(inputText, resultJibun, sidoOnly = false) {
   // 옛 시군구 현대화 후 비교(2026-07-15): 입력이 옛 주소(마산시)이고 결과가
   // 현행(창원시)이면 통폐합이라 정상인데도 불일치로 막히던 문제 해결.
   // 양쪽 다 현대화하면 마산시·창원시가 모두 창원시로 정규화돼 일치.
@@ -196,6 +196,14 @@ function validateRegion(inputText, resultJibun) {
   const label = (r) => [r.sido, ...r.sgg, r.bjd].filter(Boolean).join(" ");
   const mk = (status, reason) => ({ status, reason, inputSgg: label(a), resultSgg: label(b) });
   if (a.sido && b.sido && a.sido !== b.sido) return mk("MISMATCH", `\uC2DC\uB3C4 \uBD88\uC77C\uCE58(${a.sido}\u2260${b.sido})`);
+  // 시도만 검증(2026-07-15): 네이버(L4)가 원본 오류를 교정한 경우 — 부전타워
+  // 원본 "만화리"→네이버 "교리"(실측), 당진군→당진시(승격) 등 — 시군구·법정동이
+  // 달라도 네이버를 신뢰한다(네이버는 최종 판정 엔진). 단 시도(부산/충남)가
+  // 다르면 진짜 오확정(경남→인천 실측)이므로 위에서 이미 차단됨.
+  if (sidoOnly) {
+    if (a.sido && b.sido) return mk("MATCH", "\uC2DC\uB3C4 \uC77C\uCE58(\uB124\uC774\uBC84 \uD310\uC815 \uC2E0\uB8B0)");
+    return mk("NOT_AVAILABLE", "\uC2DC\uB3C4 \uCD94\uCD9C \uBD88\uAC00");
+  }
   if (a.sgg.length && b.sgg.length) {
     // 입력이 덜 구체적인 건 정상(성남시 ⊂ 성남시 분당구) — 어긋날 때만 불일치
     const n = Math.min(a.sgg.length, b.sgg.length);
@@ -513,31 +521,37 @@ function modernizeSgg(addr) {
 // "경남 마산시 진동면 393-2 혜창한마음비치 상가동 101호" → "혜창한마음비치"
 function extractBuildingName(raw) {
   if (!raw) return "";
-  let s = String(raw)
-    .replace(/\([^)]*\)/g, " ")                       // 괄호 내용 제거
-    .replace(/[,·]/g, " ")
-    // 시도(경남·서울 등) 제거 — 브랜드명 오인 방지
-    .replace(/(경남|경북|전남|전북|충남|충북|강원|경기|제주)(?=\s)/g, " ")
-    .replace(/(서울|부산|대구|인천|광주|대전|울산|세종)(특별시|광역시|특별자치시)?(?=\s)/g, " ")
-    .replace(/[가-힣]+(특별시|광역시|특별자치도|도)(?=\s)/g, " ")
-    // 시군구·읍면동 제거
-    .replace(/[가-힣]+(시|군|구|읍|면|동|리|가)(?=\s)/g, " ")
-    // 지번(숫자-숫자, 외필지) 제거
+  let s = String(raw).replace(/\([^)]*\)/g, " ").replace(/[,·]/g, " ")
+    // 시도 약자를 먼저 제거(경남·경북 등이 '경남아파트' 브랜드로 오인되는 것 방지).
+    // 단 뒤에 바로 다른 글자가 붙은 '경남아너스빌'은 안 지워지게 공백 경계 사용.
+    .replace(/(^|\s)(경남|경북|전남|전북|충남|충북|강원|경기|제주)(?=\s)/g, " ")
+    .replace(/\s+/g, " ").trim();
+  const words = s.split(" ").filter(Boolean);
+  // 1순위: 건물명 토큰(래미안·타워·아파트 등)이 든 단어를 직접 찾는다.
+  // 이 단어는 '리/동'으로 끝나도(원베일리) 건물명이므로 행정구역 제거 대상이 아님.
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (BUILDING_TOKEN.test(w) && !/^\d/.test(w)) {
+      const name = w.replace(/\d.*$/, "");   // 뒤 숫자(101동) 제거
+      const prev = i > 0 ? words[i - 1] : "";
+      // 앞 단어가 행정구역/지번/동호가 아니면 건물명의 일부로 포함
+      if (prev && !/^\d/.test(prev) && !/(시|군|구|읍|면|동|리|가)$/.test(prev) && !/[동호층]$/.test(prev)) {
+        return (prev + " " + name).trim();
+      }
+      return name.trim();
+    }
+  }
+  // 2순위: 토큰이 없으면 행정구역·지번·동호를 지우고 남는 첫 단어
+  s = s
+    .replace(/(경남|경북|전남|전북|충남|충북|강원|경기|제주)(?=\s|$)/g, " ")
+    .replace(/(서울|부산|대구|인천|광주|대전|울산|세종)(특별시|광역시|특별자치시)?(?=\s|$)/g, " ")
+    .replace(/[가-힣]+(특별시|광역시|특별자치도|도)(?=\s|$)/g, " ")
+    .replace(/[가-힣]+(시|군|구|읍|면|동|리|가)(?=\s|$)/g, " ")
     .replace(/\d+(-\d+)?\s*(외\s*\d*\s*필?지?)?/g, " ")
-    // 동/호/층 제거
     .replace(/제?\s*\d*\s*[동호층]/g, " ")
     .replace(/상가|지하|대지권없음/g, " ")
     .replace(/\s+/g, " ").trim();
-  // 남은 것 중 첫 덩어리가 건물명(여러 단어면 첫 2개까지)
   const toks = s.split(" ").filter(Boolean);
-  if (toks.length === 0) return "";
-  // 건물명 토큰이 포함된 단어가 있으면 그것 우선, 없으면 첫 단어
-  const withToken = toks.find(t => BUILDING_TOKEN.test(t));
-  if (withToken) {
-    const idx = toks.indexOf(withToken);
-    const prev = idx > 0 ? toks[idx - 1] : "";
-    return (prev ? prev + " " : "") + withToken;
-  }
   return toks.slice(0, 2).join(" ");
 }
 
@@ -563,30 +577,15 @@ async function cascade(pre, clients) {
     if (items.length > 0)
       return { candidates: items.map(fromJuso), level: "L2", jusoQuery: tried.join(" \u25B8 "), count: items.length };
   }
-  if (clients.kakaoKeyword) {
-    // 카카오는 '건물명'으로 장소를 찾는다. 지번 코어(searchText)는 juso를 위해
-    // 건물명을 잘라냈으므로, 카카오엔 건물명이 살아있는 원본(cleaned)을 준다.
-    // (juso 실패의 70%가 원본에 건물명이 있던 건물 — 지번만 보내면 카카오도 0건)
-    const kakaoQuery = cleaned || searchText;
-    const docs = await safeCall(clients.kakaoKeyword, kakaoQuery);
-    if (docs.length > 0) {
-      const out = [];
-      for (const doc of docs) {
-        let regionCode = null;
-        if (!doc.address?.b_code && doc.x && doc.y && clients.kakaoCoord2Region) {
-          const regions = await safeCall(clients.kakaoCoord2Region, doc.x, doc.y);
-          const legal = regions.find((r) => r.region_type === "B");
-          regionCode = legal?.code ?? null;
-        }
-        out.push(fromKakao(doc, regionCode));
-      }
-      return { candidates: out, level: "L3", jusoQuery: tried.join(" \u25B8 ") + " \u25B8 [\uCE74\uCE74\uC624]" + kakaoQuery, count: out.length };
-    }
-  }
-  // ── L4: 네이버 지역검색 (2026-07-15) ──────────────────────────────
-  // juso·카카오 모두 실패 + 건물명 있을 때만. 네이버를 '최종 정상주소 판정
-  // 엔진'으로 사용한다: 네이버가 주소를 주면 그걸 정상주소로 채택하고, juso는
-  // PNU 확보 목적으로만 재조회한다(주소 판정과 PNU 확보 분리).
+  // 카카오(구 L3) 제거(2026-07-15): 카카오맵/로컬 API가 유료로 전환되어
+  // (비즈월렛·결제카드·월 청구 필요) 회사 툴에 부적합. 네이버 지역검색이
+  // 무료(월 77.5만)로 동일한 건물명 검색을 하고 옛주소 교정력이 더 강함이
+  // 실측됨(부전타워 만화리→교리, 혜창 마산→창원). 카카오 고유 이점이던
+  // b_code(행정동코드)도 juso를 무조건 거치므로 불필요.
+  // ── L3: 네이버 지역검색 (2026-07-15, 구 L4에서 승격) ──────────────
+  // juso 실패 + 건물명 있을 때. 네이버를 '최종 정상주소 판정 엔진'으로 사용:
+  // 네이버가 주소를 주면 그걸 정상주소로 채택하고, juso는 PNU 확보 목적으로만
+  // 재조회한다(주소 판정과 PNU 확보 분리).
   if (clients.naverLocal) {
     const bldName = extractBuildingName(pre.raw || cleaned);
     if (bldName) {
@@ -628,7 +627,7 @@ async function cascade(pre, clients) {
         }
         if (cand) {
           return {
-            candidates: [cand], level: "L4",
+            candidates: [cand], level: "L3",
             jusoQuery: tried.join(" \u25B8 ") + " \u25B8 [\uB124\uC774\uBC84]" + bldName,
             count: 1,
             naverAddr,                                 // 진단: 네이버가 준 주소
@@ -769,7 +768,7 @@ async function refineAddress(raw, clients) {
 
   // ── L4 네이버 최종 판정 결과 처리 (2026-07-15) ──────────────────
   // 네이버는 '최종 정상주소 판정 엔진'. 주소 판정과 PNU 확보를 분리한다.
-  if (level === "L4") {
+  if (level === "L3") {
     if (naverPnuOk) {
       // 네이버 주소 + juso로 PNU 확보 → 완전 확정. 아래 일반 CONFIRMED 경로로.
     } else {
@@ -782,7 +781,7 @@ async function refineAddress(raw, clients) {
         bdNm: c.bdNm || null,
         pnu: null, bdMgtSn: null,
         unit: pre.unit,
-        searchLevel: "L4", jusoQuery, candCount: count,
+        searchLevel: "L3", jusoQuery, candCount: count,
         naverAddr,
         message: `\uB124\uC774\uBC84 \uC8FC\uC18C \uD655\uC778(PNU \uBBF8\uD655\uBCF4): ${naverAddr || c.jibunAddr || ""}`,
         validation: { status: "NOT_AVAILABLE", reason: "네이버 확정", inputSgg: "", resultSgg: "" },
@@ -795,7 +794,7 @@ async function refineAddress(raw, clients) {
       status: "HUMAN_INPUT_ERROR",
       reason: "HUMAN_INPUT_ERROR",
       message: "\uB124\uC774\uBC84 \uC815\uC0C1 \uC870\uD68C\uD588\uC73C\uB098 \uACB0\uACFC \uC5C6\uC74C \u2014 \uC785\uB825 \uC8FC\uC18C \uD655\uC778 \uD544\uC694(\uC624\uD0C0/\uC874\uC7AC\uD558\uC9C0 \uC54A\uB294 \uC8FC\uC18C)",
-      searchLevel: "L4", jusoQuery, candCount: 0,
+      searchLevel: "L3", jusoQuery, candCount: 0,
       validation: { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" },
     };
   }
@@ -805,7 +804,9 @@ async function refineAddress(raw, clients) {
   result.jusoQuery = jusoQuery;        // 진단: juso에 실제로 간 검색어
   result.candCount = count;            // 진단: 원천이 돌려준 후보 수
   if (result.status === "CONFIRMED") {
-    const v = validateRegion(pre.cleaned, result.jibunAddr);
+    // L4(네이버 확정)는 시도만 검증 — 네이버가 시군구/법정동 오류를 교정한
+    // 것을 막지 않기 위함(부전타워 만화리→교리, 당진군→당진시 실측).
+    const v = validateRegion(pre.cleaned, result.jibunAddr, level === "L3");
     result.validation = v;
     if (v.status === "MISMATCH") {
       // 명백한 지역 불일치 → 자동확정 취소. IROS 진입 필터가 CONFIRMED만
@@ -840,8 +841,15 @@ const mockClients = {
     });
     return (narrowed.length > 0 ? narrowed : hits).map((e) => e.item);
   },
-  kakaoKeyword: async (kw) => MOCK_KAKAO_DB.filter((e) => e.keys.some((k) => kw.includes(k))).map((e) => e.doc),
-  kakaoCoord2Region: async () => []
+  // 네이버 지역검색 mock(2026-07-15, 카카오 대체). 건물명으로 장소 검색.
+  naverLocal: async (query) => MOCK_KAKAO_DB
+    .filter((e) => e.keys.some((k) => query.includes(k)))
+    .map((e) => ({
+      title: e.doc.place_name || "",
+      address: e.doc.address_name || "",
+      roadAddress: e.doc.road_address_name || "",
+      mapx: e.doc.x || "", mapy: e.doc.y || "",
+    })),
 };
 function transientErr(msg) {
   // '일시 오류'(네트워크/HTTP/한도/서버) 표식 — 진짜 "검색결과 0건"과 구분해
@@ -2007,7 +2015,7 @@ function AddrRefineTestGui() {
       } else if (reg && reg.status !== "RESOLVED") {
         failCode = REG_LABEL[reg.status] || reg.status;
       }
-      const addrSrc = r.source === "naver" ? "\uB124\uC774\uBC84L4" : r.source === "kakao" ? "\uCE74\uCE74\uC624\uD3F4\uBC31" : r.searchLevel === "L2" ? "JUSO\uC7AC\uAC80\uC0C9" : r.searchLevel === "L4" ? "\uB124\uC774\uBC84L4" : "JUSO\uC6D0\uBB38";
+      const addrSrc = r.source === "naver" ? "\uB124\uC774\uBC84L3" : r.searchLevel === "L3" ? "\uB124\uC774\uBC84L3" : r.searchLevel === "L2" ? "JUSO\uC7AC\uAC80\uC0C9" : "JUSO\uC6D0\uBB38";
       const unitSrc = r.unit?.dong || r.unit?.ho ? r.aptType ? "VWorld\uC120\uD0DD" : "\uC9C1\uC811\uC785\uB825" : "";
       return {
         raw: row.raw,
