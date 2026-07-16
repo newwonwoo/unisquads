@@ -22,8 +22,10 @@ from urllib.parse import urlparse, parse_qs
 
 NAVER_ID = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
-# NAVER API HUB 기준 엔드포인트(검색 API 이관). 지역검색 경로는 동일 유지.
-LOCAL_URL = "https://openapi.naver.com/v1/search/local.json"
+# NCP(NAVER API HUB) 지역검색 엔드포인트.
+# 2026-07-15 변경: openapi.naver.com(구 개발자센터)은 NCP 키로 401(Not Exist
+# Client ID). NCP에서 발급한 키는 전용 게이트웨이로 보내야 한다.
+LOCAL_URL = "https://naverapihub.apigw.ntruss.com/search/v1/local"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -64,12 +66,17 @@ class handler(BaseHTTPRequestHandler):
 
         url = f"{LOCAL_URL}?{urllib.parse.urlencode({'query': query, 'display': display, 'sort': sort})}"
         req = urllib.request.Request(url)
-        req.add_header("X-Naver-Client-Id", NAVER_ID)
-        req.add_header("X-Naver-Client-Secret", NAVER_SECRET)
+        req.add_header("X-NCP-APIGW-API-KEY-ID", NAVER_ID)
+        req.add_header("X-NCP-APIGW-API-KEY", NAVER_SECRET)
 
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
-                data = json.loads(r.read().decode("utf-8"))
+                raw_text = r.read().decode("utf-8")
+                data = json.loads(raw_text)
+            # 디버그: NCP 응답 구조가 openapi와 다를 수 있어 원본 확인용
+            if qs.get("debug", [""])[0] == "1":
+                return self._send(200, {"ok": True, "_raw": data,
+                                        "_keys": list(data.keys()) if isinstance(data, dict) else None})
             items = []
             for it in data.get("items", []):
                 items.append({
