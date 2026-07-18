@@ -51,6 +51,10 @@ class handler(BaseHTTPRequestHandler):
         bdnm = (qs.get("bdnm", [""])[0]).strip()
         strategy = (qs.get("strategy", ["auto"])[0]).strip()
         strict = (qs.get("strict", ["0"])[0]).strip() == "1"
+        try:
+            page_unit = max(1, min(10000, int(qs.get("page_unit", ["10"])[0])))
+        except ValueError:
+            page_unit = 10
         if not addr:
             return self._send(400, {"status": "ERROR", "message": "addr 파라미터 필요"})
         # 진단 모드: IROS 원본 레코드를 그대로 반환 — 파서가 어떤 필드를 보고
@@ -81,12 +85,14 @@ class handler(BaseHTTPRequestHandler):
                         _kw = {"buld_name": bdnm}
                         if "dong" in _p: _kw["dong"] = dong
                         if "ho" in _p: _kw["ho"] = ho
+                        if "page_unit" in _p: _kw["page_unit"] = page_unit
                         raw = debug_raw_records(addr, **_kw)
                         out["swrd"] = raw.get("swrd", "")
                         out["first_records"] = raw.get("first_records", [])
                         out["response_keys"] = raw.get("response_keys", [])
                         out["pagination_info"] = raw.get("pagination_info")
                         out["response_preview"] = raw.get("response_preview", "")
+                        out["requested_page_unit"] = raw.get("requested_page_unit", page_unit)
                     except Exception:
                         out["swrd"] = ""   # 부가정보 실패는 무시(핵심 판정은 위에서 끝)
                 return self._send(200, out)
