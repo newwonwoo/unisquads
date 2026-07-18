@@ -473,8 +473,20 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
     first_rows = data.get("dataList") if isinstance(data, dict) else None
     if not isinstance(first_rows, list):
         first_rows = []
-    all_rows = list(first_rows)
     total = _total_record_count(data)
+
+    # IROS 배포별로 허용 pageUnit이 다르다. 큰 단위가 빈 구조를 반환하면
+    # 1000 → 500 → 100 → 10 순으로 낮추고, 실제 허용 단위에서 페이지를 순회한다.
+    fallback_units = [1000, 500, 100, 10]
+    if total is None and not first_rows and page_unit in fallback_units and page_unit != 10:
+        pos = fallback_units.index(page_unit)
+        return _collect_search(
+            address, buld_name=buld_name, session=active, timeout=timeout,
+            page_unit=fallback_units[pos + 1],
+            allow_session_retry=allow_session_retry,
+        )
+
+    all_rows = list(first_rows)
     pages = 1
     page_error = False
     repeated_page = False
