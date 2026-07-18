@@ -163,7 +163,7 @@ def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = 
         "rd_buld_no2": "",
         "issue_cls": "5",
         "pageIndex": "",
-        "pageUnit": 10,          # 사람과 동일하게 10건씩 (100은 자동화로 티남)
+        "pageUnit": 1000,          # 사람과 동일하게 10건씩 (100은 자동화로 티남)
         "cmort_flag": "",
         "kap_seq_flag": "",
         "trade_seq_flag": "",
