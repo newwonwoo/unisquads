@@ -469,6 +469,14 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
             "complete": False, "total_count": None, "received_count": 0,
             "pages_fetched": 1, "parse_error": True,
         }, active
+    if isinstance(data, dict) and data.get("nrsMessageCd"):
+        message_value = str(data.get("nrsMessageValue") or "")
+        if "서비스 점검" in message_value or "이용 가능 시간대" in message_value:
+            return data, 503, {
+                "complete": False, "total_count": None, "received_count": 0,
+                "pages_fetched": 1, "service_unavailable": True,
+                "service_message": message_value,
+            }, active
 
     first_rows = data.get("dataList") if isinstance(data, dict) else None
     if not isinstance(first_rows, list):
@@ -627,6 +635,12 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
     data, code, meta, active = _collect_search(
         pure_lot_addr, session=active, timeout=timeout, page_unit=10
     )
+    if code == 503 and meta.get("service_unavailable"):
+        return _attach_collection(
+            ResolveResult(address, "REG_SERVICE_UNAVAILABLE",
+                          message=meta.get("service_message") or "IROS 서비스 이용 불가"),
+            [], meta, "FULL_COLLECT",
+        )
     if data is None:
         status = "REG_RATE_LIMIT" if code == 429 else (
             "REG_SESSION_ERROR" if code in (401, 403) else "REG_HTTP_ERROR"
