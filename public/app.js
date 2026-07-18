@@ -2314,79 +2314,197 @@ function AddrRefineTestGui() {
   const [batchStop, setBatchStop] = useState(false);
   const batchStopRef = useRef(false);
   const lookupBatchUniqueNo = useCallback(async () => {
-    const targets = rows.map((row, idx) => ({ idx, row })).filter(({ row }) => row.result?.status === "CONFIRMED");
-    if (targets.length === 0) return;
+    const next = [...rows];
+    const targets = [];
+    const nowText = () => new Date().toISOString().slice(0, 19).replace("T", " ");
+
+    // 집합건물인데 호가 없으면 IROS 실패로 보내지 않고 입력보완 대상으로 분리.
+    for (let idx = 0; idx < next.length; idx++) {
+      const row = next[idx];
+      if (row.result?.status !== "CONFIRMED") continue;
+      if (row.result.isJip && !row.result.unit?.ho) {
+        next[idx] = {
+          ...row,
+          reg: {
+            status: "UNIT_INPUT_REQUIRED",
+            message: "집합건물 등기 조회에는 호 입력이 필요합니다.",
+            at: nowText()
+          }
+        };
+        continue;
+      }
+      targets.push({ idx, row });
+    }
+    if (targets.length === 0) {
+      setRows([...next]);
+      await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
+      return;
+    }
+
     setBatchRegBusy(true);
     setBatchRegDone(0);
     setBatchStop(false);
     batchStopRef.current = false;
-    const next = [...rows];
-    const cache = /* @__PURE__ */ new Map();
-    const keyOf = (row) => {
-      const p = row.result.pnu || row.result.jibunAddr || "";
-      const d = row.result.unit?.dong || "";
-      const h = row.result.unit?.ho || "";
-      return `${p}|${d}|${h}`;
-    };
+
+    // 배치는 세대가 아니라 PNU 단위. PNU가 없을 때만 정규화 지번주소를 임시 키로 쓴다.
     const groups = /* @__PURE__ */ new Map();
     for (const t of targets) {
-      const k = keyOf(t.row);
-      if (!groups.has(k)) groups.set(k, []);
-      groups.get(k).push(t);
+      const pnuKey = t.row.result.pnu || `ADDR:${t.row.result.jibunAddr || ""}`;
+      if (!groups.has(pnuKey)) groups.set(pnuKey, []);
+      groups.get(pnuKey).push(t);
     }
-    const uniqueKeys = [...groups.keys()];
-    setBatchTotal(uniqueKeys.length);
-    for (let g = 0; g < uniqueKeys.length; g++) {
-      if (batchStopRef.current) break;
-      const k = uniqueKeys[g];
-      const members = groups.get(k);
-      const prevReg = members[0].row.reg;
-      const retryable = prevReg && ["REG_SESSION_ERROR", "REG_RATE_LIMIT", "REG_TIMEOUT", "REG_HTTP_ERROR", "REG_ERROR", "ERROR"].includes(prevReg.status);
-      if (prevReg && !retryable) {
-        setBatchRegDone(g + 1);
-        continue;
+    const pnuKeys = [...groups.keys()];
+    setBatchTotal(pnuKeys.length);
+
+    const unitKey = (value, kind) => {
+      let v = String(value || "").trim().replace(/\s+/g, "").replace(/^제/, "").replace(/(동|호)$/, "");
+      if (!v) return "";
+      if (kind === "dong" && /^[A-Za-z]$/.test(v)) return v.toUpperCase();
+      if (kind === "dong" && /^[가-힣]$/.test(v)) return v;
+      if (/^\d+$/.test(v)) return String(Number(v));
+      if (kind === "ho" && /^\d+(?:-\d+)+$/.test(v))
+        return v.split("-").map((x) => String(Number(x))).join("-");
+      if (kind === "ho" && /^[A-Za-z]\d+(?:-\d+)?$/.test(v)) return v.toUpperCase();
+      return v.toUpperCase();
+    };
+    const buildingKey = (v) => String(v || "").replace(/[^0-9A-Za-z가-힣]/g, "").toLowerCase();
+    const matchCollection = (row, collection) => {
+      const all = Array.isArray(collection.all_candidates) ? collection.all_candidates : [];
+      if (!collection.complete) {
+        return {
+          status: "REG_PARTIAL_RESPONSE",
+          candidates: all,
+          complete: false,
+          total_count: collection.total_count,
+          received_count: collection.received_count,
+          message: `부분응답: 총 ${collection.total_count ?? "미상"}건 중 ${collection.received_count || 0}건 수신`,
+          at: nowText()
+        };
       }
-      const { row } = members[0];
-      const addr = row.result.jibunAddr || row.result.irosQuery || "";
-      const d = row.result.unit?.dong ? `&dong=${encodeURIComponent(row.result.unit.dong)}` : "";
-      const h = row.result.unit?.ho ? `&ho=${encodeURIComponent(row.result.unit.ho)}` : "";
-      const b = row.result.bdNm ? `&bdnm=${encodeURIComponent(row.result.bdNm)}` : "";
-      const now = (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ");
-      let data;
-      const regCacheKey = `reg:${k}`;
-      const cached = await idbGet(regCacheKey);
-      if (cached && cached.status === "RESOLVED") {
-        data = cached;
-      } else {
-        try {
-          const r = await fetch(
-            `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}${b}`,
-            { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
-          );
-          data = await r.json();
-          data.at = now;
-          if (data.status === "RESOLVED") await idbSet(regCacheKey, data);
-        } catch {
-          data = { status: "REG_ERROR", message: "\uBE0C\uB9AC\uC9C0 \uC751\uB2F5 \uC5C6\uC74C", at: now };
+
+      let cands = all.filter((c) => !String(c.state || "").includes("폐쇄"));
+      const wantDong = unitKey(row.result.unit?.dong, "dong");
+      const wantHo = unitKey(row.result.unit?.ho, "ho");
+      if (wantDong || wantHo) {
+        let matched = cands.filter((c) => {
+          const cd = unitKey(c.dong, "dong");
+          const ch = unitKey(c.ho, "ho");
+          return (!wantDong || cd === wantDong) && (!wantHo || ch === wantHo);
+        });
+        // 단일 동 건물: 후보 전체에 동이 없고 호는 있을 때 호로만 재매칭.
+        if (!matched.length && wantDong && wantHo) {
+          const anyDong = cands.some((c) => unitKey(c.dong, "dong"));
+          const anyHo = cands.some((c) => unitKey(c.ho, "ho"));
+          if (!anyDong && anyHo)
+            matched = cands.filter((c) => unitKey(c.ho, "ho") === wantHo);
+        }
+        cands = matched;
+      }
+
+      // 검토 플래그가 있으면 건물명까지 확인되어야 자동확정.
+      if (row.result.reviewNeeded) {
+        const wantBuilding = buildingKey(row.result.bdNm);
+        cands = cands.filter((c) => {
+          const got = buildingKey(c.buldnm);
+          return wantBuilding && got && (wantBuilding.includes(got) || got.includes(wantBuilding));
+        });
+        if (!cands.length) {
+          return {
+            status: "REG_VALIDATION_FAILED",
+            candidates: all,
+            complete: true,
+            message: "검토대상 건물명 교차검증 실패",
+            at: nowText()
+          };
         }
       }
-      for (const m of members) {
-        next[m.idx] = { ...next[m.idx], reg: data };
+
+      if (cands.length === 1) {
+        return {
+          status: "RESOLVED",
+          unique_no: cands[0].unique_no,
+          candidates: cands,
+          complete: true,
+          total_count: collection.total_count,
+          received_count: collection.received_count,
+          strategy: "PNU_CACHE",
+          message: "PNU 완전후보에서 동·호 일치",
+          at: nowText()
+        };
       }
-      recordRegHealth(data.status);
+      if (cands.length > 1) {
+        return {
+          status: "REG_MULTI", candidates: cands, complete: true,
+          message: `${cands.length}건`, at: nowText()
+        };
+      }
+      return {
+        status: (wantDong || wantHo) ? "REG_UNIT_NOT_FOUND" : "REG_NOT_FOUND",
+        candidates: all,
+        complete: true,
+        message: (wantDong || wantHo) ? "완전 후보에서 일치 세대 없음" : "완전 후보 없음",
+        at: nowText()
+      };
+    };
+
+    for (let g = 0; g < pnuKeys.length; g++) {
+      if (batchStopRef.current) break;
+      const pnuKey = pnuKeys[g];
+      const members = groups.get(pnuKey);
+      const first = members[0].row;
+      const parserVersion = "iros-parser-v2";
+      const cacheKey = `regcands:${parserVersion}:${pnuKey}`;
+      let collection = await idbGet(cacheKey);
+      const fresh = collection?.fetched_at &&
+        Date.now() - new Date(collection.fetched_at).getTime() < 24 * 60 * 60 * 1000;
+      if (!collection?.complete || !fresh || collection.parser_version !== parserVersion) {
+        const addr = first.result.jibunAddr || first.result.irosQuery || "";
+        const b = first.result.bdNm ? `&bdnm=${encodeURIComponent(first.result.bdNm)}` : "";
+        try {
+          const response = await fetch(
+            `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${b}&strategy=full`,
+            { headers: regHeaders, signal: AbortSignal.timeout(12e4) }
+          );
+          const data = await response.json();
+          collection = {
+            status: data.status,
+            all_candidates: data.all_candidates || data.candidates || [],
+            complete: data.complete === true,
+            total_count: data.total_count,
+            received_count: data.received_count,
+            pages_fetched: data.pages_fetched,
+            parser_version: data.parser_version || parserVersion,
+            strategy: data.strategy || "FULL_COLLECT",
+            fetched_at: new Date().toISOString(),
+            message: data.message
+          };
+          if (collection.complete) await idbSet(cacheKey, collection);
+        } catch {
+          collection = {
+            status: "REG_HTTP_ERROR", all_candidates: [], complete: false,
+            total_count: null, received_count: 0, parser_version: parserVersion,
+            fetched_at: new Date().toISOString(), message: "브리지 응답 없음"
+          };
+        }
+      }
+
+      for (const m of members) {
+        next[m.idx] = { ...next[m.idx], reg: matchCollection(m.row, collection) };
+      }
+      recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
       setBatchRegDone(g + 1);
-      if (g % 50 === 0) {
+      if (g % 20 === 0) {
         setRows([...next]);
         await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
       }
-      if (g < uniqueKeys.length - 1 && !batchStopRef.current) {
+      if (g < pnuKeys.length - 1 && !batchStopRef.current)
         await new Promise((res) => setTimeout(res, 1e3));
-      }
     }
+
     setRows([...next]);
     await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
     setBatchRegBusy(false);
-  }, [rows, BRIDGE, config.resolverKey, extraHeaders]);
+  }, [rows, BRIDGE, config.resolverKey, extraHeaders, recordRegHealth]);
   const stopBatch = useCallback(() => {
     batchStopRef.current = true;
     setBatchStop(true);
