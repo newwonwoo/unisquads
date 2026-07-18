@@ -131,7 +131,7 @@ def _build_swrd(address: str, dong: str = "", ho: str = "", buld_name: str = "")
     return " ".join(parts).strip()
 
 
-def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "") -> dict:
+def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "",\n                   page_index="", page_unit=1000) -> dict:
     """정제주소 → 검색 API 요청 본문.
     2026-07-13 개정: 이 함수를 호출하는 resolve_one_api()는 이제 dong/ho를
     항상 빈 문자열로 넘긴다(swrd에 동/호를 안 넣기로 함 — 이유는
@@ -243,7 +243,7 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
     sojae = _strip_html(_pick(rec, SOJAE_KEY_CANDIDATES))
     buldnm = _pick(rec, BULDNM_KEY_CANDIDATES)
     dong = str(rec.get("buld_no_buld", "") or "")
-    ho = str(rec.get("buld_no_room", "") or "")
+    ho = str(rec.get("buld_no_room", "") or rec.get("buld_no_inner", "") or "")
     floor = str(rec.get("buld_no_floor", "") or "")
     # 전용 필드가 비어있으면 부동산표시 텍스트에서 폴백 추출(위 함수 주석 참고)
     if not dong or not ho:
@@ -254,7 +254,7 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
     lot_no = str(rec.get("lot_no", "") or "")
     add_item = _strip_html(str(rec.get("addItem", "") or ""))
     # 집합건물이면 부동산구분을 "집합건물", 아니면 빈값(토지/건물은 목록에 따로)
-    gubun = "집합건물" if rec.get("pin_mid_spe_yn") == "Y" or ho else ""
+    gubun = _pick(rec, ["real_cls_cd", "real_cls_nm", "부동산구분"])\n    if not gubun:\n        gubun = "집합건물" if rec.get("pin_mid_spe_yn") == "Y" or ho else ""
     return {
         "unique_no": uno,
         "gubun": gubun,
@@ -365,218 +365,397 @@ def _match_lot(c, want_dong, want_beonji):
     return want_main in nums
 
 
+def _unit_key(value, kind="unit"):
+    """동·호 비교키. 숫자 선행 0은 제거하되 알파벳·한글 동과 하이픈 호는 보존."""
+    raw = _strip_html(str(value or "")).strip()
+    raw = re.sub(r"\\s+", "", raw)
+    raw = re.sub(r"^제", "", raw)
+    raw = re.sub(r"(동|호)$", "", raw)
+    if not raw:
+        return ""
+    if kind == "dong" and re.fullmatch(r"[A-Za-z]", raw):
+        return raw.upper()
+    if kind == "dong" and re.fullmatch(r"[가-힣]", raw):
+        return raw
+    if re.fullmatch(r"\\d+", raw):
+        return str(int(raw))
+    if kind == "ho" and re.fullmatch(r"\\d+(?:-\\d+)+", raw):
+        return "-".join(str(int(x)) for x in raw.split("-"))
+    if kind == "ho" and re.fullmatch(r"[A-Za-z]\\d+(?:-\\d+)?", raw):
+        return raw.upper()
+    return raw.upper()
+
+
 def _match_unit(c, dong, ho):
-    """레코드가 입력 동·호와 일치하는지. 동·호 없는 레코드(대지권)는 제외.
-    숫자'값'으로 비교(문자열 비교 아님) — 등기부 표기가 "0706"처럼 앞자리
-    0이 붙어있어도 입력 "706"과 같은 값으로 인식되게 함(2026-07-13 수정:
-    래미안 원베일리 116동 706호가 이 패턴으로 매칭 실패했음)."""
-    def to_int(s):
-        d = re.sub(r"\D", "", str(s or ""))
-        return int(d) if d != "" else None
-    cd, ch = to_int(c.get("dong", "")), to_int(c.get("ho", ""))
-    want_d, want_h = to_int(dong), to_int(ho)
-    if want_d is not None and (cd is None or cd != want_d):
+    cd = _unit_key(c.get("dong", ""), "dong")
+    ch = _unit_key(c.get("ho", ""), "ho")
+    want_d = _unit_key(dong, "dong")
+    want_h = _unit_key(ho, "ho")
+    if want_d and cd != want_d:
         return False
-    if want_h is not None and (ch is None or ch != want_h):
+    if want_h and ch != want_h:
         return False
     return True
 
 
+def _total_record_count(data):
+    """응답 어디에 있든 paginationInfo.totalRecordCount를 정수로 읽는다."""
+    if isinstance(data, dict):
+        pi = data.get("paginationInfo")
+        if isinstance(pi, dict):
+            try:
+                return int(pi.get("totalRecordCount"))
+            except (TypeError, ValueError):
+                pass
+        for v in data.values():
+            n = _total_record_count(v)
+            if n is not None:
+                return n
+    elif isinstance(data, list):
+        for v in data:
+            n = _total_record_count(v)
+            if n is not None:
+                return n
+    return None
+
+
+def _post_search(session, payload, timeout):
+    last_exc = None
+    for attempt in range(3):
+        try:
+            r = session.post(
+                SEARCH_API, json=payload,
+                headers={"Content-Type": "application/json; charset=UTF-8"},
+                timeout=timeout,
+            )
+            if r.status_code != 200:
+                return None, r.status_code
+            try:
+                return r.json(), 200
+            except ValueError:
+                return {"_raw": r.text}, 200
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+    if last_exc:
+        raise last_exc
+    return None, 500
+
+
+def _collect_search(address, buld_name="", session=None, timeout=20.0,
+                    page_unit=1000, allow_session_retry=True):
+    """같은 세션에서 전 페이지를 모으고 완전성을 증명한다."""
+    active = session or make_session()
+    base_payload = _build_payload(address, dong="", ho="", buld_name=buld_name,
+                                  page_index="", page_unit=page_unit)
+    data, code = _post_search(active, base_payload, timeout)
+    if code in (401, 403) and allow_session_retry:
+        active = make_session()
+        return _collect_search(
+            address, buld_name=buld_name, session=active, timeout=timeout,
+            page_unit=page_unit, allow_session_retry=False,
+        )
+    if data is None or code != 200:
+        return data, code, {
+            "complete": False, "total_count": None, "received_count": 0,
+            "pages_fetched": 0, "session_retried": not allow_session_retry,
+        }, active
+    if isinstance(data, dict) and "_raw" in data:
+        return data, code, {
+            "complete": False, "total_count": None, "received_count": 0,
+            "pages_fetched": 1, "parse_error": True,
+        }, active
+
+    first_rows = data.get("dataList") if isinstance(data, dict) else None
+    if not isinstance(first_rows, list):
+        first_rows = []
+    all_rows = list(first_rows)
+    total = _total_record_count(data)
+    pages = 1
+    page_error = False
+    repeated_page = False
+    seen_pages = set()
+    if first_rows:
+        seen_pages.add(tuple(str(x.get("pin_land", "")) for x in first_rows[:5]
+                             if isinstance(x, dict)))
+
+    # 첫 요청은 pageIndex 빈값이다. 다음 페이지는 2부터 요청한다.
+    page_index = 2
+    while total is not None and len(all_rows) < total:
+        payload = dict(base_payload)
+        payload["pageIndex"] = str(page_index)
+        nxt, nxt_code = _post_search(active, payload, timeout)
+        if nxt_code in (401, 403) and allow_session_retry:
+            fresh = make_session()
+            return _collect_search(
+                address, buld_name=buld_name, session=fresh, timeout=timeout,
+                page_unit=page_unit, allow_session_retry=False,
+            )
+        if nxt is None or nxt_code != 200 or (isinstance(nxt, dict) and "_raw" in nxt):
+            page_error = True
+            break
+        rows = nxt.get("dataList") if isinstance(nxt, dict) else None
+        if not isinstance(rows, list) or not rows:
+            page_error = True
+            break
+        fingerprint = tuple(str(x.get("pin_land", "")) for x in rows[:5]
+                            if isinstance(x, dict))
+        if fingerprint and fingerprint in seen_pages:
+            repeated_page = True
+            break
+        if fingerprint:
+            seen_pages.add(fingerprint)
+        all_rows.extend(rows)
+        pages += 1
+        page_index += 1
+        if pages > 100:
+            page_error = True
+            break
+
+    if isinstance(data, dict):
+        data = dict(data)
+        data["dataList"] = all_rows
+    complete = (
+        total is not None
+        and len(all_rows) >= total
+        and not page_error
+        and not repeated_page
+    )
+    return data, 200, {
+        "complete": complete,
+        "total_count": total,
+        "received_count": len(all_rows),
+        "pages_fetched": pages,
+        "page_error": page_error,
+        "repeated_page": repeated_page,
+        "session_retried": not allow_session_retry,
+    }, active
+
+
+def _direct_search(address, dong, ho, buld_name="", session=None, timeout=20.0):
+    """단건용 정확검색. 전체 캐시를 만들지 않으며 1건 정확 일치 때만 사용."""
+    active = session or make_session()
+    payload = _build_payload(address, dong=dong, ho=ho, buld_name=buld_name,
+                             page_index="", page_unit=100)
+    data, code = _post_search(active, payload, timeout)
+    if code in (401, 403):
+        active = make_session()
+        data, code = _post_search(active, payload, timeout)
+    if data is None or code != 200 or (isinstance(data, dict) and "_raw" in data):
+        return [], code, active
+    return _parse_json_response(data), 200, active
+
+
+def _attach_collection(result, all_candidates, meta, strategy):
+    result.all_candidates = all_candidates or []
+    result.complete = bool(meta.get("complete"))
+    result.total_count = meta.get("total_count")
+    result.received_count = int(meta.get("received_count") or 0)
+    result.pages_fetched = int(meta.get("pages_fetched") or 0)
+    result.strategy = strategy
+    result.parser_version = "iros-parser-v2"
+    return result
+
+
+def _building_key(value):
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", str(value or "")).lower()
+
+
 def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                     dong: str = "", ho: str = "", buld_name: str = "",
-                    timeout: float = 20.0) -> ResolveResult:
-    """단일 주소 → 고유번호 (API 직결).
+                    timeout: float = 20.0, strategy: str = "auto",
+                    strict: bool = False) -> ResolveResult:
+    """단건은 정확검색 우선, 배치(full)는 지번 전체수집 후 로컬 매칭."""
+    active = session or make_session()
+    pure_lot_addr = _strip_trailing_buldname(address)
+    strategy = strategy if strategy in ("auto", "direct", "full") else "auto"
 
-    동/호 처리 방식(2026-07-13 개정): 이전엔 swrd(자연어 검색어)에 "N동 N호"
-    텍스트를 얹어 IROS가 1건으로 특정하게 하는 방식이었다(주석엔 "실측"으로
-    남아있었음). 그런데 실측으로도 이 조합이 안 걸리는 케이스가 나왔고(예:
-    래미안 원베일리 123동 904호 → 0건), 안 걸릴 때마다 건물명 표기만 바꿔
-    재시도하느라 왕복이 늘어나 Vercel 함수 제한시간(호비 플랜 기본 5~10초)을
-    넘겨 타임아웃까지 유발했다.
-    → 그래서 동/호는 검색어(swrd)에 아예 넣지 않는다. 지번+건물명까지만
-    검색해 그 건물의 전체 세대 후보를 한 번에 받고(원래 집합건물은 지번만
-    검색해도 세대 수만큼 다건으로 정상 반환됨), 아래 _match_unit()
-    클라이언트 필터가 동/호로 정확히 좁힌다.
-
-    검색 순서 역전(2026-07-13 추가 개정): "건물명 먼저, 안 되면 지번만"이던
-    순서를 "지번만 먼저, 안 되면 건물명 추가"로 뒤집었다. 이유: juso의
-    건물명과 등기부(IROS)의 등록명이 다른 경우가 실제로 존재한다 — 예를
-    들어 "영등포푸르지오"는 2006년 개명 전 원래 "대우드림타운"으로
-    분양·등기됐는데, 등기부는 원래 이름을 그대로 쓰는 경우가 많다. 이런
-    건물은 "건물명 먼저" 순서에서 매번 1·2차 시도가 실패하고 3차(건물명
-    없음)에서야 성공해 왕복이 항상 3회였다(체감 지연의 주원인). 반대로
-    "지번만 먼저"로 하면 이런 건물도 1회 왕복에 바로 성공한다 — 애초에
-    집합건물 검색은 지번이 축이고 건물명은 "한 지번에 건물이 여러 채일 때"
-    구분하는 보조 수단일 뿐이라, 순서를 뒤집어도 그 보조 역할(안전망)은
-    그대로 유지된다.
-    """
-    s = session or make_session()
-    pure_lot_addr = _strip_trailing_buldname(address)  # 주소 자체의 건물명까지 제거
-
-    def _query(bname, addr_override=None):
-        # 동/호는 항상 미포함 — 좁히는 건 뒤쪽 _match_unit()이 전담
-        a = address if addr_override is None else addr_override
-        payload = _build_payload(a, dong="", ho="", buld_name=bname)
-        # 네트워크 재시도(2026-07-15): IROS가 대량 요청 중 간헐적으로 연결을
-        # 끊는다(ConnectionResetError: reset by peer). 재시도 없이 바로 실패로
-        # 떨어지면 "거의 못 잡아온다"가 된다. 일시 오류는 짧게 쉬고 최대 3회.
-        last_exc = None
-        for attempt in range(3):
-            try:
-                r = s.post(SEARCH_API, json=payload,
-                           headers={"Content-Type": "application/json; charset=UTF-8"},
-                           timeout=timeout)
-                if r.status_code != 200:
-                    return None, r.status_code
-                try:
-                    return r.json(), 200
-                except ValueError:
-                    return {"_raw": r.text}, 200
-            except (requests.ConnectionError, requests.Timeout) as e:
-                last_exc = e
-                if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1))   # 0.5s, 1.0s 백오프
-                    continue
-                raise
-        raise last_exc
-
-    try:
-        # 1차: 순수 지번만(주소 자체에 실려온 건물명까지 제거) — 가장 빠르고
-        # 안정적인 기본 경로. 동/호도 미포함(위 docstring 참고).
-        data, code = _query("", addr_override=pure_lot_addr)
-        if data is None:
-            # HTTP 상태로 원인 구분
-            if code == 429:
-                return ResolveResult(address, "REG_RATE_LIMIT",
-                                     message=f"요청 제한/일시 차단 (HTTP {code})")
-            if code in (401, 403):
-                return ResolveResult(address, "REG_SESSION_ERROR",
-                                     message=f"세션 만료/인증 실패 (HTTP {code})")
-            return ResolveResult(address, "REG_HTTP_ERROR",
-                                 message=f"HTTP {code} (API 직결 실패)")
-        # 응답이 왔으나 파싱 불가(구조 변경 등)
-        if isinstance(data, dict) and "_raw" in data:
-            return ResolveResult(address, "REG_PARSE_ERROR",
-                                 message="응답 구조 변경/파싱 실패 (수동확인)")
-        cands = _parse_json_response(data)
-
-        # 순수 지번만으로 0건 → 이름을 붙여 재시도(안전망 — 한 지번에 건물이
-        # 여러 채라 지번만으로는 특정이 안 되는 드문 케이스 구제).
-        # 순서: ①juso가 원래 실어준 원본 주소 그대로(건물명이 자연스레
-        # 포함돼 있음) → ②명시적으로 받은 buld_name → ③그 붙여쓰기.
-        # ①②③은 addr_override 없이(=원본 address 기준) 호출해야 건물명이
-        # 실제로 검색어에 실린다.
-        if len(cands) == 0:
-            fallback_bnames = []
-            if address != pure_lot_addr:
-                fallback_bnames.append("")  # 원본 address 자체에 건물명이 실려있음
-            if buld_name:
-                fallback_bnames.append(buld_name)
-                nospace = re.sub(r"\s+", "", buld_name)
-                if nospace != buld_name:
-                    fallback_bnames.append(nospace)  # 붙여쓰기
-            for v in fallback_bnames:
-                data, code = _query(v)  # addr_override 없음 → 원본 address 사용
-                if data is None or (isinstance(data, dict) and "_raw" in data):
-                    continue
-                cands = _parse_json_response(data)
-                if cands:
-                    break
-
-        # 부번 제거 재시도(2026-07-15): IROS 등기부는 부번 없는 '대표지번'에
-        # 집합건물을 통째로 올려두는 경우가 있다(실측: 부산 기장 만화리 271-8은
-        # 0건, 271은 1건 — 등기 지번이 부번 없는 271). 지번(본번-부번)으로 0건이면
-        # 부번을 떼고 본번만으로 한 번 더 검색한다. 단 이렇게 넓히면 같은 본번의
-        # 다른 부번 건물이 섞일 수 있으므로, 아래 _match_lot은 '원래 부번'이 아니라
-        # 본번 기준으로 비교하도록 want_beonji를 본번으로 완화한다(과탈락 방지).
-        widened_to_main = False
-        if len(cands) == 0:
-            _, orig_beonji = _extract_dong_beonji(address)
-            if orig_beonji and "-" in orig_beonji:
-                main_no = orig_beonji.split("-")[0]
-                addr_main = address.replace(orig_beonji, main_no, 1)
-                pure_main = _strip_trailing_buldname(addr_main)
-                data, code = _query("", addr_override=pure_main)
-                if data is not None and not (isinstance(data, dict) and "_raw" in data):
-                    c2 = _parse_json_response(data)
-                    if c2:
-                        cands = c2
-                        widened_to_main = True
-                # 부번 뗀 뒤에도 0건이면 건물명까지 붙여 마지막 시도
-                if len(cands) == 0 and buld_name:
-                    data, code = _query(buld_name, addr_override=pure_main)
-                    if data is not None and not (isinstance(data, dict) and "_raw" in data):
-                        c3 = _parse_json_response(data)
-                        if c3:
-                            cands = c3
-                            widened_to_main = True
-
-        # 지번(번지) 필터: 건물명 검색으로 다른 번지 건물이 섞여오면 정제 지번으로 걸러냄
-        want_dong, want_beonji = _extract_dong_beonji(address)
-        if widened_to_main and want_beonji and "-" in want_beonji:
-            want_beonji = want_beonji.split("-")[0]   # 본번으로 넓혀 검색했으니 필터도 본번 기준
-        if want_beonji and cands:
-            lot_filtered = [c for c in cands if _match_lot(c, want_dong, want_beonji)]
-            if lot_filtered:
-                cands = lot_filtered
-
-        # 동·호 정확 매칭 필터 (대지권·다른동 제외)
-        # 2026-07-13 수정: 예전엔 `if filtered: cands = filtered` 였는데, 이러면
-        # 매칭이 0건일 때 필터 결과를 버리고 '필터 전 후보 전체'를 그대로 되살려
-        # REG_MULTI(다건)로 내보냈다 → 사용자가 동·호를 정확히 찍었는데도 그 단지의
-        # 모든 세대가 후보로 뜨는 원인(1차 원인인 선행0 매칭실패와 연쇄).
-        # 이제 매칭 0건이면 후보를 되살리지 않고 명확히 실패로 끝낸다.
-        # 단, 후보 중 '동·호 정보를 가진 레코드가 하나도 없는' 경우는 매칭 실패가
-        # 아니라 '필터 불가'(토지 등기만 있거나 IROS 응답 키 변경 등)이므로,
-        # 이때는 잘못된 단정을 피하기 위해 후보를 유지하고 사유를 표시한다.
-        unit_filter_note = ""
-        if (dong or ho) and cands:
-            has_unit_info = any(
-                str(c.get("dong") or "").strip() or str(c.get("ho") or "").strip()
-                for c in cands
+    # 단건 빠른 경로. 정확한 동·호가 모두 있을 때만 시도한다.
+    if strategy in ("auto", "direct") and dong and ho:
+        direct, code, active = _direct_search(
+            address, dong, ho, buld_name=buld_name, session=active, timeout=timeout
+        )
+        _, want_beonji = _extract_dong_beonji(address)
+        direct = [c for c in direct if _match_lot(c, "", want_beonji)] if want_beonji else direct
+        direct = [c for c in direct if _match_unit(c, dong, ho)]
+        current = [c for c in direct if "폐쇄" not in str(c.get("state", ""))]
+        if current:
+            direct = current
+        if strict and buld_name:
+            bk = _building_key(buld_name)
+            direct = [c for c in direct
+                      if _building_key(c.get("buldnm")) and
+                      (bk in _building_key(c.get("buldnm")) or
+                       _building_key(c.get("buldnm")) in bk)]
+        if len(direct) == 1:
+            c = direct[0]
+            result = ResolveResult(
+                address, "RESOLVED", unique_no=c["unique_no"],
+                candidates=direct, message="직접검색 정확일치"
             )
-            if has_unit_info:
-                filtered = [c for c in cands if _match_unit(c, dong, ho)]
-                # 단일 동 건물 구제(2026-07-15): 등기부는 동이 하나뿐인 건물에
-                # 동 표기를 안 하는 경우가 많다(예: 문화파크맨션). 이때 사용자
-                # 입력의 "1동"이 후보(동 없음)와 안 맞아 전멸한다. 후보 전체가
-                # '동은 비었고 호는 있는' 상태면, 동을 무시하고 호로만 재매칭한다.
-                if not filtered and dong and ho:
-                    any_dong = any(str(c.get("dong") or "").strip() for c in cands)
-                    any_ho = any(str(c.get("ho") or "").strip() for c in cands)
-                    if not any_dong and any_ho:
-                        filtered = [c for c in cands if _match_unit(c, "", ho)]
-                        if filtered:
-                            unit_filter_note = " (단일 동 건물 — 동 표기 없이 호로 특정)"
-                if not filtered:
-                    want = " ".join(filter(None, [f"{dong}동" if dong else "",
-                                                  f"{ho}호" if ho else ""]))
-                    return ResolveResult(
-                        address, "REG_UNIT_NOT_FOUND",
-                        candidates=cands,
-                        message=f"해당 지번의 등기는 찾았으나 {want}와 일치하는 세대가 없습니다 "
-                                f"(후보 {len(cands)}건). 동·호를 확인해 주세요.")
-                cands = filtered
-            else:
-                unit_filter_note = " (응답에 동·호 정보가 없어 세대 필터 미적용)"
+            return _attach_collection(result, [], {
+                "complete": False, "total_count": None,
+                "received_count": len(direct), "pages_fetched": 1,
+            }, "DIRECT_SEARCH")
+        if strategy == "direct":
+            return _attach_collection(
+                ResolveResult(address, "REG_MULTI" if len(direct) > 1 else "REG_NOT_FOUND",
+                              candidates=direct,
+                              message=f"직접검색 일치후보 {len(direct)}건"),
+                [], {"complete": False, "total_count": None,
+                     "received_count": len(direct), "pages_fetched": 1},
+                "DIRECT_SEARCH",
+            )
 
-        if len(cands) == 0:
-            return ResolveResult(address, "REG_NOT_FOUND",
-                                 message="검색결과 없음. 주소 정밀도/미등록 확인.")
-        if len(cands) == 1:
-            c = cands[0]
-            desc = " ".join(filter(None, [c.get("gubun", ""), c.get("state", ""),
-                                          (c.get("dong") and f"{c['dong']}동") or "",
-                                          (c.get("ho") and f"{c['ho']}호") or ""]))
-            return ResolveResult(address, "RESOLVED", unique_no=c["unique_no"],
-                                 candidates=cands, message=desc.strip())
-        note = unit_filter_note   # 위 필터에서 '동·호 정보 없어 필터 불가'였던 경우만 채워짐
-        return ResolveResult(address, "REG_MULTI", candidates=cands,
-                             message=f"{len(cands)}건{note}")
-    except requests.Timeout:
-        return ResolveResult(address, "REG_TIMEOUT", message="시간초과(API 직결)")
-    except Exception as e:
-        return ResolveResult(address, "REG_ERROR", message=f"{type(e).__name__}: {e}")
+    # PNU/지번 전체수집 경로
+    data, code, meta, active = _collect_search(
+        pure_lot_addr, session=active, timeout=timeout, page_unit=1000
+    )
+    if data is None:
+        status = "REG_RATE_LIMIT" if code == 429 else (
+            "REG_SESSION_ERROR" if code in (401, 403) else "REG_HTTP_ERROR"
+        )
+        return _attach_collection(
+            ResolveResult(address, status, message=f"HTTP {code}"),
+            [], meta, "FULL_COLLECT",
+        )
+    if isinstance(data, dict) and "_raw" in data:
+        return _attach_collection(
+            ResolveResult(address, "REG_PARSE_ERROR", message="응답 JSON 파싱 실패"),
+            [], meta, "FULL_COLLECT",
+        )
+
+    cands = _parse_json_response(data)
+
+    # 0건이면 원주소/건물명 검색을 순차 시도한다.
+    fallbacks = []
+    if not cands and address != pure_lot_addr:
+        fallbacks.append((address, ""))
+    if not cands and buld_name:
+        fallbacks.append((address, buld_name))
+        nospace = re.sub(r"\\s+", "", buld_name)
+        if nospace != buld_name:
+            fallbacks.append((address, nospace))
+    for query_addr, query_name in fallbacks:
+        data2, code2, meta2, active = _collect_search(
+            query_addr, buld_name=query_name, session=active,
+            timeout=timeout, page_unit=1000,
+        )
+        c2 = _parse_json_response(data2) if data2 and not (
+            isinstance(data2, dict) and "_raw" in data2
+        ) else []
+        if c2:
+            cands, meta = c2, meta2
+            break
+
+    # 부번 제거 본번 재조회
+    widened_to_main = False
+    _, orig_beonji = _extract_dong_beonji(address)
+    if not cands and orig_beonji and "-" in orig_beonji:
+        main_no = orig_beonji.split("-")[0]
+        addr_main = _strip_trailing_buldname(address.replace(orig_beonji, main_no, 1))
+        data3, code3, meta3, active = _collect_search(
+            addr_main, session=active, timeout=timeout, page_unit=1000
+        )
+        c3 = _parse_json_response(data3) if data3 and not (
+            isinstance(data3, dict) and "_raw" in data3
+        ) else []
+        if c3:
+            cands, meta = c3, meta3
+            widened_to_main = True
+
+    # 파싱 전량을 캐시용으로 보존하되 지번 필터 후 후보를 실제 매칭에 사용
+    all_candidates = list(cands)
+    want_dong, want_beonji = _extract_dong_beonji(address)
+    if widened_to_main and want_beonji and "-" in want_beonji:
+        want_beonji = want_beonji.split("-")[0]
+    if want_beonji and cands:
+        lot_filtered = [c for c in cands if _match_lot(c, want_dong, want_beonji)]
+        if lot_filtered:
+            cands = lot_filtered
+
+    # 현행 우선
+    current = [c for c in cands if "폐쇄" not in str(c.get("state", ""))]
+    if current:
+        cands = current
+
+    # 전체수집이 증명되지 않으면 부재/단일/다건을 확정하지 않는다.
+    if not meta.get("complete"):
+        return _attach_collection(
+            ResolveResult(
+                address, "REG_PARTIAL_RESPONSE", candidates=cands,
+                message=(f"부분응답: 총 {meta.get('total_count')}건 중 "
+                         f"{meta.get('received_count', 0)}건 수신")
+            ), all_candidates, meta, "FULL_COLLECT",
+        )
+
+    unit_note = ""
+    if (dong or ho) and cands:
+        has_unit_info = any(
+            str(c.get("dong") or "").strip() or str(c.get("ho") or "").strip()
+            for c in cands
+        )
+        if has_unit_info:
+            filtered = [c for c in cands if _match_unit(c, dong, ho)]
+            if not filtered and dong and ho:
+                any_dong = any(str(c.get("dong") or "").strip() for c in cands)
+                any_ho = any(str(c.get("ho") or "").strip() for c in cands)
+                if not any_dong and any_ho:
+                    filtered = [c for c in cands if _match_unit(c, "", ho)]
+                    if filtered:
+                        unit_note = "단일 동 건물 — 호로 특정"
+            if not filtered:
+                want = " ".join(filter(None, [
+                    f"{dong}동" if dong else "", f"{ho}호" if ho else ""
+                ]))
+                return _attach_collection(
+                    ResolveResult(
+                        address, "REG_UNIT_NOT_FOUND", candidates=cands,
+                        message=f"완전 후보 {len(cands)}건에서 {want} 일치 세대 없음",
+                    ), all_candidates, meta, "FULL_COLLECT",
+                )
+            cands = filtered
+        else:
+            unit_note = "후보에 동·호 정보 없음"
+
+    if strict and buld_name:
+        bk = _building_key(buld_name)
+        strict_cands = [c for c in cands
+                        if _building_key(c.get("buldnm")) and
+                        (bk in _building_key(c.get("buldnm")) or
+                         _building_key(c.get("buldnm")) in bk)]
+        if not strict_cands:
+            return _attach_collection(
+                ResolveResult(address, "REG_VALIDATION_FAILED", candidates=cands,
+                              message="검토대상 건물명 교차검증 실패"),
+                all_candidates, meta, "FULL_COLLECT",
+            )
+        cands = strict_cands
+
+    if not cands:
+        return _attach_collection(
+            ResolveResult(address, "REG_NOT_FOUND", message="완전수집 결과 없음"),
+            all_candidates, meta, "FULL_COLLECT",
+        )
+    if len(cands) == 1:
+        c = cands[0]
+        desc = " ".join(filter(None, [
+            c.get("gubun", ""), c.get("state", ""),
+            f"{c.get('dong')}동" if c.get("dong") else "",
+            f"{c.get('ho')}호" if c.get("ho") else "",
+            unit_note,
+        ]))
+        return _attach_collection(
+            ResolveResult(address, "RESOLVED", unique_no=c["unique_no"],
+                          candidates=cands, message=desc.strip()),
+            all_candidates, meta, "FULL_COLLECT",
+        )
+    return _attach_collection(
+        ResolveResult(address, "REG_MULTI", candidates=cands,
+                      message=f"{len(cands)}건"),
+        all_candidates, meta, "FULL_COLLECT",
+    )
 
 
 def resolve_batch_api(addresses, throttle=1.0, timeout=20.0):
