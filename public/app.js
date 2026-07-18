@@ -2370,6 +2370,15 @@ function AddrRefineTestGui() {
     const buildingKey = (v) => String(v || "").replace(/[^0-9A-Za-z가-힣]/g, "").toLowerCase();
     const matchCollection = (row, collection) => {
       const all = Array.isArray(collection.all_candidates) ? collection.all_candidates : [];
+      if (collection.status === "REG_SERVICE_UNAVAILABLE") {
+        return {
+          status: "REG_SERVICE_UNAVAILABLE",
+          candidates: [],
+          complete: false,
+          message: collection.message || "IROS 서비스 이용 불가",
+          at: nowText()
+        };
+      }
       if (!collection.complete) {
         return {
           status: "REG_PARTIAL_RESPONSE",
