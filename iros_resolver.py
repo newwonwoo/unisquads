@@ -69,8 +69,15 @@ class ResolveResult:
     address: str
     status: str                      # RESOLVED | MULTIPLE | NOT_FOUND | BLOCKED | ERROR
     unique_no: Optional[str] = None  # 단건 확정 시
-    candidates: list = field(default_factory=list)  # [{unique_no, gubun, sojae, state}]
+    candidates: list = field(default_factory=list)  # 최종 판정 후보
     message: str = ""
+    all_candidates: list = field(default_factory=list)  # PNU/지번 전체수집 후보
+    complete: bool = False
+    total_count: Optional[int] = None
+    received_count: int = 0
+    pages_fetched: int = 0
+    strategy: str = ""
+    parser_version: str = "iros-parser-v2"
 
 
 def normalize_sido(address: str) -> Optional[str]:
