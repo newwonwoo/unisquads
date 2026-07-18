@@ -825,7 +825,7 @@ if __name__ == "__main__":
 
 
 def debug_raw_records(address: str, buld_name: str = "", dong: str = "", ho: str = "",
-                      timeout: float = 20.0) -> dict:
+                      timeout: float = 20.0, page_unit: int = 10) -> dict:
     """진단용: IROS 원본 레코드 + 파서 결과 + '최종 판정'을 함께 반환.
 
     2026-07-15 개정: 예전엔 동·호를 안 받고 원본 후보만 돌려줘서, 집합건물이면
@@ -836,11 +836,11 @@ def debug_raw_records(address: str, buld_name: str = "", dong: str = "", ho: str
     """
     s = make_session()
     pure = _strip_trailing_buldname(address)
-    payload = _build_payload(pure, dong="", ho="", buld_name=buld_name)
+    payload = _build_payload(pure, dong="", ho="", buld_name=buld_name, page_unit=page_unit)
     r = s.post(SEARCH_API, json=payload,
                headers={"Content-Type": "application/json; charset=UTF-8"},
                timeout=timeout)
-    out = {"swrd": payload["swrd"], "http": r.status_code}
+    out = {"swrd": payload["swrd"], "http": r.status_code, "requested_page_unit": page_unit}
     try:
         data = r.json()
     except ValueError:
