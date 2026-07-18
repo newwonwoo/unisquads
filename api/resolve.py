@@ -49,6 +49,8 @@ class handler(BaseHTTPRequestHandler):
         dong = (qs.get("dong", [""])[0]).strip()
         ho = (qs.get("ho", [""])[0]).strip()
         bdnm = (qs.get("bdnm", [""])[0]).strip()
+        strategy = (qs.get("strategy", ["auto"])[0]).strip()
+        strict = (qs.get("strict", ["0"])[0]).strip() == "1"
         if not addr:
             return self._send(400, {"status": "ERROR", "message": "addr 파라미터 필요"})
         # 진단 모드: IROS 원본 레코드를 그대로 반환 — 파서가 어떤 필드를 보고
@@ -61,7 +63,7 @@ class handler(BaseHTTPRequestHandler):
             # 함수라 이 문제에서 자유롭다. 원본 IROS 응답이 더 필요하면 아래
             # debug_raw_records도 '있으면' 부가로 시도한다(없어도 무방).
             try:
-                r = resolve_one_api(addr, dong=dong, ho=ho, buld_name=bdnm)
+                r = resolve_one_api(addr, dong=dong, ho=ho, buld_name=bdnm, strategy=strategy, strict=strict)
                 out = {
                     "final_status": r.status,
                     "final_unique_no": r.unique_no,
@@ -89,10 +91,17 @@ class handler(BaseHTTPRequestHandler):
                 return self._send(200, {"status": "ERROR",
                                         "message": f"{type(e).__name__}: {e}"})
         try:
-            r = resolve_one_api(addr, dong=dong, ho=ho, buld_name=bdnm)
+            r = resolve_one_api(addr, dong=dong, ho=ho, buld_name=bdnm, strategy=strategy, strict=strict)
             self._send(200, {
                 "address": r.address, "status": r.status, "unique_no": r.unique_no,
                 "candidates": r.candidates, "message": r.message,
+                "all_candidates": r.all_candidates,
+                "complete": r.complete,
+                "total_count": r.total_count,
+                "received_count": r.received_count,
+                "pages_fetched": r.pages_fetched,
+                "strategy": r.strategy,
+                "parser_version": r.parser_version,
             })
         except Exception as e:
             self._send(200, {"status": "ERROR", "message": f"{type(e).__name__}: {e}"})
