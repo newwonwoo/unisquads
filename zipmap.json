@@ -2356,19 +2356,57 @@ function AddrRefineTestGui() {
       let data;
       const regCacheKey = `reg:${k}`;
       const cached = await idbGet(regCacheKey);
+      // PNU 단위 후보 캐시(2026-07-18): 같은 단지 세대는 IROS를 다시 부르지 않는다.
+      // 한 번 받은 그 지번의 전체 후보를 저장해 두고 동·호로 로컬 매칭한다.
+      // 100세대 단지면 호출 1회로 끝난다.
+      const pnuKey = row.result.pnu ? `regcands:${row.result.pnu}` : "";
+      const wantD = row.result.unit?.dong || "";
+      const wantH = row.result.unit?.ho || "";
+      const matchLocal = (list) => {
+        const num = (x) => { const t = String(x || "").replace(/\D/g, ""); return t ? Number(t) : null; };
+        const alpha = (x) => { const t = String(x || "").replace(/[^A-Za-z]/g, "").toUpperCase();
+                               return (t && !/\d/.test(String(x || ""))) ? t : ""; };
+        const wa = alpha(wantD), wd = num(wantD), wh = num(wantH);
+        return (list || []).filter((x) => {
+          if (wa) { if (alpha(x.dong) !== wa) return false; }
+          else if (wd !== null && num(x.dong) !== wd) return false;
+          if (wh !== null && num(x.ho) !== wh) return false;
+          return true;
+        });
+      };
       if (cached && cached.status === "RESOLVED") {
         data = cached;
       } else {
-        try {
-          const r = await fetch(
-            `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}${b}`,
-            { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
-          );
-          data = await r.json();
-          data.at = now;
-          if (data.status === "RESOLVED") await idbSet(regCacheKey, data);
-        } catch {
-          data = { status: "REG_ERROR", message: "\uBE0C\uB9AC\uC9C0 \uC751\uB2F5 \uC5C6\uC74C", at: now };
+        let hitFromPnu = null;
+        if (pnuKey && (wantD || wantH)) {
+          const pool = await idbGet(pnuKey);
+          if (pool && Array.isArray(pool.candidates) && pool.candidates.length) {
+            const hit = matchLocal(pool.candidates);
+            if (hit.length === 1) {
+              hitFromPnu = { status: "RESOLVED", unique_no: hit[0].unique_no,
+                             candidates: hit, message: "PNU 후보 캐시에서 매칭", at: now };
+            }
+          }
+        }
+        if (hitFromPnu) {
+          data = hitFromPnu;
+          await idbSet(regCacheKey, data);
+        } else {
+          try {
+            const r = await fetch(
+              `${BRIDGE}/resolve?addr=${encodeURIComponent(addr)}${d}${h}${b}`,
+              { headers: regHeaders, signal: AbortSignal.timeout(6e4) }
+            );
+            data = await r.json();
+            data.at = now;
+            if (data.status === "RESOLVED") await idbSet(regCacheKey, data);
+            // 그 지번의 전체 후보를 PNU 캐시에 적재(다음 세대가 재사용)
+            if (pnuKey && Array.isArray(data.candidates) && data.candidates.length > 1) {
+              await idbSet(pnuKey, { candidates: data.candidates, at: now });
+            }
+          } catch {
+            data = { status: "REG_ERROR", message: "\uBE0C\uB9AC\uC9C0 \uC751\uB2F5 \uC5C6\uC74C", at: now };
+          }
         }
       }
       for (const m of members) {
