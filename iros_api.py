@@ -131,7 +131,8 @@ def _build_swrd(address: str, dong: str = "", ho: str = "", buld_name: str = "")
     return " ".join(parts).strip()
 
 
-def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "",\n                   page_index="", page_unit=1000) -> dict:
+def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "",
+                   page_index="", page_unit=1000) -> dict:
     """정제주소 → 검색 API 요청 본문.
     2026-07-13 개정: 이 함수를 호출하는 resolve_one_api()는 이제 dong/ho를
     항상 빈 문자열로 넘긴다(swrd에 동/호를 안 넣기로 함 — 이유는
