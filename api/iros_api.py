@@ -846,6 +846,9 @@ def debug_raw_records(address: str, buld_name: str = "", dong: str = "", ho: str
     except ValueError:
         out["raw_text_head"] = r.text[:800]
         return out
+    out["response_keys"] = list(data.keys()) if isinstance(data, dict) else []
+    out["pagination_info"] = data.get("paginationInfo") if isinstance(data, dict) else None
+    out["response_preview"] = str(data)[:2000]
     recs = _walk_records(data)
     out["record_count"] = len(recs)
     out["first_records"] = recs[:3]                       # 원본 그대로(키 이름 포함)
