@@ -12,7 +12,7 @@ from urllib.parse import urlparse, parse_qs
 
 import os
 import sys
-sys.path.append(os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(__file__))
 
 try:
     from iros_api import resolve_one_api, debug_raw_records
