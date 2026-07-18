@@ -557,9 +557,11 @@ function preprocess(raw) {
   return {
     cleaned, searchText: text, unit: { dong, ho }, unitCandidate, raw,
     sido: _reg.sido || "",
+    sidoFull: sidoFull(raw),
     sgg: (_reg.sgg && _reg.sgg.length) ? _reg.sgg.join(" ") : (_se.sgg || ""),
     eup: _er.eup || "",
     emd: _er.emd || _se.emd || "",
+    emdCands: _er.emdCands && _er.emdCands.length ? _er.emdCands : (_se.emd ? [_se.emd] : []),
     jibun: _jc.jibun || "",
     road: _rd.road,
     buldNo: _rd.buldNo,
@@ -751,20 +753,51 @@ function extractBuildingName(raw) {
 // 필드에서 조립하기 위해 도로명과 건물번호를 별도 필드로 분리한다.
 // 읍면·리 분리 추출(2026-07-17): 지번은 리에 붙으므로 읍면과 리를 모두 보존해야
 // juso 조회가 성립한다. extractSggEmd는 읍면에서 멈춰 리를 놓친다.
+// 시도 원형(2026-07-17): extractRegion은 축약형(광주통합·경기)을 준다.
+// juso 조회어에는 juso가 아는 이름이 필요하다. 동명 시군구(동구·서구·중구 등
+// 6개)가 있어 시도를 빼면 모호해지므로, 원문에서 원형을 뽑아 쓴다.
+function sidoFull(addr) {
+  // 원문의 시도를 그대로 쓴다. juso는 옛 이름으로 조회해도 찾아주고 결과는
+  // 현재 이름으로 돌려준다(실측: "광주광역시 광산구 송정동 266" 조회 →
+  // "전남광주통합특별시 광산구 송정동 266" 반환).
+  // modernizeSgg는 쓰면 안 된다. 그것이 만드는 "광주통합특별시"는 juso에 없어
+  // 조회가 통째로 실패한다(실측 0건, 1,064건 이탈).
+  const s = String(addr || "");
+  const m = s.match(/([\uAC00-\uD7A3]{2,8}(?:\uD2B9\uBCC4\uC2DC|\uAD11\uC5ED\uC2DC|\uD2B9\uBCC4\uC790\uCE58\uC2DC|\uD2B9\uBCC4\uC790\uCE58\uB3C4|\uB3C4))(?=\s|$)/);
+  if (m) return m[1];
+  const SHORT = { "서울": "서울특별시", "부산": "부산광역시", "대구": "대구광역시",
+    "인천": "인천광역시", "대전": "대전광역시", "울산": "울산광역시", "광주": "광주광역시",
+    "세종": "세종특별자치시", "경기": "경기도", "강원": "강원특별자치도",
+    "충북": "충청북도", "충남": "충청남도", "전북": "전북특별자치도", "전남": "전라남도",
+    "경북": "경상북도", "경남": "경상남도", "제주": "제주특별자치도" };
+  const k = Object.keys(SHORT).find((x) => s.startsWith(x));
+  return k ? SHORT[k] : "";
+}
+
+
 function extractEupRi(addr) {
   const s = modernizeSgg(addr || "");
-  const eup = (s.match(/([\uac00-\ud7a3]{1,6}(?:\uc74d|\uba74))(?=\s|\d|$)/) || [])[1] || "";
-  let ri = "";
-  if (eup) {
+  const eup = (s.match(/([\uAC00-\uD7A3]{1,6}(?:\uC74D|\uBA74))(?=\s|\d|$)/) || [])[1] || "";
+  // 지번 바로 앞의 동/리/가를 1순위로 택한다. 리가 둘이면 뒤가 진짜인 경우가 많다.
+  //   인주면 신성리 공세리 274-1  →  공세리 (juso 실측 1건)
+  // 다만 항상 그렇지는 않으므로 앞 리도 후보로 남겨 조회 폴백에 쓴다.
+  const cands = [];
+  const near = s.match(/[\uAC00-\uD7A3]{1,6}\d?(?:\uB3D9|\uB9AC|\uAC00)\s*(?=\d)/g);
+  if (near && near.length) cands.push(near[near.length - 1].trim());
+  const all = s.match(/[\uAC00-\uD7A3]{1,6}\d?(?:\uB3D9|\uB9AC|\uAC00)(?=\s|\d|$)/g) || [];
+  for (const x of all) if (!cands.includes(x)) cands.push(x);
+  if (!cands.length && eup) {
     const after = s.slice(s.indexOf(eup) + eup.length);
-    ri = (after.match(/([\uac00-\ud7a3]{1,6}(?:\ub9ac|\ub3d9))(?=\s|\d|$)/) || [])[1] || "";
-  } else {
-    ri = (s.match(/([\uac00-\ud7a3]{1,6}\d?(?:\ub3d9|\uac00|\ub9ac))(?=\s|\d|$)/) || [])[1] || "";
+    const m2 = (after.match(/([\uAC00-\uD7A3]{1,6}(?:\uB9AC|\uB3D9))(?=\s|\d|$)/) || [])[1];
+    if (m2) cands.push(m2);
   }
-  // 행정동(도공1동) → 법정동(도공동)
-  if (ri) { const m = ri.match(/^([\uac00-\ud7a3]+)\d+(\ub3d9)$/); if (m) ri = m[1] + m[2]; }
-  return { eup, emd: ri };
+  // 행정동(도곡1동) → 법정동(도곡동)
+  const norm = (x) => { const m = x.match(/^([\uAC00-\uD7A3]+)\d+(\uB3D9)$/); return m ? m[1] + m[2] : x; };
+  const list = [...new Set(cands.map(norm))];
+  return { eup, emd: list[0] || "", emdCands: list };
 }
+
+
 // N번길·N길은 도로명의 일부다(문장로22길을 문장로+22로 쪠개면 안 됨).
 function extractRoadNo(raw) {
   const s = String(raw || "").replace(/\([^)]*\)/g, " ").replace(/[,\u00b7]/g, " ")
@@ -871,7 +904,10 @@ async function cascade(pre, clients) {
   // \uc804\ucc98\ub9ac \uad6c\uc870\ud654(2026-07-17): \uc870\ud68c\uc5b4\ub97c \uc6d0\ubb38\uc5d0\uc11c \ube7c\uc9c0 \uc54a\uace0 \ud544\ub4dc\uc5d0\uc11c \uc870\ub9bd\ud55c\ub2e4.
   // \ub123\uc9c0 \uc54a\uc740 \uac83\uc740 \uc560\ucd08\uc5d0 \ub4e4\uc5b4\uac08 \uc218 \uc5c6\uc73c\ubbc0\ub85c \uac74\ubb3c\uba85\u00b7\ub3d9\ud638 \uc794\uc7ac \uc81c\uac70 \uaddc\uce59\uc774 \ud544\uc694 \uc5c6\ub2e4.
   // \uc21c\uc11c: \ub3c4\ub85c\uba85 \u2192 \uc9c0\ubc88 \u2192 (\ub458 \ub2e4 \uc5c6\uac70\ub098 \uc2e4\ud328) \ub124\uc774\ubc84 \uac74\ubb3c\uba85
-  const _head = [pre.sido, pre.sgg].filter(Boolean).join(" ");
+  // 시도는 조회어에 넣지 않는다. extractRegion이 축약형(광주통합)을 주는데
+  // juso에 없는 이름이라 조회가 통째로 실패한다(실측 1,064건 이탈).
+  // 시군구+법정동+지번이면 juso가 충분히 특정한다.
+  const _head = [pre.sidoFull, pre.sgg].filter(Boolean).join(" ");
   const roadQuery = (pre.road && pre.buldNo) ? [_head, pre.road, pre.buldNo].filter(Boolean).join(" ") : "";
   const jibunQuery = pre.jibun ? [_head, pre.eup, pre.emd, pre.jibun].filter(Boolean).join(" ") : "";
   let items = [];
@@ -883,10 +919,47 @@ async function cascade(pre, clients) {
         return { candidates: items.map(fromJuso), level: "R1", jusoQuery: tried.join(" \u25B8 "), count: items.length };
     }
     if (jibunQuery) {
-      tried.push(jibunQuery);
-      items = await safeCall(clients.juso, jibunQuery);
-      if (items.length > 0)
-        return { candidates: items.map(fromJuso), level: "J1", jusoQuery: tried.join(" \u25B8 "), count: items.length };
+      // 요소를 줄여가며 재시도한다. 읍면·리가 개편·폐지된 곳은 전체 조합으로는
+      // 못 찾는다(신현읍 문동리 → 문동동으로 개편, 실측 0건).
+      //   1차 시도+시군구+읍면+리+지번   2차 시군구+리+지번   3차 시군구+지번
+      // 리가 둘이면 어느 쪽에 지번이 붙는지 원문만으로는 알 수 없다.
+      //   인주면 신성리 공세리 274-1  →  공세리가 정답(juso 실측)
+      // 반대인 경우도 있으므로 후보를 순서대로 모두 시도한다.
+      // 리는 항상 남긴다. 리까지 빼면 다른 지번이 걸린다(거제시 238).
+      const _tries = [];
+      const _cands = (pre.emdCands && pre.emdCands.length) ? pre.emdCands : [pre.emd].filter(Boolean);
+      for (const em of _cands)
+        _tries.push([pre.sidoFull, pre.sgg, pre.eup, em, pre.jibun].filter(Boolean).join(" "));
+      const _primaryCount = _tries.length;   // 읍면 포함 형태의 개수
+      for (const em of _cands)
+        if (pre.eup) _tries.push([pre.sgg, em, pre.jibun].filter(Boolean).join(" "));
+      // 리가 둘이면 첫 성공에서 멈추지 않고 둘 다 조회한다. 멈추면 다른 리에도
+      // 결과가 있는지 알 수 없어 모호한 건을 확정해 버린다(우편번호 다중매핑과 같은 이유).
+      //   한쪽만 결과  →  그것으로 확정
+      //   양쪽 다 결과 →  후보를 합쳐 resolve가 판정(PNU 같으면 확정, 다르면 AMBIGUOUS)
+      const _multiRi = _cands.length >= 2;
+      const _collected = [];
+      for (let i = 0; i < _tries.length; i++) {
+        const q = _tries[i];
+        // 읍면 포함 형태를 다 돌아 결과를 얻었으면 읍면 뗀 형태는 시도하지 않는다
+        if (i >= _primaryCount && _collected.length) break;
+        if (tried.includes(q)) continue;
+        tried.push(q);
+        items = await safeCall(clients.juso, q);
+        if (!items.length) continue;
+        if (!_multiRi)
+          return { candidates: items.map(fromJuso), level: "J1", jusoQuery: tried.join(" \u25B8 "), count: items.length };
+        _collected.push(...items);
+      }
+      if (_collected.length) {
+        const seen = new Set();
+        const uniq = _collected.filter((x) => {
+          const k = (x.admCd || "") + "|" + (x.lnbrMnnm || "") + "|" + (x.lnbrSlno || "") + "|" + (x.bdMgtSn || "");
+          if (seen.has(k)) return false;
+          seen.add(k); return true;
+        });
+        return { candidates: uniq.map(fromJuso), level: "J1", jusoQuery: tried.join(" \u25B8 "), count: uniq.length };
+      }
     }
     // 구성을 못 뽑았고 건물명도 없을 때만 기존 방식(원문·지번코어)으로 폴백한다.
     // 지번·도로명이 없는데 juso를 부르면 그 법정동의 아무 주소나 돌아와 무의미하다.
@@ -1234,8 +1307,9 @@ function propagateAddressGroup(rows, groupHints) {
     // 지번 자리의 N-M이 집단 판정상 동·호면 지번을 비운다(전파 대상이 된다)
     if (groupHints && p.jibun) {
       const jp = p.jibun.split("-");
+      const _own = String((row.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
       if (jp.length === 2 && Number(jp[1]) >= 100 &&
-          groupHints.get([p.sgg, p.emd].join("|") + "|JIBUN_AS_UNIT") === "UNIT") {
+          groupHints.get(groupKeyOf(p, row.zip, _own) + "|JIBUN_AS_UNIT") === "UNIT") {
         p.unit = { dong: jp[0], ho: jp[1] };
         p.jibun = "";
       }
@@ -1280,6 +1354,13 @@ function propagateAddressGroup(rows, groupHints) {
 //   옥산리 1346-9  앞: 501 502 …  뒤: 101 102 …   → 흩어짐 = 동·호
 //   사천동 25-123  앞: 25만        뒤: 131만       → 고정  = 별개 지번
 // 단독 1건은 판정하지 않고 UNKNOWN으로 두어 juso detBdNmList 검증에 맡긴다.
+// 집단 판정·조회가 같은 그룹 키를 쓰도록 한 곳에 둔다.
+// 우편번호+소유자가 있으면 그것을, 없으면 시군구+법정동을 쓴다.
+function groupKeyOf(pre, zip, owner) {
+  const z = String(zip || "").replace(/\.\d+$/, "").replace(/[^0-9]/g, "");
+  const o = String(owner || "");
+  return (z && o) ? (z + "|" + o) : [pre.sgg, pre.emd].join("|");
+}
 function buildGroupHints(rows) {
   const g = new Map();
   for (const row of rows) {
@@ -1301,16 +1382,19 @@ function buildGroupHints(rows) {
     const a = new Set(v.map((x) => x[0])), b = new Set(v.map((x) => x[1]));
     out.set(k, (a.size > 1 || b.size > 1) ? "UNIT" : "JIBUN");
   }
-  // 지번 자리의 N-M이 실은 동·호인 경우(화룡동 105-501). 같은 법정동에
+  // 지번 자리의 N-M이 실은 동·호인 경우(화룡동 105-501). 같은 단지에
   // 정상 지번을 가진 행이 있고, 나머지가 부번 3자리 이상으로 흩어지면 동·호다.
   //   화룡동 181-2(정상) · 105-501 · 106-201 …  →  105동 501호
+  // 그룹 키는 우편번호+소유자다. 법정동으로 묶으면 같은 단지가 갈린다
+  //   (석정리 대심리78-1 → "대심리" / 석정리 103-311 → "석정리", 실측 900건 미판정).
   const byEmd = new Map();
   for (const row of rows) {
     const raw = String(row && row.raw || "");
     if (!raw) continue;
     const p = preprocess(raw);
-    if (!p.jibun || !p.emd) continue;
-    const key = [p.sgg, p.emd].join("|");
+    if (!p.jibun) continue;
+    const owner = String((row.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+    const key = groupKeyOf(p, row.zip, owner);
     if (!byEmd.has(key)) byEmd.set(key, []);
     byEmd.get(key).push(p.jibun);
   }
@@ -1327,7 +1411,7 @@ function buildGroupHints(rows) {
   }
   return out;
 }
-async function refineAddress(raw, clients, zipcode = "", groupHints = null, unitOverride = null, dongsoAnchors = null) {
+async function refineAddress(raw, clients, zipcode = "", groupHints = null, unitOverride = null, dongsoAnchors = null, owner = "") {
   // R9: 동소를 기준행 건물명으로 치환한 뒤 전처리한다(치환 후 파싱해야 동·호가 잡힌다)
   let _raw = raw;
   if (dongsoAnchors && /동소/.test(String(raw))) {
@@ -1347,7 +1431,7 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
   if (groupHints && pre.jibun && !pre.unit.dong && !pre.unit.ho) {
     const jp = pre.jibun.split("-");
     if (jp.length === 2 && Number(jp[1]) >= 100 &&
-        groupHints.get([pre.sgg, pre.emd].join("|") + "|JIBUN_AS_UNIT") === "UNIT") {
+        groupHints.get(groupKeyOf(pre, zipcode, owner) + "|JIBUN_AS_UNIT") === "UNIT") {
       pre.unit = { dong: jp[0], ho: jp[1] };
       pre.jibun = "";
     }
@@ -2596,14 +2680,14 @@ function AddrRefineTestGui() {
       if (batchStopRef.current) break;
       let r;
       try {
-        r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors);  // 대표는 그룹 첫 행의 원본 raw + 우편번호
+        r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, (next[idxs[0]].extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");  // 대표는 그룹 첫 행의 원본 raw + 우편번호
         consecTransient = 0;
       } catch (e) {
         // W4(2026-07-17): transient(API 순간한도 429 등)면 800ms 대기 후 1회 자동 재시도.
         // 순간한도는 잠깐 기다리면 풀림. 1회만(2회+는 배치 지연). 실패 시 기존 TRANSIENT 기록.
         try {
           await new Promise((res) => setTimeout(res, 800));
-          r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors);
+          r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, (next[idxs[0]].extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
           consecTransient = 0;
         } catch (e2) {
           r = { status: "FAILED", failKind: "TRANSIENT",
