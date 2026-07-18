@@ -1,10 +1,10 @@
 """
-Vercel 서버리스: juso.go.kr 주소검색 프록시
-GET /api/juso?keyword=강남 테헤란로 212
-→ juso API 원응답의 results.juso 배열
+Vercel 서버리스: 카카오 로컬 프록시
+GET /api/kakao?type=keyword&query=래미안원베일리
+GET /api/kakao?type=coord2region&x=127.0&y=37.5
+→ 카카오 응답의 documents 배열
 
-키를 서버 환경변수(JUSO_CONFM_KEY)에 두어 브라우저에 노출하지 않음.
-CORS도 여기서 해결(브라우저가 juso를 직접 못 부르는 문제 우회).
+키를 서버 환경변수(KAKAO_REST_KEY)에 두어 노출 방지.
 """
 import os
 import json
@@ -13,8 +13,9 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-JUSO_KEY = os.environ.get("JUSO_CONFM_KEY", "")
-JUSO_URL = "https://business.juso.go.kr/addrlink/addrLinkApi.do"
+KAKAO_KEY = os.environ.get("KAKAO_REST_KEY", "")
+KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
+COORD_URL = "https://dapi.kakao.com/v2/local/geo/coord2regioncode.json"
 
 
 class handler(BaseHTTPRequestHandler):
@@ -34,19 +35,21 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if not JUSO_KEY:
-            return self._send(500, {"error": "JUSO_CONFM_KEY 미설정(Vercel 환경변수)"})
+        if not KAKAO_KEY:
+            return self._send(500, {"error": "KAKAO_REST_KEY 미설정(Vercel 환경변수)"})
         qs = parse_qs(urlparse(self.path).query)
-        keyword = (qs.get("keyword", [""])[0]).strip()
-        if not keyword:
-            return self._send(400, {"error": "keyword 필요"})
-        params = urllib.parse.urlencode({
-            "confmKey": JUSO_KEY, "currentPage": "1", "countPerPage": "10",
-            "resultType": "json", "keyword": keyword,
-        })
+        typ = (qs.get("type", ["keyword"])[0])
         try:
-            with urllib.request.urlopen(f"{JUSO_URL}?{params}", timeout=10) as resp:
+            if typ == "coord2region":
+                x = qs.get("x", [""])[0]
+                y = qs.get("y", [""])[0]
+                url = f"{COORD_URL}?{urllib.parse.urlencode({'x': x, 'y': y})}"
+            else:
+                query = qs.get("query", [""])[0]
+                url = f"{KEYWORD_URL}?{urllib.parse.urlencode({'query': query})}"
+            req = urllib.request.Request(url, headers={"Authorization": f"KakaoAK {KAKAO_KEY}"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            self._send(200, data.get("results", {}))
+            self._send(200, {"documents": data.get("documents", [])})
         except Exception as e:
-            self._send(200, {"error": f"{type(e).__name__}: {e}", "juso": []})
+            self._send(200, {"error": f"{type(e).__name__}: {e}", "documents": []})
