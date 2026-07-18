@@ -255,7 +255,9 @@ def _rec_to_cand(rec: dict) -> Optional[dict]:
     lot_no = str(rec.get("lot_no", "") or "")
     add_item = _strip_html(str(rec.get("addItem", "") or ""))
     # 집합건물이면 부동산구분을 "집합건물", 아니면 빈값(토지/건물은 목록에 따로)
-    gubun = _pick(rec, ["real_cls_cd", "real_cls_nm", "부동산구분"])\n    if not gubun:\n        gubun = "집합건물" if rec.get("pin_mid_spe_yn") == "Y" or ho else ""
+    gubun = _pick(rec, ["real_cls_cd", "real_cls_nm", "부동산구분"])
+    if not gubun:
+        gubun = "집합건물" if rec.get("pin_mid_spe_yn") == "Y" or ho else ""
     return {
         "unique_no": uno,
         "gubun": gubun,
