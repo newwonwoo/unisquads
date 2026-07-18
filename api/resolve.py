@@ -84,6 +84,9 @@ class handler(BaseHTTPRequestHandler):
                         raw = debug_raw_records(addr, **_kw)
                         out["swrd"] = raw.get("swrd", "")
                         out["first_records"] = raw.get("first_records", [])
+                        out["response_keys"] = raw.get("response_keys", [])
+                        out["pagination_info"] = raw.get("pagination_info")
+                        out["response_preview"] = raw.get("response_preview", "")
                     except Exception:
                         out["swrd"] = ""   # 부가정보 실패는 무시(핵심 판정은 위에서 끝)
                 return self._send(200, out)
