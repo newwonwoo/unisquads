@@ -132,7 +132,7 @@ def _build_swrd(address: str, dong: str = "", ho: str = "", buld_name: str = "")
 
 
 def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "",
-                   page_index="", page_unit=1000) -> dict:
+                   page_index="", page_unit=10) -> dict:
     """정제주소 → 검색 API 요청 본문.
     2026-07-13 개정: 이 함수를 호출하는 resolve_one_api()는 이제 dong/ho를
     항상 빈 문자열로 넘긴다(swrd에 동/호를 안 넣기로 함 — 이유는
@@ -447,7 +447,7 @@ def _post_search(session, payload, timeout):
 
 
 def _collect_search(address, buld_name="", session=None, timeout=20.0,
-                    page_unit=1000, allow_session_retry=True):
+                    page_unit=10, allow_session_retry=True):
     """같은 세션에서 전 페이지를 모으고 완전성을 증명한다."""
     active = session or make_session()
     base_payload = _build_payload(address, dong="", ho="", buld_name=buld_name,
@@ -552,7 +552,7 @@ def _direct_search(address, dong, ho, buld_name="", session=None, timeout=20.0):
     """단건용 정확검색. 전체 캐시를 만들지 않으며 1건 정확 일치 때만 사용."""
     active = session or make_session()
     payload = _build_payload(address, dong=dong, ho=ho, buld_name=buld_name,
-                             page_index="", page_unit=100)
+                             page_index="", page_unit=10)
     data, code = _post_search(active, payload, timeout)
     if code in (401, 403):
         active = make_session()
@@ -625,7 +625,7 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
 
     # PNU/지번 전체수집 경로
     data, code, meta, active = _collect_search(
-        pure_lot_addr, session=active, timeout=timeout, page_unit=1000
+        pure_lot_addr, session=active, timeout=timeout, page_unit=10
     )
     if data is None:
         status = "REG_RATE_LIMIT" if code == 429 else (
@@ -655,7 +655,7 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
     for query_addr, query_name in fallbacks:
         data2, code2, meta2, active = _collect_search(
             query_addr, buld_name=query_name, session=active,
-            timeout=timeout, page_unit=1000,
+            timeout=timeout, page_unit=10,
         )
         c2 = _parse_json_response(data2) if data2 and not (
             isinstance(data2, dict) and "_raw" in data2
@@ -671,7 +671,7 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
         main_no = orig_beonji.split("-")[0]
         addr_main = _strip_trailing_buldname(address.replace(orig_beonji, main_no, 1))
         data3, code3, meta3, active = _collect_search(
-            addr_main, session=active, timeout=timeout, page_unit=1000
+            addr_main, session=active, timeout=timeout, page_unit=10
         )
         c3 = _parse_json_response(data3) if data3 and not (
             isinstance(data3, dict) and "_raw" in data3
