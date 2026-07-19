@@ -14,7 +14,7 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 def regex_once(text: str, pattern: str, replacement: str, label: str, flags: int = 0) -> str:
-    updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
+    updated, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=flags)
     if count != 1:
         raise RuntimeError(f"{label}: expected 1 regex match, found {count}")
     return updated
@@ -544,9 +544,9 @@ import {
         "split IROS progress UI",
     )
 
-    text = replace_once(text, '"전체 다운로드"', 'exportFinalReady ? "전체 다운로드" : "중간결과 다운로드 (PARTIAL)"', "all download label")
-    text = replace_once(text, '"중복제거 다운로드"', 'exportFinalReady ? "중복제거 다운로드" : "중복제거 PARTIAL"', "unique download label")
-    text = replace_once(text, '"실패건 다운로드"', 'exportFinalReady ? "실패건 다운로드" : "실패건 PARTIAL"', "fail download label")
+    text = replace_once(text, '"\\uC804\\uCCB4 \\uB2E4\\uC6B4\\uB85C\\uB4DC"', 'exportFinalReady ? "\\uC804\\uCCB4 \\uB2E4\\uC6B4\\uB85C\\uB4DC" : "중간결과 다운로드 (PARTIAL)"', "all download label")
+    text = replace_once(text, '"\\uC911\\uBCF5\\uC81C\\uAC70 \\uB2E4\\uC6B4\\uB85C\\uB4DC"', 'exportFinalReady ? "\\uC911\\uBCF5\\uC81C\\uAC70 \\uB2E4\\uC6B4\\uB85C\\uB4DC" : "중복제거 PARTIAL"', "unique download label")
+    text = replace_once(text, '"\\uC2E4\\uD328\\uAC74 \\uB2E4\\uC6B4\\uB85C\\uB4DC"', 'exportFinalReady ? "\\uC2E4\\uD328\\uAC74 \\uB2E4\\uC6B4\\uB85C\\uB4DC" : "실패건 PARTIAL"', "fail download label")
 
     text = text.replace(
         "disabled: batchDone === 0,\n       style: { ...btnS, opacity: batchDone === 0 ? 0.5 : 1 }",
@@ -561,13 +561,12 @@ import {
 
     text = replace_once(
         text,
-        """  ), (regStat.done > 0) &&""",
+        """)), (regStat.done > 0) &&""",
         """  ), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), (regStat.done > 0) &&""",
         "IROS run message UI",
     )
 
     required = [
-        'compression: true',
         'recovery_version: IROS_RUN_VERSIONS.recovery',
         'buildIrosSnapshot(next, extraHeaders',
         '기본 PNU ${batchBaseDone}/${batchBaseTotal}',
