@@ -28,40 +28,36 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Apply deterministic patch
+      - name: Apply final app corrections
         shell: bash
         run: |
-          if grep -q 'buildVerifiedWorkbookArray' public/app.js; then
-            exit 0
-          fi
-          sed -i 's/re.subn(pattern, replacement, text, count=1, flags=flags)/re.subn(pattern, lambda _match: replacement, text, count=1, flags=flags)/' tools/apply_iros_hardening.py
           python - <<'PY'
           from pathlib import Path
-          path = Path("tools/apply_iros_hardening.py")
+          import re
+
+          path = Path("public/app.js")
           source = path.read_text(encoding="utf-8")
-          source = source.replace('"전체 다운로드"', r'"\\uC804\\uCCB4 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
-          source = source.replace('"중복제거 다운로드"', r'"\\uC911\\uBCF5\\uC81C\\uAC70 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
-          source = source.replace('"실패건 다운로드"', r'"\\uC2E4\\uD328\\uAC74 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
-          source = source.replace('"""  ), (regStat.done > 0) &&"""', '""")), (regStat.done > 0) &&"""')
-          source = source.replace("        'compression: true',\n", "")
+
+          pattern = r'("\\uC911\\uB2E8")\s+\), irosRunMessage'
+          source, count = re.subn(
+              pattern,
+              lambda match: match.group(1) + ")), irosRunMessage",
+              source,
+              count=1,
+          )
+          if count != 1 and '"\\uC911\\uB2E8")), irosRunMessage' not in source:
+              raise SystemExit("IROS fragment closing marker not found")
+
+          source = source.replace(
+              "runState.baseDone || pnuKeys.length",
+              "runState.baseDone",
+          )
+          source = source.replace(
+              "runState.alternateDone || alternateEntries.length",
+              "runState.alternateDone",
+          )
           path.write_text(source, encoding="utf-8")
           PY
-          set +e
-          python tools/apply_iros_hardening.py > /tmp/iros-patch.log 2>&1
-          status=$?
-          set -e
-          cat /tmp/iros-patch.log
-          if [ "$status" -ne 0 ]; then
-            cp /tmp/iros-patch.log patch-failure.log
-            git config user.name "openai-agent"
-            git config user.email "openai-agent@users.noreply.github.com"
-            git add patch-failure.log
-            if ! git diff --cached --quiet; then
-              git commit -m "Capture IROS patch failure"
-              git push origin HEAD:${{ github.head_ref }}
-            fi
-            exit "$status"
-          fi
 
       - name: Validate JavaScript syntax
         run: node --check public/app.js
@@ -75,16 +71,16 @@ jobs:
       - name: Run Python IROS safety tests
         run: python -m unittest discover -s tests -p 'test_iros_safety.py'
 
-      - name: Commit patched application
+      - name: Commit corrected application
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
           git config user.name "openai-agent"
           git config user.email "openai-agent@users.noreply.github.com"
-          git add public/app.js tools/apply_iros_hardening.py
+          git add public/app.js
           if git diff --cached --quiet; then
-            echo "No application patch to commit"
+            echo "No application correction to commit"
           else
-            git commit -m "Harden IROS resume and XLSX export"
+            git commit -m "Fix IROS progress and controls rendering"
             git push origin HEAD:${{ github.head_ref }}
           fi
