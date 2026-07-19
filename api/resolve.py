@@ -108,9 +108,18 @@ class handler(BaseHTTPRequestHandler):
                 "complete": r.complete,
                 "total_count": r.total_count,
                 "received_count": r.received_count,
+                "raw_received_count": r.raw_received_count,
+                "parsed_count": r.parsed_count,
+                "unique_candidate_count": r.unique_candidate_count,
+                "parse_error_count": r.parse_error_count,
                 "pages_fetched": r.pages_fetched,
+                "expected_pages": r.expected_pages,
+                "effective_page_unit": r.effective_page_unit,
+                "query_scope": r.query_scope,
                 "strategy": r.strategy,
+                "collector_version": r.collector_version,
                 "parser_version": r.parser_version,
+                "matcher_version": r.matcher_version,
             })
         except Exception as e:
             self._send(200, {"status": "ERROR", "message": f"{type(e).__name__}: {e}"})

@@ -1,3 +1,9 @@
+import {
+  MATCHER_VERSION,
+  filterExpectedPropertyClass,
+  unitKey
+} from "./unit-match.mjs";
+
 if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
 const { useState, useEffect, useCallback, useRef } = React;
 function toHalfWidth(str) {
@@ -1712,6 +1718,11 @@ const REG_LABEL = {
   REG_SESSION_ERROR: "\uC138\uC158\uC624\uB958",
   REG_RATE_LIMIT: "\uC694\uCCAD\uC81C\uD55C",
   REG_PARSE_ERROR: "\uD30C\uC2F1\uC624\uB958",
+  REG_PARSE_INCOMPLETE: "\uD30C\uC2F1\uBD88\uC644\uC804",
+  REG_PARTIAL_RESPONSE: "\uBD80\uBD84\uC751\uB2F5",
+  REG_COLLECTION_DEFERRED: "\uC218\uC9D1\uC720\uC608",
+  REG_SERVICE_UNAVAILABLE: "\uC11C\uBE44\uC2A4\uC810\uAC80",
+  REG_VALIDATION_FAILED: "\uAC80\uC99D\uC2E4\uD328",
   REG_HTTP_ERROR: "HTTP\uC624\uB958",
   REG_TIMEOUT: "\uC2DC\uAC04\uCD08\uACFC",
   REG_ERROR: "\uC870\uD68C\uC624\uB958"
@@ -2252,7 +2263,10 @@ function AddrRefineTestGui() {
   const [savedProgress, setSavedProgress] = useState(null);
   const [irosHealth, setIrosHealth] = useState({ bad: 0, total: 0, lastCode: "" });
   const recordRegHealth = useCallback((status) => {
-    const SYSTEM_BAD = ["REG_PARSE_ERROR", "REG_HTTP_ERROR", "REG_SESSION_ERROR", "REG_RATE_LIMIT"];
+    const SYSTEM_BAD = [
+      "REG_PARSE_ERROR", "REG_PARSE_INCOMPLETE", "REG_HTTP_ERROR",
+      "REG_SESSION_ERROR", "REG_RATE_LIMIT"
+    ];
     setIrosHealth((h) => {
       const total = h.total + 1;
       const bad = SYSTEM_BAD.includes(status) ? h.bad + 1 : 0;
@@ -2356,17 +2370,6 @@ function AddrRefineTestGui() {
     const pnuKeys = [...groups.keys()];
     setBatchTotal(pnuKeys.length);
 
-    const unitKey = (value, kind) => {
-      let v = String(value || "").trim().replace(/\s+/g, "").replace(/^제/, "").replace(/(동|호)$/, "");
-      if (!v) return "";
-      if (kind === "dong" && /^[A-Za-z]$/.test(v)) return v.toUpperCase();
-      if (kind === "dong" && /^[가-힣]$/.test(v)) return v;
-      if (/^\d+$/.test(v)) return String(Number(v));
-      if (kind === "ho" && /^\d+(?:-\d+)+$/.test(v))
-        return v.split("-").map((x) => String(Number(x))).join("-");
-      if (kind === "ho" && /^[A-Za-z]\d+(?:-\d+)?$/.test(v)) return v.toUpperCase();
-      return v.toUpperCase();
-    };
     const buildingKey = (v) => String(v || "").replace(/[^0-9A-Za-z가-힣]/g, "").toLowerCase();
     const matchCollection = (row, collection) => {
       const all = Array.isArray(collection.all_candidates) ? collection.all_candidates : [];
@@ -2379,7 +2382,19 @@ function AddrRefineTestGui() {
           at: nowText()
         };
       }
-      if (!collection.complete) {
+      if (collection.status === "REG_COLLECTION_DEFERRED") {
+        return {
+          status: "REG_COLLECTION_DEFERRED",
+          candidates: all,
+          complete: false,
+          message: collection.message || "현재 요청의 안전 수집한도를 초과했습니다.",
+          at: nowText()
+        };
+      }
+      const rawReceived = Number(collection.raw_received_count ?? collection.received_count ?? 0);
+      const totalCount = collection.total_count == null ? null : Number(collection.total_count);
+      const exactCount = totalCount !== null && rawReceived === totalCount;
+      if (!collection.complete || !exactCount) {
         return {
           status: "REG_PARTIAL_RESPONSE",
           candidates: all,
@@ -2390,10 +2405,32 @@ function AddrRefineTestGui() {
           at: nowText()
         };
       }
+      if (Number(collection.parse_error_count || 0) > 0) {
+        return {
+          status: "REG_PARSE_INCOMPLETE",
+          candidates: all,
+          complete: true,
+          message: `원본 ${rawReceived}건 중 ${collection.parsed_count || 0}건 파싱`,
+          at: nowText()
+        };
+      }
 
       let cands = all.filter((c) => !String(c.state || "").includes("폐쇄"));
       const wantDong = unitKey(row.result.unit?.dong, "dong");
       const wantHo = unitKey(row.result.unit?.ho, "ho");
+      if ((row.result.isJip || wantDong || wantHo) && cands.length) {
+        const typed = filterExpectedPropertyClass(cands, "집합건물");
+        if (!typed.verified) {
+          return {
+            status: "REG_VALIDATION_FAILED",
+            candidates: all,
+            complete: true,
+            message: "동·호 입력과 IROS 부동산구분(집합건물) 불일치",
+            at: nowText()
+          };
+        }
+        cands = typed.candidates;
+      }
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
           const cd = unitKey(c.dong, "dong");
@@ -2461,12 +2498,20 @@ function AddrRefineTestGui() {
       const pnuKey = pnuKeys[g];
       const members = groups.get(pnuKey);
       const first = members[0].row;
-      const parserVersion = "iros-parser-v2";
-      const cacheKey = `regcands:${parserVersion}:${pnuKey}`;
+      const collectorVersion = "iros-collector-v3";
+      const parserVersion = "iros-parser-v3";
+      const cacheKey = `regcands:${collectorVersion}:${parserVersion}:${pnuKey}`;
       let collection = await idbGet(cacheKey);
       const fresh = collection?.fetched_at &&
         Date.now() - new Date(collection.fetched_at).getTime() < 24 * 60 * 60 * 1000;
-      if (!collection?.complete || !fresh || collection.parser_version !== parserVersion) {
+      const cachedRawCount = Number(collection?.raw_received_count ?? collection?.received_count ?? 0);
+      const cachedTotalCount = collection?.total_count == null ? null : Number(collection.total_count);
+      const cacheUsable = collection?.complete === true &&
+        collection.query_scope === "EXACT_LOT" &&
+        Number(collection.parse_error_count || 0) === 0 &&
+        cachedTotalCount !== null && cachedRawCount === cachedTotalCount;
+      if (!cacheUsable || !fresh || collection.parser_version !== parserVersion ||
+          collection.collector_version !== collectorVersion) {
         const addr = first.result.jibunAddr || first.result.irosQuery || "";
         const b = first.result.bdNm ? `&bdnm=${encodeURIComponent(first.result.bdNm)}` : "";
         try {
@@ -2481,17 +2526,33 @@ function AddrRefineTestGui() {
             complete: data.complete === true,
             total_count: data.total_count,
             received_count: data.received_count,
+            raw_received_count: data.raw_received_count ?? data.received_count,
+            parsed_count: data.parsed_count,
+            unique_candidate_count: data.unique_candidate_count,
+            parse_error_count: data.parse_error_count,
             pages_fetched: data.pages_fetched,
+            expected_pages: data.expected_pages,
+            effective_page_unit: data.effective_page_unit,
+            query_scope: data.query_scope || "EXACT_LOT",
+            collector_version: data.collector_version || collectorVersion,
             parser_version: data.parser_version || parserVersion,
+            matcher_version: data.matcher_version || MATCHER_VERSION,
             strategy: data.strategy || "FULL_COLLECT",
             fetched_at: new Date().toISOString(),
             message: data.message
           };
-          if (collection.complete) await idbSet(cacheKey, collection);
+          const receivedExactly = collection.total_count != null &&
+            Number(collection.raw_received_count || 0) === Number(collection.total_count);
+          const cacheable = collection.complete && receivedExactly &&
+            Number(collection.parse_error_count || 0) === 0 &&
+            collection.query_scope === "EXACT_LOT";
+          if (cacheable) await idbSet(cacheKey, collection);
         } catch {
           collection = {
             status: "REG_HTTP_ERROR", all_candidates: [], complete: false,
-            total_count: null, received_count: 0, parser_version: parserVersion,
+            total_count: null, received_count: 0, raw_received_count: 0,
+            parse_error_count: 0, collector_version: collectorVersion,
+            parser_version: parserVersion, matcher_version: MATCHER_VERSION,
             fetched_at: new Date().toISOString(), message: "브리지 응답 없음"
           };
         }

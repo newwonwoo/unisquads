@@ -75,9 +75,18 @@ class ResolveResult:
     complete: bool = False
     total_count: Optional[int] = None
     received_count: int = 0
+    raw_received_count: int = 0
+    parsed_count: int = 0
+    unique_candidate_count: int = 0
+    parse_error_count: int = 0
     pages_fetched: int = 0
+    expected_pages: Optional[int] = None
+    effective_page_unit: Optional[int] = None
+    query_scope: str = "EXACT_LOT"
     strategy: str = ""
-    parser_version: str = "iros-parser-v2"
+    collector_version: str = "iros-collector-v3"
+    parser_version: str = "iros-parser-v3"
+    matcher_version: str = "iros-matcher-v3"
 
 
 def normalize_sido(address: str) -> Optional[str]:
