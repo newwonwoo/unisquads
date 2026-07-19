@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/iros-export-resume-hardening
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -14,6 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -44,6 +48,7 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_iros_safety.py'
 
       - name: Commit patched application
+        if: github.event_name == 'pull_request'
         shell: bash
         run: |
           git config user.name "openai-agent"
@@ -53,5 +58,5 @@ jobs:
             echo "No application patch to commit"
           else
             git commit -m "Harden IROS resume and XLSX export"
-            git push origin HEAD
+            git push origin HEAD:${{ github.head_ref }}
           fi
