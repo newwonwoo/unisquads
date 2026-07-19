@@ -55,3 +55,5 @@ jobs:
             git commit -m "Harden IROS resume and XLSX export"
             git push origin HEAD
           fi
+
+# Trusted by the temporary default-branch workflow; remove before merge.
