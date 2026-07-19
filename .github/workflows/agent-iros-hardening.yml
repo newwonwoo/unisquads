@@ -34,6 +34,7 @@ jobs:
           if grep -q 'buildVerifiedWorkbookArray' public/app.js; then
             exit 0
           fi
+          sed -i 's/re.subn(pattern, replacement, text, count=1, flags=flags)/re.subn(pattern, lambda _match: replacement, text, count=1, flags=flags)/' tools/apply_iros_hardening.py
           set +e
           python tools/apply_iros_hardening.py > /tmp/iros-patch.log 2>&1
           status=$?
@@ -69,7 +70,7 @@ jobs:
         run: |
           git config user.name "openai-agent"
           git config user.email "openai-agent@users.noreply.github.com"
-          git add public/app.js
+          git add public/app.js tools/apply_iros_hardening.py
           if git diff --cached --quiet; then
             echo "No application patch to commit"
           else
