@@ -3,13 +3,13 @@ export const PIPELINE_VERSION = "addr-pipeline-v1";
 export const MODULE_VERSIONS = Object.freeze({
   COMMON_NORMALIZE: "4",
   UNIT_PARSE: "5",
-  JUSO_LOOKUP: "3",
-  NAVER_RECOVERY: "3",
+  JUSO_LOOKUP: "4",
+  NAVER_RECOVERY: "4",
   REGION_VALIDATE: "3",
   GROUP_HINT: "2",
   DONGSO_RECOVERY: "2",
-  GROUP_PROPAGATION: "3",
-  OLD_ADDRESS: "2"
+  GROUP_PROPAGATION: "4",
+  OLD_ADDRESS: "3"
 });
 
 function canonical(value) {

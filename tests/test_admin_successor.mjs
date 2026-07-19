@@ -28,9 +28,13 @@ test("context-scoped district reform cannot leak to another province", () => {
 test("known old city names are modernized as whole tokens", () => {
   assert.equal(
     modernizeKnownAdminTokens("충청남도 당진군 송악면 1"),
-    "충청남도 당진시 송악면 1"
+    "충청남도 당진시 송악읍 1"
   );
   assert.equal(modernizeKnownAdminTokens("마산시 창원시 1"), "창원시 창원시 1");
+  assert.equal(
+    modernizeKnownAdminTokens("충청남도 아산시 배방면 공수리 282-5"),
+    "충청남도 아산시 배방읍 공수리 282-5"
+  );
   assert.ok(listAdminSuccessorRules().length >= 18);
 });
 

@@ -1,4 +1,4 @@
-export const ADMIN_SUCCESSOR_MAP_VERSION = "admin-successor-v1";
+export const ADMIN_SUCCESSOR_MAP_VERSION = "admin-successor-v2";
 
 const RULES = Object.freeze([
   // 시군구 통폐합·승격
@@ -45,7 +45,7 @@ export function findAdminSuccessor(from, to, kind, context = {}) {
 
 export function modernizeKnownAdminTokens(text) {
   const replacements = new Map(
-    RULES.filter((item) => item.kind === "SGG" && !item.sido)
+    RULES.filter((item) => !item.sido)
       .map((item) => [item.from, item.to])
   );
   return String(text || "").replace(/\s+/g, " ").trim().split(" ")

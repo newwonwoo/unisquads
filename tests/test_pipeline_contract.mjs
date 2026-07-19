@@ -62,7 +62,7 @@ test("explicit old-address evidence is recorded as an applied module", () => {
     ...result,
     validation: {
       status: "MATCH",
-      oldAddressMap: { version: "admin-successor-v1", from: "배방면", to: "배방읍" }
+      oldAddressMap: { version: "admin-successor-v2", from: "배방면", to: "배방읍" }
     }
   });
   assert.ok(enriched.appliedModules.includes("OLD_ADDRESS"));
