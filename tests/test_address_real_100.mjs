@@ -14,7 +14,7 @@ const BASE = [
   ["경기 가평군 가평읍 대곡리 대곡리 402-1 101동 204호", "101", "204"],
   ["강원 강릉시 입암동 태평양아파트 태평양임대아파트 101-808", "101", "808"],
   ["강원 강릉시 지변동 1동 1116호", "1", "1116"],
-  ["경북 경주시 황성동 청우아파트 276-6 청우타운 302동 1305", "302", ""],
+  ["경북 경주시 황성동 청우아파트 276-6 청우타운 302동 1305", "302", "1305"],
   ["경북 경주시 안강읍 산대리 1346-3 한동화성타운301동406호", "301", "406"],
   ["경북 경주시 안강읍 옥산리 1346-9,2368-13 한동그린타운 501-507호", "", "507"],
   ["경남 고성군 거류면 174번지새평지아파트 106동 103호", "106", "103"],
@@ -71,7 +71,38 @@ test("alphabet dong and hyphen room survive parsing and multi-unit splitting", (
     { dong: "A", ho: "1503" }
   );
   assert.deepEqual(
+    preprocess("서울특별시 서초구 서초동 967 대원아파트 에이동 103").unit,
+    { dong: "A", ho: "103" }
+  );
+  assert.deepEqual(
+    preprocess("서울특별시 서초구 서초동 967 대원아파트 비동 204-1호").unit,
+    { dong: "B", ho: "204-1" }
+  );
+  assert.deepEqual(
+    preprocess("경북 경주시 동천동 948-1 동방하이츠 비이동201호").unit,
+    { dong: "B", ho: "201" }
+  );
+  assert.deepEqual(
     splitUnitsForBatch("서초동 967 A동 204-1호 B동 305-2호"),
     [["A", "204-1"], ["B", "305-2"]]
+  );
+});
+
+test("numeric bare room and three-part unit notation are parsed conservatively", () => {
+  assert.deepEqual(
+    preprocess("경북 경주시 황성동 청우타운 302동 102").unit,
+    { dong: "302", ho: "102" }
+  );
+  assert.deepEqual(
+    preprocess("서울 서초구 서초동 967 대원아파트 101-1-101").unit,
+    { dong: "101", ho: "101" }
+  );
+  assert.notEqual(
+    preprocess("서울 강남구 논현동 105 동현 5-1009").unit.dong,
+    "105"
+  );
+  assert.deepEqual(
+    preprocess("경남 거제시 사등면 사곡리 886-2 옥성삼화 107(1/2)").unit,
+    { dong: null, ho: null }
   );
 });

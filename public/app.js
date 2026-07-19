@@ -192,8 +192,26 @@ const RE_SGG = /^[\uAC00-\uD7A3]{1,6}(\uC2DC|\uAD70|\uAD6C)$/;
 const RE_BJD = /^[\uAC00-\uD7A3]{1,4}\d*(\uB3D9|\uC74D|\uBA74|\uB9AC|\uAC00)$/;
 // 비교 키: 숫자·말미 '가' 제거 → 역삼1동=역삼동, 명동=명동1가, 종로1가=종로
 const bjdKey = (t) => String(t || "").replace(/\d+/g, "").replace(/\uAC00$/, "");
+// 광주·전남 통합 표기는 조회와 검증에서 같은 축으로 정규화한다. 이 변환은
+// 시도에만 한정하며, 배방면→배방읍 같은 명시적 옛주소 증거는 지우지 않는다.
+const SPECIAL_REGION_MODERNIZE = [
+  [/전\s*남\s*광주통합특별시/g, "광주통합특별시"],
+  [/광주광역시/g, "광주통합특별시"],
+  [/전라남도/g, "광주통합특별시"],
+  [/(^|\s)광주(?=\s)/g, " 광주통합특별시"],
+  [/(^|\s)전남(?=\s)/g, " 광주통합특별시"],
+  [/광주통합특별시\s+광주통합특별시/g, "광주통합특별시"]
+];
+function normalizeSpecialSido(addr) {
+  let s = String(addr || "");
+  for (const [re, to] of SPECIAL_REGION_MODERNIZE) s = s.replace(re, to);
+  return s.replace(/\s+/g, " ").trim();
+}
 function extractRegion(text) {
-  const out = { sido: "", sgg: [], bjd: "" };
+  const out = {
+    sido: "", sgg: [], bjd: "",
+    eupMyeonCandidates: [], leafCandidates: []
+  };
   if (!text) return out;
   let s = String(text).replace(/\s+/g, " ").trim();
   for (const sido of [...SIDO_TOKENS].sort((a, b) => b.length - a.length)) {
@@ -203,6 +221,8 @@ function extractRegion(text) {
     if (RE_SGG.test(t) && out.sgg.length < 2 && !out.bjd) { out.sgg.push(t); continue; }
     if (RE_BJD.test(t)) {
       const leaf = /(동|리|가)$/.test(t);
+      const bucket = leaf ? out.leafCandidates : out.eupMyeonCandidates;
+      if (!bucket.includes(t)) bucket.push(t);
       const priorLeaf = /(동|리|가)$/.test(out.bjdRaw || "");
       if (!out.bjd || (leaf && !priorLeaf)) { out.bjdRaw = t; out.bjd = bjdKey(t); }
     }
@@ -225,15 +245,43 @@ function compareBjd(x, y, sido = "") {
     return t.replace(/\d+/g, "").replace(/가$/, "");
   };
   if (x === y) return { match: true, evidence: null };
+  // 숫자 행정동(방이1동·사2동)은 기존 단일값 검증과 같은 방식으로 먼저 맞춘다.
+  // 뒤의 한글수 변환은 이도이동↔이도2동 같은 표기만 보강한다.
+  if (bjdKey(x) === bjdKey(y)) return { match: true, evidence: null };
   const nx = norm(x), ny = norm(y);
   if (!nx || !ny) return { match: false, evidence: null };
   if (nx === ny) return { match: true, evidence: null };
   const evidence = findAdminSuccessor(nx, ny, "BJD", { sido });
   return { match: !!evidence, evidence };
 }
+function compareRegionCandidates(xs, ys, sido = "") {
+  for (const x of xs || []) {
+    for (const y of ys || []) {
+      const compared = compareBjd(x, y, sido);
+      if (compared.match) return { ...compared, input: x, result: y };
+    }
+  }
+  return { match: false, evidence: null, input: xs?.[0] || "", result: ys?.[0] || "" };
+}
+function comparableRegionLevels(a, b) {
+  const levels = [];
+  if (a.eupMyeonCandidates.length && b.eupMyeonCandidates.length) {
+    levels.push({
+      name: "읍면",
+      compared: compareRegionCandidates(a.eupMyeonCandidates, b.eupMyeonCandidates, a.sido || b.sido)
+    });
+  }
+  if (a.leafCandidates.length && b.leafCandidates.length) {
+    levels.push({
+      name: "법정동",
+      compared: compareRegionCandidates(a.leafCandidates, b.leafCandidates, a.sido || b.sido)
+    });
+  }
+  return levels;
+}
 function validateRegion(inputText, resultJibun, sidoOnly = false, relJibunText = "") {
-  const a = extractRegion(inputText || "");
-  const b = extractRegion(resultJibun || "");
+  const a = extractRegion(normalizeSpecialSido(inputText || ""));
+  const b = extractRegion(normalizeSpecialSido(resultJibun || ""));
   const label = (r) => [r.sido, ...r.sgg, r.bjd].filter(Boolean).join(" ");
   const mk = (status, reason, oldAddressMap = null) => ({
     status, reason, inputSgg: label(a), resultSgg: label(b),
@@ -249,12 +297,16 @@ function validateRegion(inputText, resultJibun, sidoOnly = false, relJibunText =
     // 2026-07-17: 시도만 보고 통과시키면 서구 당하동 물건이 검단구 오류동으로
     // 확정되는 것을 막지 못한다(실측 89건). 법정동까지 본다.
     //   같음 · 표기 차이(장전3동=장전동) · 관련지번(relJibun)이면 통과, 그 외 차단
-    if (!a.bjd || !b.bjd) return mk("MATCH", "\uC2DC\uB3C4 \uC77C\uCE58(\uBC95\uC815\uB3D9 \uCD94\uCD9C \uBD88\uAC00)");
-    const bjd = compareBjd(a.bjd, b.bjd, a.sido || b.sido);
-    if (bjd.match) return mk("MATCH", bjd.evidence ? "명시적 법정동 개편 규칙 일치" : "\uC2DC\uB3C4\u00B7\uBC95\uC815\uB3D9 \uC77C\uCE58", bjd.evidence);
-    if (relJibunText && String(relJibunText).includes(a.bjd))
-      return mk("MATCH", "\uAD00\uB828\uC9C0\uBC88 \uC77C\uCE58");
-    return mk("MISMATCH", `\uBC95\uC815\uB3D9 \uBD88\uC77C\uCE58(${a.bjd}\u2260${b.bjd})`);
+    const levels = comparableRegionLevels(a, b);
+    for (const level of levels) {
+      if (level.compared.match) continue;
+      if (level.name === "법정동" && relJibunText &&
+          a.leafCandidates.some((leaf) => String(relJibunText).includes(leaf))) continue;
+      return mk("MISMATCH", `${level.name} 불일치(${level.compared.input}≠${level.compared.result})`);
+    }
+    const evidence = levels.map((level) => level.compared.evidence).find(Boolean) || null;
+    return mk("MATCH", evidence ? "명시적 행정구역 개편 규칙 일치" :
+      (levels.length ? "시도·동일계층 지역 일치" : "시도 일치(동일계층 비교 불가)"), evidence);
   }
   if (a.sgg.length && b.sgg.length) {
     // 입력이 덜 구체적인 건 정상(성남시 ⊂ 성남시 분당구) — 어긋날 때만 불일치
@@ -266,30 +318,42 @@ function validateRegion(inputText, resultJibun, sidoOnly = false, relJibunText =
         if (successor) { successorEvidence = successor; continue; }
         return mk("MISMATCH", `\uC2DC\uAD70\uAD6C \uBD88\uC77C\uCE58(${a.sgg[i]}\u2260${b.sgg[i]})`);
       }
-    // 시군구가 같아도 법정동이 어긋나면 오확정(같은 구의 동명 건물) — 계속 검사
-    if (a.bjd && b.bjd) {
-      const bjd = compareBjd(a.bjd, b.bjd, a.sido || b.sido);
-      if (!bjd.match)
-        return mk("MISMATCH", `\uBC95\uC815\uB3D9 \uBD88\uC77C\uCE58(${a.bjdRaw || a.bjd}\u2260${b.bjdRaw || b.bjd})`);
-      successorEvidence = bjd.evidence || successorEvidence;
+    // 읍·면과 그 아래 동·리는 서로 다른 계층이다. 같은 계층이 양쪽에 있을 때만
+    // 비교하고, 원문에 여러 리가 있으면 어느 하나가 결과와 맞으면 통과시킨다.
+    const levels = comparableRegionLevels(a, b);
+    for (const level of levels) {
+      if (!level.compared.match)
+        return mk("MISMATCH", `${level.name} 불일치(${level.compared.input}≠${level.compared.result})`);
+      successorEvidence = level.compared.evidence || successorEvidence;
     }
-    return mk("MATCH", successorEvidence ? "명시적 행정구역 개편 규칙 일치" : (a.bjd && b.bjd ? "\uC2DC\uAD70\uAD6C\xB7\uBC95\uC815\uB3D9 \uC77C\uCE58" : "\uC2DC\uAD70\uAD6C \uC77C\uCE58"), successorEvidence);
+    return mk("MATCH", successorEvidence ? "명시적 행정구역 개편 규칙 일치" :
+      (levels.length ? "시군구·동일계층 지역 일치" : "시군구 일치"), successorEvidence);
   }
-  if (a.bjd && b.bjd) {
-    const bjd = compareBjd(a.bjd, b.bjd, a.sido || b.sido);
-    if (!bjd.match) return mk("MISMATCH", `\uBC95\uC815\uB3D9 \uBD88\uC77C\uCE58(${a.bjdRaw || a.bjd}\u2260${b.bjdRaw || b.bjd})`);
-    return mk("MATCH", bjd.evidence ? "명시적 법정동 개편 규칙 일치" : "\uBC95\uC815\uB3D9 \uC77C\uCE58", bjd.evidence);
+  const levels = comparableRegionLevels(a, b);
+  if (levels.length) {
+    for (const level of levels) {
+      if (!level.compared.match)
+        return mk("MISMATCH", `${level.name} 불일치(${level.compared.input}≠${level.compared.result})`);
+    }
+    const evidence = levels.map((level) => level.compared.evidence).find(Boolean) || null;
+    return mk("MATCH", evidence ? "명시적 행정구역 개편 규칙 일치" : "동일계층 지역 일치", evidence);
   }
   return mk("NOT_AVAILABLE", a.sido || a.sgg.length || a.bjd ? "\uACB0\uACFC\uC5D0\uC11C \uC9C0\uC5ED \uCD94\uCD9C \uBD88\uAC00" : "\uC785\uB825\uC5D0\uC11C \uC9C0\uC5ED \uCD94\uCD9C \uBD88\uAC00");
 }
 const JIP_KEYWORDS = /(아파트|apt|빌라|빌리지|[가-힣]{2,}빌|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오|아이파크|e편한|이편한|더샵|롯데캐슬|래미안|센트|리버|파크|하이츠|스카이|타워|주상복합|헤리티지|포레|아이유쉘|쉐르빌|베르디움|엘크루|리슈빌|스위첸|데시앙|꿈에그린|우방|한신|현대|삼성|엘지|지에스)/i;
 const JIBUN_CONTEXT = /(동|읍|면|리|로|길|가)\s*$/;
-const RE_DONG_HO = /제?\s*(\d{1,4})\s*동\s*제?\s*(\d{1,4}(?:-\d{1,4})?)\s*호/;
-const RE_DONG_ONLY = /제?\s*(\d{1,4})\s*동(?!\s*\d*\s*호)/;
+const RE_DONG_HO = /제?\s*(\d{1,4})\s*동\s*-?\s*제?\s*(\d{1,4}(?:-\d{1,4})?)\s*호/;
+const RE_DONG_BARE_HO = /(?:^|\s)제?\s*(\d{1,4})\s*동\s+(\d{2,5}(?:-\d{1,4})?)(?=\s|$)/;
+const RE_DONG_ONLY = /(?:^|\s)제?\s*(\d{1,4})\s*동(?=\s|$)(?!\s*\d*\s*호)/;
 const RE_HO_ONLY = /제?\s*(\d{1,4})\s*호/;
 const RE_FLOOR = /(지하\s*\d{1,3}|B\s*\d{1,2}|반지하|[지제]?\s*\d{1,3})\s*층/gi;
-const RE_ALPHA_DONG_HO = /(?:^|\s)([A-Za-z]|[가-힣])동\s*제?\s*(\d{1,4}(?:-\d{1,4})?)\s*호/;
-const RE_ALPHA_DONG_BARE_HO = /(?:^|\s)([A-Za-z]|[가-힣])동\s*(\d{3,4}(?:-\d{1,4})?)(?=\s|$)/;
+const KOREAN_ALPHA_DONG = Object.freeze({
+  에이: "A", 비: "B", 비이: "B", 씨: "C", 디: "D", 이: "E", 에프: "F", 지: "G", 에이치: "H"
+});
+const RE_ALPHA_DONG_HO = /(?:^|\s)제?(에이치|에이|비이|에프|[A-Za-z]|[가-힣])동\s*제?\s*(\d{1,4}(?:-\d{1,4})?)\s*호/;
+const RE_ALPHA_DONG_BARE_HO = /(?:^|\s)제?(에이치|에이|비이|에프|비|씨|디|이|지|[A-Za-z])동\s*(\d{3,5}(?:-\d{1,4})?)(?=\s|$)/;
+const normalizeAlphaDong = (value) => KOREAN_ALPHA_DONG[value] ||
+  (/^[A-Za-z]$/.test(value) ? value.toUpperCase() : value);
 function extractUnit(str) {
   let text = str, dong = null, ho = null;
   text = text.replace(RE_FLOOR, " ");
@@ -301,17 +365,24 @@ function extractUnit(str) {
   } else {
     const alpha = text.match(RE_ALPHA_DONG_HO) || text.match(RE_ALPHA_DONG_BARE_HO);
     if (alpha) {
-      dong = /^[A-Za-z]$/.test(alpha[1]) ? alpha[1].toUpperCase() : alpha[1];
+      dong = normalizeAlphaDong(alpha[1]);
       ho = alpha[2];
       text = text.replace(RE_ALPHA_DONG_HO, " ").replace(RE_ALPHA_DONG_BARE_HO, " ");
     } else {
-      const dongOnly = text.match(RE_DONG_ONLY);
-      if (dongOnly) {
-        dong = dongOnly[1];
-        text = text.replace(RE_DONG_ONLY, " ");
+      const barePair = text.match(RE_DONG_BARE_HO);
+      if (barePair) {
+        dong = barePair[1];
+        ho = barePair[2];
+        text = text.replace(RE_DONG_BARE_HO, " ");
+      } else {
+        const dongOnly = text.match(RE_DONG_ONLY);
+        if (dongOnly) {
+          dong = dongOnly[1];
+          text = text.replace(RE_DONG_ONLY, " ");
+        }
       }
       const hoOnly = text.match(RE_HO_ONLY);
-      if (hoOnly) {
+      if (!ho && hoOnly) {
         ho = hoOnly[1];
         text = text.replace(RE_HO_ONLY, " ");
       }
@@ -329,6 +400,12 @@ function inferUnitFromNumbers(searchText, existing) {
   if (am && String(am[4])[0] === String(Number(am[3]))) {
     return { dong: am[2].toUpperCase(), ho: am[4], text: am[1].trim() };
   }
+  // R13: 집합건물명 뒤 [동]-[층]-[호] 3단 표기. 가운데 층과 호수 접두가
+  // 일치할 때만 확정해 지번·지하층 숫자열의 오인식을 막는다.
+  const tm = searchText.match(/^(.*?)\s+(\d{1,4})\s*-\s*(\d{1,2})\s*-\s*(\d{2,5})\s*$/);
+  if (tm && JIP_KEYWORDS.test(tm[1]) && String(tm[4]).startsWith(String(Number(tm[3])))) {
+    return { dong: tm[2], ho: tm[4], text: tm[1].trim() };
+  }
   // R12(2026-07-17): 건물명 뒤 3~4자리 연속 숫자는 호수(층+호)다.
   //   신세계블루타운 201~1219 · 서도아파트 101~1507 · 삼우목련 101~1304
   //   층별로 정렬되므로 동이 아니다(1219동은 존재할 수 없다).
@@ -338,11 +415,11 @@ function inferUnitFromNumbers(searchText, existing) {
   if (bm && BUILDING_TOKEN.test(bm[1])) {
     return { dong: null, ho: bm[2], text: bm[1].trim() };
   }
-  const m = searchText.match(/^(.*?)\s+(\d{1,4})\s*[-/]\s*(\d{1,4})\s*$/);
+  const m = searchText.match(/^(.*?)\s+(\d{1,4})\s*-\s*(\d{1,4})\s*$/);
   if (!m) return existing;
   const head = m[1].trim();
   if (JIBUN_CONTEXT.test(head)) return existing;
-  if (JIP_KEYWORDS.test(head)) {
+  if (JIP_KEYWORDS.test(head) || BUILDING_TOKEN.test(head)) {
     return { dong: m[2], ho: m[3], text: head };
   }
   return existing;
@@ -709,20 +786,8 @@ async function recoverJusoCandidateForNaver(naverAddr, clients) {
 // 옛 시군구 → 현재 시군구 (2026-07-15, 실측 3건 + 여유분)
 // 검색 '전에' 원본 주소를 현대화한다(교차검증 예외가 아니라 사전 변환).
 // 실데이터: 청원군159 진해시62 마산시51 + 소수. 나머지 통폐합은 실데이터에 없음.
-const SPECIAL_REGION_MODERNIZE = [
-  // 광주+전남 통합 → 광주통합특별시(2026 개편, juso 반영). 옛 표기와 juso의
-  // '전남광주통합특별시' 붙임표기를 모두 하나의 시도명으로 통일해 교차검증이
-  // 통과되게 한다. '광주통합특별시'를 표준으로.
-  [/전\s*남\s*광주통합특별시/g, "광주통합특별시"],
-  [/광주광역시/g, "광주통합특별시"],
-  [/전라남도/g, "광주통합특별시"],
-  [/(^|\s)광주(?=\s)/g, " 광주통합특별시"],
-  [/(^|\s)전남(?=\s)/g, " 광주통합특별시"],
-  [/광주통합특별시\s+광주통합특별시/g, "광주통합특별시"],
-];
 function modernizeSgg(addr) {
-  let s = modernizeKnownAdminTokens(addr || "");
-  for (const [re, to] of SPECIAL_REGION_MODERNIZE) s = s.replace(re, to);
+  let s = normalizeSpecialSido(modernizeKnownAdminTokens(addr || ""));
   s = s.replace(/창원시\s+창원시/g, "창원시");
   return s.replace(/\s+/g, " ").trim();
 }

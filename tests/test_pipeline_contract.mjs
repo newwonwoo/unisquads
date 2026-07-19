@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  MODULE_VERSIONS,
   attachPipelineMetadata,
   cloneResult,
   dependencyFingerprint,
@@ -66,4 +67,11 @@ test("explicit old-address evidence is recorded as an applied module", () => {
     }
   });
   assert.ok(enriched.appliedModules.includes("OLD_ADDRESS"));
+});
+
+test("only the changed parsing contracts expose their new module versions", () => {
+  assert.equal(MODULE_VERSIONS.UNIT_PARSE, "6");
+  assert.equal(MODULE_VERSIONS.REGION_VALIDATE, "4");
+  assert.equal(MODULE_VERSIONS.JUSO_LOOKUP, "4");
+  assert.equal(MODULE_VERSIONS.NAVER_RECOVERY, "4");
 });

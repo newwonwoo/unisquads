@@ -48,4 +48,43 @@ test("deployed browser module links without executing the UI", async () => {
     ).oldAddressMap?.ruleId,
     "BJD_MUNDONG_REFORM"
   );
+  assert.equal(
+    app.validateRegion(
+      "광주광역시 서구 농성동 100",
+      "전남광주통합특별시 서구 농성동 100"
+    ).status,
+    "MATCH"
+  );
+  assert.equal(
+    app.validateRegion(
+      "충청남도 논산시 강경읍 황산리 대흥리 35",
+      "충청남도 논산시 강경읍 대흥리 35"
+    ).status,
+    "MATCH"
+  );
+  assert.equal(
+    app.validateRegion(
+      "경상남도 창녕군 도천면 169-2",
+      "경상남도 창녕군 도천면 송진리 169-2"
+    ).status,
+    "MATCH"
+  );
+  assert.equal(
+    app.validateRegion(
+      "전북특별자치도 임실군 임실읍 1",
+      "경기도 양주시 백석읍 1"
+    ).status,
+    "MISMATCH"
+  );
+
+  const input = "충청남도 논산시 강경읍 황산리 대흥리 35";
+  const result = "충청남도 논산시 강경읍 대흥리 35";
+  assert.deepEqual(
+    app.validateRegion(input, result),
+    app.validateRegion(input, result)
+  );
+  assert.deepEqual(
+    app.preprocess("서울 서초구 서초동 967 대원아파트 101-1-101"),
+    app.preprocess("서울 서초구 서초동 967 대원아파트 101-1-101")
+  );
 });

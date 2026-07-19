@@ -2,10 +2,10 @@ export const PIPELINE_VERSION = "addr-pipeline-v1";
 
 export const MODULE_VERSIONS = Object.freeze({
   COMMON_NORMALIZE: "4",
-  UNIT_PARSE: "5",
+  UNIT_PARSE: "6",
   JUSO_LOOKUP: "4",
   NAVER_RECOVERY: "4",
-  REGION_VALIDATE: "3",
+  REGION_VALIDATE: "4",
   GROUP_HINT: "2",
   DONGSO_RECOVERY: "2",
   GROUP_PROPAGATION: "4",
