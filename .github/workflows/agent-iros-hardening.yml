@@ -31,8 +31,24 @@ jobs:
       - name: Apply deterministic patch
         shell: bash
         run: |
-          if ! grep -q 'buildVerifiedWorkbookArray' public/app.js; then
-            python tools/apply_iros_hardening.py
+          if grep -q 'buildVerifiedWorkbookArray' public/app.js; then
+            exit 0
+          fi
+          set +e
+          python tools/apply_iros_hardening.py > /tmp/iros-patch.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/iros-patch.log
+          if [ "$status" -ne 0 ]; then
+            cp /tmp/iros-patch.log patch-failure.log
+            git config user.name "openai-agent"
+            git config user.email "openai-agent@users.noreply.github.com"
+            git add patch-failure.log
+            if ! git diff --cached --quiet; then
+              git commit -m "Capture IROS patch failure"
+              git push origin HEAD:${{ github.head_ref }}
+            fi
+            exit "$status"
           fi
 
       - name: Validate JavaScript syntax
