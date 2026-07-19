@@ -1,9 +1,9 @@
 Traceback (most recent call last):
   File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 587, in <module>
     main()
-  File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 547, in main
-    text = replace_once(text, '"전체 다운로드"', 'exportFinalReady ? "전체 다운로드" : "중간결과 다운로드 (PARTIAL)"', "all download label")
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 562, in main
+    text = replace_once(
+           ^^^^^^^^^^^^^
   File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 12, in replace_once
     raise RuntimeError(f"{label}: expected 1 occurrence, found {count}")
-RuntimeError: all download label: expected 1 occurrence, found 0
+RuntimeError: IROS run message UI: expected 1 occurrence, found 0
