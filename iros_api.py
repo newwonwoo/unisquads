@@ -34,6 +34,8 @@ import re
 import sys
 import time
 import argparse
+import hashlib
+import json
 from typing import Optional
 
 try:
@@ -55,9 +57,10 @@ DIRECT_SEARCH_PAGE_UNIT = 10
 FULL_COLLECT_PAGE_UNIT = 1000
 PAGE_UNIT_FALLBACKS = (1000, 500, 100, 10)
 MAX_COLLECTION_PAGES = 100
-COLLECTOR_VERSION = "iros-collector-v3"
+MAX_COLLECTION_SECONDS = 45.0
+COLLECTOR_VERSION = "iros-collector-v4"
 PARSER_VERSION = "iros-parser-v3"
-MATCHER_VERSION = "iros-matcher-v3"
+MATCHER_VERSION = "iros-matcher-v4"
 
 import re as _re_html
 _TAG_RE = _re_html.compile(r"<[^>]+>")
@@ -333,11 +336,17 @@ def _parse_json_response_with_meta(data):
                 seen.add(uno)
                 out.append({"unique_no": uno, "gubun": "", "state": "", "sojae": ""})
     raw_record_count = len(records)
+    schema_keys = sorted({str(key) for rec in records if isinstance(rec, dict)
+                          for key in rec.keys()})
+    schema_fingerprint = hashlib.sha256(
+        json.dumps(schema_keys, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return out, {
         "raw_record_count": raw_record_count,
         "parsed_record_count": parsed_record_count,
         "unique_candidate_count": len(out),
         "parse_error_count": max(0, raw_record_count - parsed_record_count),
+        "schema_fingerprint": schema_fingerprint,
     }
 
 
@@ -519,9 +528,13 @@ def _collection_meta(page_unit, **overrides):
         "pages_fetched": 0,
         "expected_pages": None,
         "effective_page_unit": page_unit,
+        "requested_page_unit": page_unit,
+        "capability_source": "REQUEST",
         "page_error": False,
         "repeated_page": False,
         "collection_deferred": False,
+        "deferred_reason": "",
+        "elapsed_seconds": 0.0,
         "query_scope": "EXACT_LOT",
         "collector_version": COLLECTOR_VERSION,
     }
@@ -530,9 +543,21 @@ def _collection_meta(page_unit, **overrides):
 
 
 def _collect_search(address, buld_name="", session=None, timeout=20.0,
-                    page_unit=FULL_COLLECT_PAGE_UNIT, allow_session_retry=True):
+                    page_unit=FULL_COLLECT_PAGE_UNIT, allow_session_retry=True,
+                    _started_at=None, _requested_page_unit=None):
     """같은 세션에서 전 페이지를 모으고 완전성을 증명한다."""
     active = session or make_session()
+    started_at = _started_at if _started_at is not None else time.monotonic()
+    requested_page_unit = (
+        _requested_page_unit if _requested_page_unit is not None else page_unit
+    )
+    capability_source = "REQUEST"
+    session_page_unit = getattr(active, "_iros_page_unit", None)
+    if (page_unit == FULL_COLLECT_PAGE_UNIT
+            and isinstance(session_page_unit, int)
+            and session_page_unit > 0):
+        page_unit = session_page_unit
+        capability_source = "SESSION"
     base_payload = _build_payload(address, dong="", ho="", buld_name=buld_name,
                                   page_index="", page_unit=page_unit)
     data, code = _post_search(active, base_payload, timeout)
@@ -541,14 +566,22 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
         return _collect_search(
             address, buld_name=buld_name, session=active, timeout=timeout,
             page_unit=page_unit, allow_session_retry=False,
+            _started_at=started_at,
+            _requested_page_unit=requested_page_unit,
         )
     if data is None or code != 200:
         return data, code, _collection_meta(
-            page_unit, session_retried=not allow_session_retry
+            page_unit, session_retried=not allow_session_retry,
+            requested_page_unit=requested_page_unit,
+            capability_source=capability_source,
+            elapsed_seconds=time.monotonic() - started_at,
         ), active
     if isinstance(data, dict) and "_raw" in data:
         return data, code, _collection_meta(
-            page_unit, pages_fetched=1, parse_error=True
+            page_unit, pages_fetched=1, parse_error=True,
+            requested_page_unit=requested_page_unit,
+            capability_source=capability_source,
+            elapsed_seconds=time.monotonic() - started_at,
         ), active
     if isinstance(data, dict) and data.get("nrsMessageCd"):
         message_value = str(data.get("nrsMessageValue") or "")
@@ -556,6 +589,9 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
             return data, 503, _collection_meta(
                 page_unit, pages_fetched=1, service_unavailable=True,
                 service_message=message_value,
+                requested_page_unit=requested_page_unit,
+                capability_source=capability_source,
+                elapsed_seconds=time.monotonic() - started_at,
             ), active
 
     first_rows = data.get("dataList") if isinstance(data, dict) else None
@@ -573,6 +609,8 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
             address, buld_name=buld_name, session=active, timeout=timeout,
             page_unit=PAGE_UNIT_FALLBACKS[pos + 1],
             allow_session_retry=allow_session_retry,
+            _started_at=started_at,
+            _requested_page_unit=requested_page_unit,
         )
 
     all_rows = list(first_rows)
@@ -583,6 +621,13 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
     if total is not None and first_rows and len(first_rows) < total:
         # 서버가 요청값보다 작은 단위로 조용히 제한하는 경우 실수신 단위를 따른다.
         effective_page_unit = len(first_rows)
+    if total is not None:
+        try:
+            active._iros_page_unit = effective_page_unit
+        except (AttributeError, TypeError):
+            pass
+        if capability_source != "SESSION":
+            capability_source = "NEGOTIATED"
     expected_pages = None
     if total is not None and effective_page_unit > 0:
         expected_pages = max(
@@ -591,6 +636,7 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
     collection_deferred = bool(
         expected_pages is not None and expected_pages > MAX_COLLECTION_PAGES
     )
+    deferred_reason = "PAGE_BUDGET" if collection_deferred else ""
     seen_pages = set()
     if first_rows:
         seen_pages.add(tuple(str(x.get("pin_land", "")) for x in first_rows[:5]
@@ -601,6 +647,10 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
     while (not collection_deferred
            and total is not None
            and len(all_rows) < total):
+        if time.monotonic() - started_at >= MAX_COLLECTION_SECONDS:
+            collection_deferred = True
+            deferred_reason = "TIME_BUDGET"
+            break
         payload = dict(base_payload)
         payload["pageIndex"] = str(page_index)
         nxt, nxt_code = _post_search(active, payload, timeout)
@@ -609,6 +659,8 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
             return _collect_search(
                 address, buld_name=buld_name, session=fresh, timeout=timeout,
                 page_unit=page_unit, allow_session_retry=False,
+                _started_at=started_at,
+                _requested_page_unit=requested_page_unit,
             )
         if nxt is None or nxt_code != 200 or (isinstance(nxt, dict) and "_raw" in nxt):
             page_error = True
@@ -648,9 +700,13 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
         pages_fetched=pages,
         expected_pages=expected_pages,
         effective_page_unit=effective_page_unit,
+        requested_page_unit=requested_page_unit,
+        capability_source=capability_source,
         page_error=page_error,
         repeated_page=repeated_page,
         collection_deferred=collection_deferred,
+        deferred_reason=deferred_reason,
+        elapsed_seconds=time.monotonic() - started_at,
         session_retried=not allow_session_retry,
     ), active
 
@@ -687,6 +743,22 @@ def _direct_search(address, dong, ho, buld_name="", session=None, timeout=20.0):
     return candidates, 200, active, meta
 
 
+def _candidate_content_hash(candidates):
+    """후보 순서와 무관한 캐시 내용 해시."""
+    normalized = sorted(
+        (dict(candidate) for candidate in (candidates or [])),
+        key=lambda candidate: (
+            str(candidate.get("unique_no") or ""),
+            str(candidate.get("dong") or ""),
+            str(candidate.get("ho") or ""),
+        ),
+    )
+    payload = json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _attach_collection(result, all_candidates, meta, strategy):
     result.all_candidates = all_candidates or []
     result.complete = bool(meta.get("complete"))
@@ -699,11 +771,17 @@ def _attach_collection(result, all_candidates, meta, strategy):
     result.pages_fetched = int(meta.get("pages_fetched") or 0)
     result.expected_pages = meta.get("expected_pages")
     result.effective_page_unit = meta.get("effective_page_unit")
+    result.requested_page_unit = meta.get("requested_page_unit")
+    result.capability_source = meta.get("capability_source") or "REQUEST"
+    result.deferred_reason = meta.get("deferred_reason") or ""
+    result.elapsed_seconds = float(meta.get("elapsed_seconds") or 0.0)
+    result.schema_fingerprint = meta.get("schema_fingerprint") or ""
     result.query_scope = meta.get("query_scope") or "EXACT_LOT"
     result.strategy = strategy
     result.collector_version = meta.get("collector_version") or COLLECTOR_VERSION
     result.parser_version = PARSER_VERSION
     result.matcher_version = MATCHER_VERSION
+    result.content_hash = _candidate_content_hash(result.all_candidates)
     return result
 
 

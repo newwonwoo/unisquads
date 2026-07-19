@@ -2498,7 +2498,7 @@ function AddrRefineTestGui() {
       const pnuKey = pnuKeys[g];
       const members = groups.get(pnuKey);
       const first = members[0].row;
-      const collectorVersion = "iros-collector-v3";
+      const collectorVersion = "iros-collector-v4";
       const parserVersion = "iros-parser-v3";
       const cacheKey = `regcands:${collectorVersion}:${parserVersion}:${pnuKey}`;
       let collection = await idbGet(cacheKey);
@@ -2509,7 +2509,8 @@ function AddrRefineTestGui() {
       const cacheUsable = collection?.complete === true &&
         collection.query_scope === "EXACT_LOT" &&
         Number(collection.parse_error_count || 0) === 0 &&
-        cachedTotalCount !== null && cachedRawCount === cachedTotalCount;
+        cachedTotalCount !== null && cachedRawCount === cachedTotalCount &&
+        Boolean(collection.content_hash) && Boolean(collection.schema_fingerprint);
       if (!cacheUsable || !fresh || collection.parser_version !== parserVersion ||
           collection.collector_version !== collectorVersion) {
         const addr = first.result.jibunAddr || first.result.irosQuery || "";
@@ -2533,6 +2534,12 @@ function AddrRefineTestGui() {
             pages_fetched: data.pages_fetched,
             expected_pages: data.expected_pages,
             effective_page_unit: data.effective_page_unit,
+            requested_page_unit: data.requested_page_unit,
+            capability_source: data.capability_source,
+            deferred_reason: data.deferred_reason,
+            elapsed_seconds: data.elapsed_seconds,
+            schema_fingerprint: data.schema_fingerprint,
+            content_hash: data.content_hash,
             query_scope: data.query_scope || "EXACT_LOT",
             collector_version: data.collector_version || collectorVersion,
             parser_version: data.parser_version || parserVersion,
@@ -2545,7 +2552,8 @@ function AddrRefineTestGui() {
             Number(collection.raw_received_count || 0) === Number(collection.total_count);
           const cacheable = collection.complete && receivedExactly &&
             Number(collection.parse_error_count || 0) === 0 &&
-            collection.query_scope === "EXACT_LOT";
+            collection.query_scope === "EXACT_LOT" &&
+            Boolean(collection.content_hash) && Boolean(collection.schema_fingerprint);
           if (cacheable) await idbSet(cacheKey, collection);
         } catch {
           collection = {
@@ -2559,7 +2567,35 @@ function AddrRefineTestGui() {
       }
 
       for (const m of members) {
-        next[m.idx] = { ...next[m.idx], reg: matchCollection(m.row, collection) };
+        const wantDong = unitKey(m.row.result.unit?.dong, "dong");
+        const wantHo = unitKey(m.row.result.unit?.ho, "ho");
+        const strictEvidence = m.row.result.reviewNeeded
+          ? `${m.row.result.reviewNeeded}:${buildingKey(m.row.result.bdNm)}`
+          : "none";
+        const matchCacheKey = collection.content_hash
+          ? `regmatch:${collection.content_hash}:${MATCHER_VERSION}:${wantDong}:${wantHo}:${encodeURIComponent(strictEvidence)}`
+          : "";
+        let matchedResult = matchCacheKey ? await idbGet(matchCacheKey) : null;
+        if (!matchedResult) {
+          matchedResult = {
+            ...matchCollection(m.row, collection),
+            candidate_content_hash: collection.content_hash || "",
+            matcher_version: MATCHER_VERSION,
+            match_evidence: {
+              dong_key: wantDong,
+              ho_key: wantHo,
+              strict: strictEvidence
+            }
+          };
+          const matchCacheable = collection.complete === true &&
+            collection.query_scope === "EXACT_LOT" &&
+            Number(collection.parse_error_count || 0) === 0 &&
+            Boolean(collection.content_hash);
+          if (matchCacheKey && matchCacheable) {
+            await idbSet(matchCacheKey, matchedResult);
+          }
+        }
+        next[m.idx] = { ...next[m.idx], reg: { ...matchedResult } };
       }
       recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
       setBatchRegDone(g + 1);

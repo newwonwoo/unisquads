@@ -1,4 +1,4 @@
-export const MATCHER_VERSION = "iros-matcher-v3";
+export const MATCHER_VERSION = "iros-matcher-v4";
 
 export function unitKey(value, kind = "unit") {
   let v = String(value || "")

@@ -103,11 +103,13 @@ class CollectionSafetyTests(unittest.TestCase):
         self.original_post = iros._post_search
         self.original_collect = iros._collect_search
         self.original_direct = iros._direct_search
+        self.original_monotonic = iros.time.monotonic
 
     def tearDown(self):
         iros._post_search = self.original_post
         iros._collect_search = self.original_collect
         iros._direct_search = self.original_direct
+        iros.time.monotonic = self.original_monotonic
 
     def test_full_collection_uses_exact_count(self):
         def post(_session, _payload, _timeout):
@@ -161,6 +163,40 @@ class CollectionSafetyTests(unittest.TestCase):
         self.assertEqual([1000, 500], calls)
         self.assertTrue(meta["complete"])
         self.assertEqual(500, meta["effective_page_unit"])
+
+        _, _, second_meta, _ = iros._collect_search(
+            "서초구 서초동 968", session=session
+        )
+        self.assertEqual([1000, 500, 500], calls)
+        self.assertEqual("SESSION", second_meta["capability_source"])
+
+    def test_time_budget_defers_without_mixing_partial_pages(self):
+        ticks = iter([0.0, 46.0, 46.0])
+        iros.time.monotonic = lambda: next(ticks)
+
+        def post(_session, _payload, _timeout):
+            return {
+                "dataList": [{"pin_land": "1"}],
+                "paginationInfo": {"totalRecordCount": 2},
+            }, 200
+
+        iros._post_search = post
+        _, _, meta, _ = iros._collect_search(
+            "서초구 서초동 967", session=FakeSession()
+        )
+        self.assertFalse(meta["complete"])
+        self.assertTrue(meta["collection_deferred"])
+        self.assertEqual("TIME_BUDGET", meta["deferred_reason"])
+
+    def test_candidate_content_hash_is_order_independent(self):
+        candidates = [
+            {"unique_no": "2", "dong": "B", "ho": "2"},
+            {"unique_no": "1", "dong": "A", "ho": "1"},
+        ]
+        self.assertEqual(
+            iros._candidate_content_hash(candidates),
+            iros._candidate_content_hash(list(reversed(candidates))),
+        )
 
     def test_large_silently_capped_collection_is_deferred(self):
         calls = []

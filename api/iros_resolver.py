@@ -82,11 +82,17 @@ class ResolveResult:
     pages_fetched: int = 0
     expected_pages: Optional[int] = None
     effective_page_unit: Optional[int] = None
+    requested_page_unit: Optional[int] = None
+    capability_source: str = "REQUEST"
+    deferred_reason: str = ""
+    elapsed_seconds: float = 0.0
+    schema_fingerprint: str = ""
+    content_hash: str = ""
     query_scope: str = "EXACT_LOT"
     strategy: str = ""
-    collector_version: str = "iros-collector-v3"
+    collector_version: str = "iros-collector-v4"
     parser_version: str = "iros-parser-v3"
-    matcher_version: str = "iros-matcher-v3"
+    matcher_version: str = "iros-matcher-v4"
 
 
 def normalize_sido(address: str) -> Optional[str]:
