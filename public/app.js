@@ -1,6 +1,14 @@
 import {
+  IROS_MODULE_VERSIONS,
   MATCHER_VERSION,
+  alternateRawLotAddress,
+  buildingEvidenceKind,
+  buildingKey,
+  candidateHasNoDong,
+  candidateMatchesAddressLot,
+  candidateMatchesUnit,
   filterExpectedPropertyClass,
+  matchedCandidateUnitVariant,
   unitKey
 } from "./unit-match.mjs";
 import {
@@ -2701,9 +2709,15 @@ function AddrRefineTestGui() {
     const pnuKeys = [...groups.keys()];
     setBatchTotal(pnuKeys.length);
 
-    const buildingKey = (v) => String(v || "").replace(/[^0-9A-Za-z가-힣]/g, "").toLowerCase();
-    const matchCollection = (row, collection) => {
+    const matchCollection = (row, collection, queryAddress = "") => {
       const all = Array.isArray(collection.all_candidates) ? collection.all_candidates : [];
+      const appliedModules = [
+        `IROS-CANDIDATE-NORMALIZE@${IROS_MODULE_VERSIONS.IROS_CANDIDATE_NORMALIZE}`
+      ];
+      const applyModule = (name, version) => {
+        const tag = `${name}@${version}`;
+        if (!appliedModules.includes(tag)) appliedModules.push(tag);
+      };
       if (collection.status === "REG_SERVICE_UNAVAILABLE") {
         return {
           status: "REG_SERVICE_UNAVAILABLE",
@@ -2747,6 +2761,10 @@ function AddrRefineTestGui() {
       }
 
       let cands = all.filter((c) => !String(c.state || "").includes("폐쇄"));
+      const stageCounts = { all: all.length, current: cands.length };
+      const exactAddress = queryAddress || row.result.jibunAddr || row.result.irosQuery || "";
+      cands = cands.filter((c) => candidateMatchesAddressLot(c, exactAddress));
+      stageCounts.exact_lot = cands.length;
       const wantDong = unitKey(row.result.unit?.dong, "dong");
       const wantHo = unitKey(row.result.unit?.ho, "ho");
       if ((row.result.isJip || wantDong || wantHo) && cands.length) {
@@ -2756,40 +2774,92 @@ function AddrRefineTestGui() {
             status: "REG_VALIDATION_FAILED",
             candidates: all,
             complete: true,
+            failure_stage: "PROPERTY_CLASS",
+            stage_counts: stageCounts,
+            applied_modules: appliedModules,
             message: "동·호 입력과 IROS 부동산구분(집합건물) 불일치",
             at: nowText()
           };
         }
         cands = typed.candidates;
       }
+      stageCounts.property_class = cands.length;
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
-          const cd = unitKey(c.dong, "dong");
-          const ch = unitKey(c.ho, "ho");
-          return (!wantDong || cd === wantDong) && (!wantHo || ch === wantHo);
+          const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
+          if (variant?.source === "composite_dong_room_prefix") {
+            applyModule("IROS-CANDIDATE-NORMALIZE", IROS_MODULE_VERSIONS.IROS_CANDIDATE_NORMALIZE);
+          }
+          return Boolean(variant);
         });
         // 단일 동 건물: 후보 전체에 동이 없고 호는 있을 때 호로만 재매칭.
         if (!matched.length && wantDong && wantHo) {
-          const anyDong = cands.some((c) => unitKey(c.dong, "dong"));
+          const anyDong = cands.some((c) => !candidateHasNoDong(c));
           const anyHo = cands.some((c) => unitKey(c.ho, "ho"));
           if (!anyDong && anyHo)
-            matched = cands.filter((c) => unitKey(c.ho, "ho") === wantHo);
+            matched = cands.filter((c) => candidateMatchesUnit(c, "", wantHo));
+        }
+        // R-IROS-HO-BUILDING: 해당 후보의 동만 비어 있고 호·건물명이 정확히
+        // 맞는 한 건을 안전하게 선택한다.
+        if (!matched.length && wantDong && wantHo && row.result.bdNm) {
+          const wantedBuilding = buildingKey(row.result.bdNm);
+          const hoBuilding = cands.filter((c) =>
+            candidateHasNoDong(c) &&
+            candidateMatchesUnit(c, "", wantHo) &&
+            buildingKey(c.buldnm) === wantedBuilding
+          );
+          if (hoBuilding.length === 1) {
+            matched = hoBuilding;
+            applyModule("R-IROS-HO-BUILDING", IROS_MODULE_VERSIONS.R_IROS_HO_BUILDING);
+          }
         }
         cands = matched;
       }
+      stageCounts.unit = cands.length;
+
+      if (!cands.length) {
+        return {
+          status: (wantDong || wantHo) ? "REG_UNIT_NOT_FOUND" : "REG_NOT_FOUND",
+          candidates: all,
+          complete: true,
+          failure_stage: (wantDong || wantHo) ? "UNIT" : "CANDIDATE",
+          stage_counts: stageCounts,
+          applied_modules: appliedModules,
+          message: (wantDong || wantHo) ? "완전 후보에서 일치 세대 없음" : "완전 후보 없음",
+          at: nowText()
+        };
+      }
+
+      // R-IROS-BUILDING-DISAMBIG: 호만 같아 여러 건이면 정확한 건물명으로
+      // 한 건을 선택한다. 일치하지 않으면 기존 복수결과를 그대로 유지한다.
+      if (cands.length > 1 && row.result.bdNm) {
+        const wantedBuilding = buildingKey(row.result.bdNm);
+        const byBuilding = cands.filter((c) => buildingKey(c.buldnm) === wantedBuilding);
+        if (byBuilding.length === 1) {
+          cands = byBuilding;
+          applyModule("R-IROS-BUILDING-DISAMBIG", IROS_MODULE_VERSIONS.R_IROS_BUILDING_DISAMBIG);
+        }
+      }
+      stageCounts.building_disambiguation = cands.length;
 
       // 검토 플래그가 있으면 건물명까지 확인되어야 자동확정.
       if (row.result.reviewNeeded) {
-        const wantBuilding = buildingKey(row.result.bdNm);
         cands = cands.filter((c) => {
-          const got = buildingKey(c.buldnm);
-          return wantBuilding && got && (wantBuilding.includes(got) || got.includes(wantBuilding));
+          const evidence = buildingEvidenceKind(c.buldnm, row.result.bdNm, row.raw);
+          if (evidence === "raw_exact_name") {
+            applyModule("R-IROS-BUILDING-EVIDENCE", IROS_MODULE_VERSIONS.R_IROS_BUILDING_EVIDENCE);
+          }
+          return Boolean(evidence);
         });
+        stageCounts.strict_building = cands.length;
         if (!cands.length) {
           return {
             status: "REG_VALIDATION_FAILED",
             candidates: all,
             complete: true,
+            failure_stage: "STRICT_BUILDING",
+            stage_counts: stageCounts,
+            applied_modules: appliedModules,
             message: "검토대상 건물명 교차검증 실패",
             at: nowText()
           };
@@ -2805,6 +2875,8 @@ function AddrRefineTestGui() {
           total_count: collection.total_count,
           received_count: collection.received_count,
           strategy: "PNU_CACHE",
+          stage_counts: stageCounts,
+          applied_modules: appliedModules,
           message: "PNU 완전후보에서 동·호 일치",
           at: nowText()
         };
@@ -2812,26 +2884,45 @@ function AddrRefineTestGui() {
       if (cands.length > 1) {
         return {
           status: "REG_MULTI", candidates: cands, complete: true,
+          failure_stage: "UNIQUENESS", stage_counts: stageCounts,
+          applied_modules: appliedModules,
           message: `${cands.length}건`, at: nowText()
         };
       }
-      return {
-        status: (wantDong || wantHo) ? "REG_UNIT_NOT_FOUND" : "REG_NOT_FOUND",
-        candidates: all,
-        complete: true,
-        message: (wantDong || wantHo) ? "완전 후보에서 일치 세대 없음" : "완전 후보 없음",
-        at: nowText()
-      };
+      return { status: "REG_NOT_FOUND", candidates: all, complete: true,
+        failure_stage: "CANDIDATE", stage_counts: stageCounts,
+        applied_modules: appliedModules,
+        message: "완전 후보 없음", at: nowText() };
     };
 
-    for (let g = 0; g < pnuKeys.length; g++) {
-      if (batchStopRef.current) break;
-      const pnuKey = pnuKeys[g];
-      const members = groups.get(pnuKey);
-      const first = members[0].row;
-      const collectorVersion = "iros-collector-v4";
-      const parserVersion = "iros-parser-v3";
-      const cacheKey = `regcands:${collectorVersion}:${parserVersion}:${pnuKey}`;
+    const collectorVersion = "iros-collector-v4";
+    const parserVersion = "iros-parser-v4";
+    const collectionAudit = (collection) => ({
+      complete: collection.complete === true,
+      query_scope: collection.query_scope || "",
+      strategy: collection.strategy || "FULL_COLLECT",
+      total_count: collection.total_count,
+      received_count: collection.received_count,
+      raw_received_count: collection.raw_received_count ?? collection.received_count,
+      parsed_count: collection.parsed_count,
+      unique_candidate_count: collection.unique_candidate_count,
+      parse_error_count: collection.parse_error_count,
+      pages_fetched: collection.pages_fetched,
+      expected_pages: collection.expected_pages,
+      effective_page_unit: collection.effective_page_unit,
+      requested_page_unit: collection.requested_page_unit,
+      capability_source: collection.capability_source,
+      schema_fingerprint: collection.schema_fingerprint || "",
+      content_hash: collection.content_hash || "",
+      candidate_content_hash: collection.content_hash || "",
+      collector_version: collection.collector_version || collectorVersion,
+      parser_version: collection.parser_version || parserVersion,
+      matcher_version: MATCHER_VERSION,
+      fetched_at: collection.fetched_at || ""
+    });
+
+    const loadCollection = async (identity, first, addressOverride = "") => {
+      const cacheKey = `regcands:${collectorVersion}:${parserVersion}:${identity}`;
       let collection = await idbGet(cacheKey);
       const fresh = collection?.fetched_at &&
         Date.now() - new Date(collection.fetched_at).getTime() < 24 * 60 * 60 * 1000;
@@ -2844,7 +2935,7 @@ function AddrRefineTestGui() {
         Boolean(collection.content_hash) && Boolean(collection.schema_fingerprint);
       if (!cacheUsable || !fresh || collection.parser_version !== parserVersion ||
           collection.collector_version !== collectorVersion) {
-        const addr = first.result.jibunAddr || first.result.irosQuery || "";
+        const addr = addressOverride || first.result.jibunAddr || first.result.irosQuery || "";
         const b = first.result.bdNm ? `&bdnm=${encodeURIComponent(first.result.bdNm)}` : "";
         try {
           const response = await fetch(
@@ -2896,60 +2987,63 @@ function AddrRefineTestGui() {
           };
         }
       }
+      return collection;
+    };
 
-      for (const m of members) {
-        const wantDong = unitKey(m.row.result.unit?.dong, "dong");
-        const wantHo = unitKey(m.row.result.unit?.ho, "ho");
-        const strictEvidence = m.row.result.reviewNeeded
-          ? `${m.row.result.reviewNeeded}:${buildingKey(m.row.result.bdNm)}`
-          : "none";
-        const matchCacheKey = collection.content_hash
-          ? `regmatch:${collection.content_hash}:${MATCHER_VERSION}:${wantDong}:${wantHo}:${encodeURIComponent(strictEvidence)}`
-          : "";
-        let matchedResult = matchCacheKey ? await idbGet(matchCacheKey) : null;
-        if (!matchedResult) {
-          matchedResult = {
-            ...matchCollection(m.row, collection),
-            candidate_content_hash: collection.content_hash || "",
-            matcher_version: MATCHER_VERSION,
-            match_evidence: {
-              dong_key: wantDong,
-              ho_key: wantHo,
-              strict: strictEvidence
-            }
-          };
-          const matchCacheable = collection.complete === true &&
-            collection.query_scope === "EXACT_LOT" &&
-            Number(collection.parse_error_count || 0) === 0 &&
-            Boolean(collection.content_hash);
-          if (matchCacheKey && matchCacheable) {
-            await idbSet(matchCacheKey, matchedResult);
+    const matchMember = async (member, collection, queryAddress = "") => {
+      const wantDong = unitKey(member.row.result.unit?.dong, "dong");
+      const wantHo = unitKey(member.row.result.unit?.ho, "ho");
+      const strictEvidence = member.row.result.reviewNeeded
+        ? `${member.row.result.reviewNeeded}:${buildingKey(member.row.result.bdNm)}:${buildingKey(member.row.raw)}`
+        : "none";
+      const lotEvidence = encodeURIComponent(
+        String(queryAddress || member.row.result.jibunAddr || member.row.result.irosQuery || "")
+      );
+      const matchCacheKey = collection.content_hash
+        ? `regmatch:${collection.content_hash}:${MATCHER_VERSION}:${lotEvidence}:${wantDong}:${wantHo}:${encodeURIComponent(strictEvidence)}`
+        : "";
+      let matchedResult = matchCacheKey ? await idbGet(matchCacheKey) : null;
+      if (!matchedResult) {
+        matchedResult = {
+          ...matchCollection(member.row, collection, queryAddress),
+          candidate_content_hash: collection.content_hash || "",
+          matcher_version: MATCHER_VERSION,
+          match_evidence: {
+            dong_key: wantDong,
+            ho_key: wantHo,
+            lot_key: lotEvidence,
+            strict: strictEvidence
+          }
+        };
+        const matchCacheable = collection.complete === true &&
+          collection.query_scope === "EXACT_LOT" &&
+          Number(collection.parse_error_count || 0) === 0 &&
+          Boolean(collection.content_hash);
+        if (matchCacheKey && matchCacheable) {
+          await idbSet(matchCacheKey, matchedResult);
+        }
+      }
+      return { ...matchedResult, ...collectionAudit(collection) };
+    };
+
+    const alternateGroups = /* @__PURE__ */ new Map();
+    for (let g = 0; g < pnuKeys.length; g++) {
+      if (batchStopRef.current) break;
+      const pnuKey = pnuKeys[g];
+      const members = groups.get(pnuKey);
+      const collection = await loadCollection(pnuKey, members[0].row);
+
+      for (const member of members) {
+        const reg = await matchMember(member, collection);
+        next[member.idx] = { ...next[member.idx], reg };
+        if (reg.status === "REG_UNIT_NOT_FOUND") {
+          const normalizedAddress = member.row.result.jibunAddr || member.row.result.irosQuery || "";
+          const alternateAddress = alternateRawLotAddress(member.row.raw, normalizedAddress);
+          if (alternateAddress) {
+            if (!alternateGroups.has(alternateAddress)) alternateGroups.set(alternateAddress, []);
+            alternateGroups.get(alternateAddress).push(member);
           }
         }
-        const collectionAudit = {
-          complete: collection.complete === true,
-          query_scope: collection.query_scope || "",
-          strategy: collection.strategy || "FULL_COLLECT",
-          total_count: collection.total_count,
-          received_count: collection.received_count,
-          raw_received_count: collection.raw_received_count ?? collection.received_count,
-          parsed_count: collection.parsed_count,
-          unique_candidate_count: collection.unique_candidate_count,
-          parse_error_count: collection.parse_error_count,
-          pages_fetched: collection.pages_fetched,
-          expected_pages: collection.expected_pages,
-          effective_page_unit: collection.effective_page_unit,
-          requested_page_unit: collection.requested_page_unit,
-          capability_source: collection.capability_source,
-          schema_fingerprint: collection.schema_fingerprint || "",
-          content_hash: collection.content_hash || "",
-          candidate_content_hash: collection.content_hash || "",
-          collector_version: collection.collector_version || collectorVersion,
-          parser_version: collection.parser_version || parserVersion,
-          matcher_version: MATCHER_VERSION,
-          fetched_at: collection.fetched_at || ""
-        };
-        next[m.idx] = { ...next[m.idx], reg: { ...matchedResult, ...collectionAudit } };
       }
       recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
       setBatchRegDone(g + 1);
@@ -2958,6 +3052,43 @@ function AddrRefineTestGui() {
         await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
       }
       if (g < pnuKeys.length - 1 && !batchStopRef.current)
+        await new Promise((res) => setTimeout(res, 1e3));
+    }
+
+    const alternateEntries = [...alternateGroups.entries()];
+    setBatchTotal(pnuKeys.length + alternateEntries.length);
+    for (let a = 0; a < alternateEntries.length; a++) {
+      if (batchStopRef.current) break;
+      const [alternateAddress, members] = alternateEntries[a];
+      const identity = `ALTLOT:${alternateAddress}`;
+      const collection = await loadCollection(identity, members[0].row, alternateAddress);
+      for (const member of members) {
+        const recovered = await matchMember(member, collection, alternateAddress);
+        if (recovered.status === "RESOLVED" || recovered.status === "REG_MULTI") {
+          const moduleTag = `R-IROS-MULTILOT@${IROS_MODULE_VERSIONS.R_IROS_MULTILOT}`;
+          const appliedModules = [...(recovered.applied_modules || [])];
+          if (!appliedModules.includes(moduleTag)) appliedModules.push(moduleTag);
+          next[member.idx] = {
+            ...next[member.idx],
+            reg: {
+              ...recovered,
+              applied_modules: appliedModules,
+              recovery_module: moduleTag,
+              recovery_address: alternateAddress,
+              message: recovered.status === "RESOLVED"
+                ? "원문 대체지번 완전후보에서 동·호 일치"
+                : recovered.message
+            }
+          };
+        }
+      }
+      recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
+      setBatchRegDone(pnuKeys.length + a + 1);
+      if (a % 10 === 0) {
+        setRows([...next]);
+        await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
+      }
+      if (a < alternateEntries.length - 1 && !batchStopRef.current)
         await new Promise((res) => setTimeout(res, 1e3));
     }
 

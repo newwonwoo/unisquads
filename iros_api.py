@@ -59,8 +59,8 @@ PAGE_UNIT_FALLBACKS = (1000, 500, 100, 10)
 MAX_COLLECTION_PAGES = 100
 MAX_COLLECTION_SECONDS = 45.0
 COLLECTOR_VERSION = "iros-collector-v4"
-PARSER_VERSION = "iros-parser-v3"
-MATCHER_VERSION = "iros-matcher-v4"
+PARSER_VERSION = "iros-parser-v4"
+MATCHER_VERSION = "iros-matcher-v5"
 
 import re as _re_html
 _TAG_RE = _re_html.compile(r"<[^>]+>")
@@ -241,12 +241,26 @@ def _extract_unit_from_text(rec: dict):
     '숫자+호'를 뽑는다. '반포동' 같은 법정동은 앞이 숫자가 아니므로 매칭되지
     않고, '제1층'의 층도 대상이 아니라 안전하다.
     """
-    blob = " ".join(str(v) for v in rec.values() if isinstance(v, (str, int)))
-    blob = _strip_html(blob)
-    flat = re.sub(r"\s+", "", blob)          # "제 1 0 1 동" → "제101동"
-    d = _UNIT_DONG_NUM_RE.search(flat) or _UNIT_DONG_ALPHA_RE.search(flat)
-    h = _UNIT_HO_RE.search(flat)
-    return (d.group(1) if d else ""), (h.group(1) if h else "")
+    # 필드들을 합친 뒤 공백을 제거하면 한 필드의 말미 숫자와 다음 필드의
+    # 법정동이 붙어 가짜 건물동이 생긴다(예: 324 + 동교동 → 324동).
+    # 실제 표시문구 필드 안에서만 공백을 제거하여 교차필드 오염을 막는다.
+    text_keys = (
+        "rd_addr_detail", "real_indi_cont_detail", "real_indi_cont",
+        "addr_detail", "detail", "sojae", "addItem",
+    )
+    dong = ho = ""
+    for key in text_keys:
+        value = rec.get(key)
+        if value in (None, ""):
+            continue
+        flat = re.sub(r"\s+", "", _strip_html(str(value)))
+        d = _UNIT_DONG_NUM_RE.search(flat) or _UNIT_DONG_ALPHA_RE.search(flat)
+        h = _UNIT_HO_RE.search(flat)
+        dong = dong or (d.group(1) if d else "")
+        ho = ho or (h.group(1) if h else "")
+        if dong and ho:
+            break
+    return dong, ho
 
 
 def _rec_to_cand(rec: dict) -> Optional[dict]:
@@ -413,7 +427,22 @@ def _match_lot(c, want_dong, want_beonji):
     """후보 지번이 정제 지번과 일치하는지. addItem/sojae/lot_no로 대조. 본번 비교."""
     if not want_beonji:
         return True
-    hay = f"{c.get('add_item','')} {c.get('sojae','')} {c.get('lot_no','')}"
+    for value in (c.get("add_item"), c.get("sojae")):
+        match = re.search(
+            r"([0-9A-Za-z가-힣]+(?:동\d*가|동|가|리))\s*(?:산\s*)?(\d+(?:-\d+)?)",
+            str(value or ""),
+        )
+        if match:
+            if want_dong and match.group(1) != want_dong:
+                return False
+            return match.group(2) == want_beonji
+    candidate_lot = str(c.get("lot_no") or "").strip()
+    if candidate_lot:
+        return candidate_lot == want_beonji
+    hay = f"{c.get('add_item','')} {c.get('sojae','')}"
+    wanted = re.escape(want_beonji)
+    if re.search(rf"(?<!\d){wanted}(?![-\d])", hay):
+        return True
     want_main = want_beonji.split("-")[0]
     nums = re.findall(r"\d+", hay)
     if want_dong and want_dong in hay:
@@ -429,6 +458,8 @@ def _unit_key(value, kind="unit"):
     raw = re.sub(r"(동|호)$", "", raw)
     if not raw:
         return ""
+    if kind == "dong" and re.fullmatch(r"0+", raw):
+        return ""
     if kind == "dong" and re.fullmatch(r"[A-Za-z]", raw):
         return raw.upper()
     if kind == "dong" and re.fullmatch(r"[가-힣]", raw):
@@ -442,16 +473,59 @@ def _unit_key(value, kind="unit"):
     return raw.upper()
 
 
+_DONG_ALIASES = {
+    "A": "A", "에이": "A",
+    "B": "B", "비": "B",
+}
+
+
+def _dong_alias_key(value):
+    key = _unit_key(value, "dong")
+    return _DONG_ALIASES.get(key, key)
+
+
+def _candidate_unit_variants(candidate):
+    raw_dong = str(candidate.get("dong") or "").strip()
+    raw_ho = str(candidate.get("ho") or "").strip()
+    variants = [{
+        "dong": _dong_alias_key(raw_dong),
+        "ho": _unit_key(raw_ho, "ho"),
+        "source": "direct",
+    }]
+    room = re.fullmatch(r"([A-Za-z가-힣]+)-(\d+(?:-\d+)*)", raw_ho)
+    tokens = [
+        _dong_alias_key(token)
+        for token in re.split(r"[,/·]+", raw_dong)
+        if _dong_alias_key(token)
+    ]
+    if room:
+        prefixed_dong = _dong_alias_key(room.group(1))
+        if prefixed_dong and prefixed_dong in tokens:
+            variants.insert(0, {
+                "dong": prefixed_dong,
+                "ho": _unit_key(room.group(2), "ho"),
+                "source": "composite_dong_room_prefix",
+            })
+    unique = []
+    for variant in variants:
+        if not any((v["dong"], v["ho"]) == (variant["dong"], variant["ho"])
+                   for v in unique):
+            unique.append(variant)
+    return unique
+
+
 def _match_unit(c, dong, ho):
-    cd = _unit_key(c.get("dong", ""), "dong")
-    ch = _unit_key(c.get("ho", ""), "ho")
-    want_d = _unit_key(dong, "dong")
+    want_d = _dong_alias_key(dong)
     want_h = _unit_key(ho, "ho")
-    if want_d and cd != want_d:
-        return False
-    if want_h and ch != want_h:
-        return False
-    return True
+    return any(
+        (not want_d or variant["dong"] == want_d)
+        and (not want_h or variant["ho"] == want_h)
+        for variant in _candidate_unit_variants(c)
+    )
+
+
+def _candidate_has_no_dong(candidate):
+    return all(not variant["dong"] for variant in _candidate_unit_variants(candidate))
 
 
 def _property_class_key(candidate):
@@ -970,6 +1044,20 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
                     filtered = [c for c in cands if _match_unit(c, "", ho)]
                     if filtered:
                         unit_note = "단일 동 건물 — 호로 특정"
+            # R-IROS-HO-BUILDING: 후보별 동이 비어 있어도 호와 건물명이
+            # 정확히 맞는 후보가 하나면 안전하게 특정한다. 일부 다른 후보에
+            # 동 값이 있다는 이유로 기존 전체단위 폴백이 막히던 문제를 보완한다.
+            if not filtered and dong and ho and buld_name:
+                bk = _building_key(buld_name)
+                ho_building = [
+                    c for c in cands
+                    if _candidate_has_no_dong(c)
+                    and _match_unit(c, "", ho)
+                    and _building_key(c.get("buldnm")) == bk
+                ]
+                if len(ho_building) == 1:
+                    filtered = ho_building
+                    unit_note = "동 미기재 후보 — 호·건물명으로 특정"
             if not filtered:
                 want = " ".join(filter(None, [
                     f"{dong}동" if dong else "", f"{ho}호" if ho else ""
@@ -983,6 +1071,17 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
             cands = filtered
         else:
             unit_note = "후보에 동·호 정보 없음"
+
+    # R-IROS-BUILDING-DISAMBIG: 호만으로 여러 건이 남으면 정확한 건물명으로
+    # 한 건을 고른다. 검토 플래그가 없는 일반 건도 복수결과로 남기지 않는다.
+    if len(cands) > 1 and buld_name:
+        bk = _building_key(buld_name)
+        building_cands = [
+            c for c in cands if _building_key(c.get("buldnm")) == bk
+        ]
+        if len(building_cands) == 1:
+            cands = building_cands
+            unit_note = f"{unit_note} 건물명으로 특정".strip()
 
     if strict and buld_name:
         bk = _building_key(buld_name)

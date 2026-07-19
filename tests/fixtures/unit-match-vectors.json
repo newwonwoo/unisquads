@@ -4,6 +4,7 @@
   {"a": "가동", "b": "가", "kind": "dong", "equal": true},
   {"a": "204-1호", "b": "0204-01", "kind": "ho", "equal": true},
   {"a": "B0102호", "b": "b0102", "kind": "ho", "equal": true},
+  {"a": "00동", "b": "", "kind": "dong", "equal": true},
   {"a": "9907호", "b": "907", "kind": "ho", "equal": false},
   {"a": "101동", "b": "102", "kind": "dong", "equal": false},
   {"a": "  제 0101 동 ", "b": "101", "kind": "dong", "equal": true}

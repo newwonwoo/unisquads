@@ -85,6 +85,34 @@ class UnitContractTests(unittest.TestCase):
         )
         self.assertEqual("", dong)
 
+    def test_detail_fallback_never_joins_fields_into_a_fake_dong(self):
+        dong, ho = iros._extract_unit_from_text({
+            "real_indi_cont": "서울특별시 마포구 동교동 155-27",
+            "buld_no_room": "324",
+            "rd_addr_detail": "서울특별시 마포구 동교동 155-27 제324호",
+        })
+        self.assertEqual("", dong)
+        self.assertEqual("324", ho)
+
+    def test_composite_dong_room_prefix_and_zero_dong(self):
+        candidate = {"dong": "에이,비,상가", "ho": "비-0102"}
+        self.assertTrue(iros._match_unit(candidate, "B", "102"))
+        self.assertFalse(iros._match_unit(candidate, "A", "102"))
+        self.assertEqual("", iros._unit_key("00동", "dong"))
+        self.assertTrue(iros._match_unit({"dong": "", "ho": "324"}, "00", "324"))
+
+    def test_exact_lot_does_not_match_a_sub_lot(self):
+        self.assertFalse(iros._match_lot({"lot_no": "85-2"}, "동림동", "85"))
+        self.assertTrue(iros._match_lot({"lot_no": "85"}, "동림동", "85"))
+        self.assertFalse(iros._match_lot(
+            {"lot_no": "85", "add_item": "동림동 85-2 외 1필지"},
+            "동림동", "85",
+        ))
+        self.assertTrue(iros._match_lot(
+            {"lot_no": "85", "add_item": "동림동 85-2 외 1필지"},
+            "동림동", "85-2",
+        ))
+
     def test_property_class_gate(self):
         candidates = [
             {"gubun": "토지"},
@@ -362,6 +390,84 @@ class CollectionSafetyTests(unittest.TestCase):
         shuffled = run([1, 0])
         self.assertEqual(first, repeated)
         self.assertEqual(first, shuffled)
+
+    def test_missing_candidate_dong_can_resolve_by_exact_room_and_building(self):
+        data = {
+            "dataList": [
+                {
+                    "pin_land": "254320060052140000",
+                    "real_cls_cd": "집합건물",
+                    "buld_name": "푸른터",
+                    "buld_no_room": "107",
+                    "lot_no": "957",
+                    "use_cls_cd": "현행",
+                },
+                {
+                    "pin_land": "254320060052150000",
+                    "real_cls_cd": "집합건물",
+                    "buld_name": "다른건물",
+                    "buld_no_buld": "2",
+                    "buld_no_room": "107",
+                    "lot_no": "957",
+                    "use_cls_cd": "현행",
+                },
+            ],
+            "paginationInfo": {"totalRecordCount": 2},
+        }
+
+        def collect(*_args, **_kwargs):
+            return data, 200, complete_meta(2), FakeSession()
+
+        iros._collect_search = collect
+        result = iros.resolve_one_api(
+            "서울특별시 금천구 독산동 957",
+            dong="1",
+            ho="107",
+            buld_name="푸른터",
+            strategy="full",
+            session=FakeSession(),
+        )
+        self.assertEqual("RESOLVED", result.status)
+        self.assertEqual("2543-2006-005214", result.unique_no)
+
+    def test_multiple_same_room_candidates_use_exact_building_name(self):
+        data = {
+            "dataList": [
+                {
+                    "pin_land": "195419961320730000",
+                    "real_cls_cd": "집합건물",
+                    "buld_name": "동림동삼보아파트",
+                    "buld_no_buld": "6",
+                    "buld_no_room": "101",
+                    "lot_no": "85",
+                    "use_cls_cd": "현행",
+                },
+                {
+                    "pin_land": "195419961302830000",
+                    "real_cls_cd": "집합건물",
+                    "buld_name": "동림빌리지",
+                    "buld_no_buld": "가",
+                    "buld_no_room": "101",
+                    "lot_no": "85",
+                    "use_cls_cd": "현행",
+                },
+            ],
+            "paginationInfo": {"totalRecordCount": 2},
+        }
+
+        def collect(*_args, **_kwargs):
+            return data, 200, complete_meta(2), FakeSession()
+
+        iros._collect_search = collect
+        result = iros.resolve_one_api(
+            "광주광역시 북구 동림동 85",
+            ho="101",
+            buld_name="동림동삼보아파트",
+            strategy="full",
+            session=FakeSession(),
+        )
+        self.assertEqual("RESOLVED", result.status)
+        self.assertEqual("1954-1996-132073", result.unique_no)
 
     def test_deferred_collection_is_not_reported_as_not_found(self):
         def collect(*_args, **_kwargs):
