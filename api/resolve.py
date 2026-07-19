@@ -7,6 +7,7 @@ GET /api/resolve?addr=서초구 서초동 967
 iros_api.py(requests 기반)를 사용. Playwright 불필요 → 서버리스 호환.
 """
 import json
+import re
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -21,6 +22,66 @@ except Exception as e:  # import 실패 원인을 응답에 노출(디버깅용)
     resolve_one_api = None
     debug_raw_records = None
     _ERR = f"{type(e).__name__}: {e}"
+
+
+def _compact_unit(value):
+    raw = re.sub(r"\s+", "", str(value or "")).removeprefix("제")
+    return re.sub(r"(?:동|호)$", "", raw).casefold()
+
+
+def _compact_candidate(candidate):
+    return {
+        key: candidate.get(key)
+        for key in (
+            "unique_no", "gubun", "state", "buldnm", "dong", "ho",
+            "lot_no", "add_item", "unit_source",
+        )
+        if candidate.get(key) not in (None, "")
+    }
+
+
+def _compact_result(result, dong="", ho="", sample_limit=3):
+    """수동 진단에 필요한 최소 정보만 반환한다.
+
+    전체 후보나 IROS 원문은 절대 포함하지 않고, 입력 동·호와 가까운 후보를
+    최대 세 건만 남긴다. compact=1은 운영 판정 로직을 바꾸지 않는다.
+    """
+    candidates = list(result.candidates or [])
+    want_dong = _compact_unit(dong)
+    want_ho = _compact_unit(ho)
+    aliases = {
+        "a": ("a", "에이"), "에이": ("a", "에이"),
+        "b": ("b", "비"), "비": ("b", "비"),
+    }
+    dong_terms = aliases.get(want_dong, (want_dong,)) if want_dong else ()
+
+    ranked = []
+    for index, candidate in enumerate(candidates):
+        got_dong = _compact_unit(candidate.get("dong"))
+        got_ho = _compact_unit(candidate.get("ho"))
+        score = 0
+        if want_ho and (got_ho == want_ho or got_ho.endswith(f"-{want_ho}")):
+            score += 4
+        if dong_terms and any(term and (term in got_dong or got_ho.startswith(f"{term}-"))
+                              for term in dong_terms):
+            score += 2
+        ranked.append((-score, index, candidate))
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    samples = [
+        _compact_candidate(candidate)
+        for _, _, candidate in ranked[:sample_limit]
+    ]
+    return {
+        "status": result.status,
+        "unique_no": result.unique_no,
+        "message": result.message,
+        "complete": result.complete,
+        "total_count": result.total_count,
+        "candidate_count": len(candidates),
+        "query_scope": result.query_scope,
+        "strategy": result.strategy,
+        "near_candidates": samples,
+    }
 
 
 class handler(BaseHTTPRequestHandler):
@@ -51,12 +112,23 @@ class handler(BaseHTTPRequestHandler):
         bdnm = (qs.get("bdnm", [""])[0]).strip()
         strategy = (qs.get("strategy", ["auto"])[0]).strip()
         strict = (qs.get("strict", ["0"])[0]).strip() == "1"
+        compact = (qs.get("compact", ["0"])[0]).strip() == "1"
         try:
             page_unit = max(1, min(10000, int(qs.get("page_unit", ["10"])[0])))
         except ValueError:
             page_unit = 10
         if not addr:
             return self._send(400, {"status": "ERROR", "message": "addr 파라미터 필요"})
+        if compact:
+            try:
+                r = resolve_one_api(
+                    addr, dong=dong, ho=ho, buld_name=bdnm,
+                    strategy=strategy, strict=strict,
+                )
+                return self._send(200, _compact_result(r, dong=dong, ho=ho))
+            except Exception as e:
+                return self._send(200, {"status": "ERROR",
+                                        "message": f"{type(e).__name__}: {e}"})
         # 진단 모드: IROS 원본 레코드를 그대로 반환 — 파서가 어떤 필드를 보고
         # 있는지 '추측 없이' 확인하기 위한 용도. (예: /api/resolve?addr=...&debug=1)
         if qs.get("debug", [""])[0] == "1":
