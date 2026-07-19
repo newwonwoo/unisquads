@@ -35,6 +35,15 @@ jobs:
             exit 0
           fi
           sed -i 's/re.subn(pattern, replacement, text, count=1, flags=flags)/re.subn(pattern, lambda _match: replacement, text, count=1, flags=flags)/' tools/apply_iros_hardening.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tools/apply_iros_hardening.py")
+          source = path.read_text(encoding="utf-8")
+          source = source.replace('"전체 다운로드"', r'"\\uC804\\uCCB4 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
+          source = source.replace('"중복제거 다운로드"', r'"\\uC911\\uBCF5\\uC81C\\uAC70 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
+          source = source.replace('"실패건 다운로드"', r'"\\uC2E4\\uD328\\uAC74 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
+          path.write_text(source, encoding="utf-8")
+          PY
           set +e
           python tools/apply_iros_hardening.py > /tmp/iros-patch.log 2>&1
           status=$?
