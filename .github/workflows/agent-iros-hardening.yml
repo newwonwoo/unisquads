@@ -42,6 +42,7 @@ jobs:
           source = source.replace('"전체 다운로드"', r'"\\uC804\\uCCB4 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
           source = source.replace('"중복제거 다운로드"', r'"\\uC911\\uBCF5\\uC81C\\uAC70 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
           source = source.replace('"실패건 다운로드"', r'"\\uC2E4\\uD328\\uAC74 \\uB2E4\\uC6B4\\uB85C\\uB4DC"')
+          source = source.replace('  ), (regStat.done > 0) &&', '  )), (regStat.done > 0) &&')
           path.write_text(source, encoding="utf-8")
           PY
           set +e
