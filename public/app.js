@@ -22,6 +22,23 @@ import {
   findOldAdminTokens,
   modernizeKnownAdminTokens
 } from "./admin-successor.mjs";
+import {
+  IROS_RUN_VERSIONS,
+  buildIrosSnapshot,
+  irosProgressStats,
+  isCurrentIrosResult,
+  isIrosExportFinal,
+  isRetryableIrosStatus,
+  isReusableIrosResult,
+  markStaleIrosRows,
+  withIrosVersions
+} from "./iros-run-contract.mjs";
+import {
+  applyWorksheetLayout,
+  buildVerifiedWorkbookArray,
+  downloadWorkbookArray,
+  recordsForMode
+} from "./xlsx-integrity.mjs";
 
 if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
 const { useState, useEffect, useCallback, useRef } = React;
@@ -2534,7 +2551,16 @@ function AddrRefineTestGui() {
         const refined = savedRows.filter((r) => r.result).length;
         const looked = savedRows.filter((r) => r.reg).length;
         if (refined > 0 || looked > 0) {
-          setSavedProgress({ count: savedRows.length, refined, looked });
+          const iros = irosProgressStats(markStaleIrosRows(savedRows));
+          setSavedProgress({
+            count: savedRows.length,
+            refined,
+            looked,
+            stale: iros.stale,
+            retryable: iros.retryable,
+            pendingRecovery: iros.pendingRecovery,
+            irosVersions: saved?.irosVersions || null
+          });
         }
       }
     })();
@@ -2543,13 +2569,27 @@ function AddrRefineTestGui() {
     const saved = await idbGet(BATCH_KEY);
     const savedRows = Array.isArray(saved) ? saved : saved?.rows;
     if (savedRows) {
-      setRows(savedRows);
-      // extraHeaders(부동산번호 등 원본 컬럼명)도 함께 복원 — 이게 없으면
-      // 재개 후 엑셀 출력에서 헤더와 데이터 열이 어긋난다(2026-07-13 버그 수정)
+      const resumedRows = markStaleIrosRows(savedRows);
+      setRows(resumedRows);
+      // extraHeaders(부동산번호 등 원본 컬럼명)도 함께 복원.
       if (!Array.isArray(saved) && Array.isArray(saved.extraHeaders)) {
         setExtraHeaders(saved.extraHeaders);
       }
-      setBatchDone(savedRows.filter((r) => r.result).length);
+      setBatchDone(resumedRows.filter((r) => r.result).length);
+      const progress = irosProgressStats(resumedRows);
+      setBatchRegDone(progress.done);
+      setBatchTotal(progress.total);
+      setBatchUnitDone(progress.done);
+      setBatchUnitTotal(progress.total);
+      if (!Array.isArray(saved) && saved.irosRun) {
+        setBatchBaseDone(saved.irosRun.baseDone || 0);
+        setBatchBaseTotal(saved.irosRun.baseTotal || 0);
+        setBatchAltDone(saved.irosRun.alternateDone || 0);
+        setBatchAltTotal(saved.irosRun.alternateTotal || 0);
+      }
+      if (progress.stale > 0) {
+        setFileErr(`구버전 IROS 결과 ${progress.stale}건 — 현재 매처로 재검증해야 최종 다운로드가 가능합니다.`);
+      }
       setTab("batch");
     }
     setSavedProgress(null);
@@ -2595,6 +2635,13 @@ function AddrRefineTestGui() {
   const [batchRegBusy, setBatchRegBusy] = useState(false);
   const [batchRegDone, setBatchRegDone] = useState(0);
   const [batchTotal, setBatchTotal] = useState(0);
+  const [batchBaseDone, setBatchBaseDone] = useState(0);
+  const [batchBaseTotal, setBatchBaseTotal] = useState(0);
+  const [batchAltDone, setBatchAltDone] = useState(0);
+  const [batchAltTotal, setBatchAltTotal] = useState(0);
+  const [batchUnitDone, setBatchUnitDone] = useState(0);
+  const [batchUnitTotal, setBatchUnitTotal] = useState(0);
+  const [irosRunMessage, setIrosRunMessage] = useState("");
   const [savedProgress, setSavedProgress] = useState(null);
   const [irosHealth, setIrosHealth] = useState({ bad: 0, total: 0, lastCode: "" });
   const recordRegHealth = useCallback((status) => {
@@ -2663,42 +2710,97 @@ function AddrRefineTestGui() {
   const [batchStop, setBatchStop] = useState(false);
   const batchStopRef = useRef(false);
   const lookupBatchUniqueNo = useCallback(async () => {
-    const next = rows.map((row) => ({
+    const next = markStaleIrosRows(rows).map((row) => ({
       ...row,
       result: row.result ? cloneResult(row.result) : null,
       reg: row.reg ? cloneResult(row.reg) : row.reg
     }));
     const targets = [];
+    const pendingAlternateGroups = new Map();
     const nowText = () => new Date().toISOString().slice(0, 19).replace("T", " ");
+    const addPendingAlternate = (address, member) => {
+      if (!address) return;
+      if (!pendingAlternateGroups.has(address)) pendingAlternateGroups.set(address, []);
+      const members = pendingAlternateGroups.get(address);
+      if (!members.some((item) => item.idx === member.idx)) members.push(member);
+    };
 
     // 집합건물인데 호가 없으면 IROS 실패로 보내지 않고 입력보완 대상으로 분리.
+    // 현재 실행계약으로 완료된 결과는 즉시 건너뛰고, 구버전·부분응답·서비스오류만 재처리한다.
     for (let idx = 0; idx < next.length; idx++) {
       const row = next[idx];
       if (row.result?.status !== "CONFIRMED") continue;
       if (row.result.isJip && !row.result.unit?.ho) {
         next[idx] = {
           ...row,
-          reg: {
+          reg: withIrosVersions({
             status: "UNIT_INPUT_REQUIRED",
             message: "집합건물 등기 조회에는 호 입력이 필요합니다.",
             at: nowText()
-          }
+          })
         };
+        continue;
+      }
+      if (isReusableIrosResult(row.reg)) continue;
+      if (isCurrentIrosResult(row.reg) && row.reg?.recovery_pending && row.reg?.recovery_address) {
+        addPendingAlternate(row.reg.recovery_address, { idx, row });
         continue;
       }
       targets.push({ idx, row });
     }
-    if (targets.length === 0) {
+    const initialIrosProgress = irosProgressStats(next);
+    setBatchUnitTotal(initialIrosProgress.total);
+    setBatchUnitDone(initialIrosProgress.done);
+    setBatchTotal(initialIrosProgress.total);
+    setBatchRegDone(initialIrosProgress.done);
+    if (targets.length === 0 && pendingAlternateGroups.size === 0) {
       setRows([...next]);
-      await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
+      await idbSet(BATCH_KEY, buildIrosSnapshot(next, extraHeaders, {
+        phase: "complete",
+        baseDone: 0,
+        baseTotal: 0,
+        alternateDone: 0,
+        alternateTotal: 0,
+        unitDone: initialIrosProgress.done,
+        unitTotal: initialIrosProgress.total,
+        interrupted: false
+      }));
       return;
     }
 
     setBatchRegBusy(true);
-    setBatchRegDone(0);
     setBatchStop(false);
     batchStopRef.current = false;
+    setBatchBaseDone(0);
+    setBatchBaseTotal(0);
+    setBatchAltDone(0);
+    setBatchAltTotal(0);
+    setIrosRunMessage("");
+    const runState = {
+      phase: "prepare",
+      baseDone: 0,
+      baseTotal: 0,
+      alternateDone: 0,
+      alternateTotal: 0,
+      unitDone: initialIrosProgress.done,
+      unitTotal: initialIrosProgress.total,
+      interrupted: false,
+      reason: ""
+    };
+    const checkpoint = async (patch = {}) => {
+      Object.assign(runState, patch);
+      const progress = irosProgressStats(next);
+      runState.unitDone = progress.done;
+      runState.unitTotal = progress.total;
+      setBatchUnitDone(progress.done);
+      setBatchUnitTotal(progress.total);
+      setBatchRegDone(progress.done);
+      setBatchTotal(progress.total);
+      setRows([...next]);
+      await idbSet(BATCH_KEY, buildIrosSnapshot(next, extraHeaders, runState));
+    };
 
+    try {
     // 배치는 세대가 아니라 PNU 단위. PNU가 없을 때만 정규화 지번주소를 임시 키로 쓴다.
     const groups = /* @__PURE__ */ new Map();
     for (const t of targets) {
@@ -2707,7 +2809,8 @@ function AddrRefineTestGui() {
       groups.get(pnuKey).push(t);
     }
     const pnuKeys = [...groups.keys()];
-    setBatchTotal(pnuKeys.length);
+    setBatchBaseTotal(pnuKeys.length);
+    runState.baseTotal = pnuKeys.length;
 
     const matchCollection = (row, collection, queryAddress = "") => {
       const all = Array.isArray(collection.all_candidates) ? collection.all_candidates : [];
@@ -2895,8 +2998,8 @@ function AddrRefineTestGui() {
         message: "완전 후보 없음", at: nowText() };
     };
 
-    const collectorVersion = "iros-collector-v4";
-    const parserVersion = "iros-parser-v4";
+    const collectorVersion = IROS_RUN_VERSIONS.collector;
+    const parserVersion = IROS_RUN_VERSIONS.parser;
     const collectionAudit = (collection) => ({
       complete: collection.complete === true,
       query_scope: collection.query_scope || "",
@@ -2918,6 +3021,7 @@ function AddrRefineTestGui() {
       collector_version: collection.collector_version || collectorVersion,
       parser_version: collection.parser_version || parserVersion,
       matcher_version: MATCHER_VERSION,
+      recovery_version: IROS_RUN_VERSIONS.recovery,
       fetched_at: collection.fetched_at || ""
     });
 
@@ -2933,8 +3037,10 @@ function AddrRefineTestGui() {
         Number(collection.parse_error_count || 0) === 0 &&
         cachedTotalCount !== null && cachedRawCount === cachedTotalCount &&
         Boolean(collection.content_hash) && Boolean(collection.schema_fingerprint);
-      if (!cacheUsable || !fresh || collection.parser_version !== parserVersion ||
-          collection.collector_version !== collectorVersion) {
+      const cacheHit = Boolean(cacheUsable && fresh &&
+        collection.parser_version === parserVersion &&
+        collection.collector_version === collectorVersion);
+      if (!cacheHit) {
         const addr = addressOverride || first.result.jibunAddr || first.result.irosQuery || "";
         const b = first.result.bdNm ? `&bdnm=${encodeURIComponent(first.result.bdNm)}` : "";
         try {
@@ -2987,7 +3093,7 @@ function AddrRefineTestGui() {
           };
         }
       }
-      return collection;
+      return { collection, cacheHit };
     };
 
     const matchMember = async (member, collection, queryAddress = "") => {
@@ -3023,46 +3129,60 @@ function AddrRefineTestGui() {
           await idbSet(matchCacheKey, matchedResult);
         }
       }
-      return { ...matchedResult, ...collectionAudit(collection) };
+      return withIrosVersions({ ...matchedResult, ...collectionAudit(collection) });
     };
 
     const alternateGroups = /* @__PURE__ */ new Map();
+    const addAlternateMember = (address, member) => {
+      if (!address) return;
+      if (!alternateGroups.has(address)) alternateGroups.set(address, []);
+      const members = alternateGroups.get(address);
+      if (!members.some((item) => item.idx === member.idx)) members.push(member);
+    };
+    for (const [address, members] of pendingAlternateGroups.entries()) {
+      for (const member of members) addAlternateMember(address, member);
+    }
+
     for (let g = 0; g < pnuKeys.length; g++) {
       if (batchStopRef.current) break;
       const pnuKey = pnuKeys[g];
       const members = groups.get(pnuKey);
-      const collection = await loadCollection(pnuKey, members[0].row);
+      const { collection, cacheHit } = await loadCollection(pnuKey, members[0].row);
 
       for (const member of members) {
-        const reg = await matchMember(member, collection);
-        next[member.idx] = { ...next[member.idx], reg };
+        let reg = await matchMember(member, collection);
         if (reg.status === "REG_UNIT_NOT_FOUND") {
           const normalizedAddress = member.row.result.jibunAddr || member.row.result.irosQuery || "";
           const alternateAddress = alternateRawLotAddress(member.row.raw, normalizedAddress);
           if (alternateAddress) {
-            if (!alternateGroups.has(alternateAddress)) alternateGroups.set(alternateAddress, []);
-            alternateGroups.get(alternateAddress).push(member);
+            reg = withIrosVersions({
+              ...reg,
+              recovery_pending: true,
+              recovery_address: alternateAddress,
+              recovery_attempted: false
+            });
+            addAlternateMember(alternateAddress, member);
           }
         }
+        next[member.idx] = { ...next[member.idx], reg };
       }
       recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
-      setBatchRegDone(g + 1);
-      if (g % 20 === 0) {
-        setRows([...next]);
-        await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
-      }
-      if (g < pnuKeys.length - 1 && !batchStopRef.current)
+      setBatchBaseDone(g + 1);
+      await checkpoint({ phase: "base", baseDone: g + 1, baseTotal: pnuKeys.length });
+      if (!cacheHit && g < pnuKeys.length - 1 && !batchStopRef.current)
         await new Promise((res) => setTimeout(res, 1e3));
     }
 
     const alternateEntries = [...alternateGroups.entries()];
-    setBatchTotal(pnuKeys.length + alternateEntries.length);
+    setBatchAltTotal(alternateEntries.length);
+    runState.alternateTotal = alternateEntries.length;
     for (let a = 0; a < alternateEntries.length; a++) {
       if (batchStopRef.current) break;
       const [alternateAddress, members] = alternateEntries[a];
       const identity = `ALTLOT:${alternateAddress}`;
-      const collection = await loadCollection(identity, members[0].row, alternateAddress);
+      const { collection, cacheHit } = await loadCollection(identity, members[0].row, alternateAddress);
       for (const member of members) {
+        const prior = next[member.idx].reg || member.row.reg || {};
         const recovered = await matchMember(member, collection, alternateAddress);
         if (recovered.status === "RESOLVED" || recovered.status === "REG_MULTI") {
           const moduleTag = `R-IROS-MULTILOT@${IROS_MODULE_VERSIONS.R_IROS_MULTILOT}`;
@@ -3070,31 +3190,82 @@ function AddrRefineTestGui() {
           if (!appliedModules.includes(moduleTag)) appliedModules.push(moduleTag);
           next[member.idx] = {
             ...next[member.idx],
-            reg: {
+            reg: withIrosVersions({
               ...recovered,
               applied_modules: appliedModules,
               recovery_module: moduleTag,
               recovery_address: alternateAddress,
+              recovery_pending: false,
+              recovery_attempted: true,
               message: recovered.status === "RESOLVED"
                 ? "원문 대체지번 완전후보에서 동·호 일치"
                 : recovered.message
-            }
+            })
+          };
+        } else if (isRetryableIrosStatus(recovered.status)) {
+          next[member.idx] = {
+            ...next[member.idx],
+            reg: withIrosVersions({
+              ...prior,
+              recovery_pending: true,
+              recovery_address: alternateAddress,
+              recovery_attempted: true,
+              recovery_error_status: recovered.status,
+              recovery_error_message: recovered.message || ""
+            })
+          };
+        } else {
+          next[member.idx] = {
+            ...next[member.idx],
+            reg: withIrosVersions({
+              ...prior,
+              recovery_pending: false,
+              recovery_address: alternateAddress,
+              recovery_attempted: true,
+              recovery_result_status: recovered.status,
+              recovery_result_message: recovered.message || ""
+            })
           };
         }
       }
       recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
-      setBatchRegDone(pnuKeys.length + a + 1);
-      if (a % 10 === 0) {
-        setRows([...next]);
-        await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
-      }
-      if (a < alternateEntries.length - 1 && !batchStopRef.current)
+      setBatchAltDone(a + 1);
+      await checkpoint({
+        phase: "alternate",
+        baseDone: pnuKeys.length,
+        baseTotal: pnuKeys.length,
+        alternateDone: a + 1,
+        alternateTotal: alternateEntries.length
+      });
+      if (!cacheHit && a < alternateEntries.length - 1 && !batchStopRef.current)
         await new Promise((res) => setTimeout(res, 1e3));
     }
 
-    setRows([...next]);
-    await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
-    setBatchRegBusy(false);
+    const finalProgress = irosProgressStats(next);
+    const interrupted = batchStopRef.current || !finalProgress.final;
+    await checkpoint({
+      phase: interrupted ? "interrupted" : "complete",
+      baseDone: Math.min(pnuKeys.length, runState.baseDone),
+      baseTotal: pnuKeys.length,
+      alternateDone: Math.min(alternateEntries.length, runState.alternateDone),
+      alternateTotal: alternateEntries.length,
+      interrupted,
+      reason: batchStopRef.current ? "USER_STOP" : (finalProgress.final ? "" : "RETRY_REQUIRED")
+    });
+    setIrosRunMessage(interrupted
+      ? `재개 가능 · 남은 세대 ${finalProgress.remaining}건`
+      : `현재 버전 검증 완료 · ${finalProgress.done}/${finalProgress.total}건`);
+    } catch (error) {
+      const reason = error?.message || String(error);
+      setIrosRunMessage(`중단 사유: ${reason}`);
+      try {
+        await checkpoint({ phase: "interrupted", interrupted: true, reason });
+      } catch {
+        // 체크포인트 저장 실패는 원래 오류를 가리지 않는다.
+      }
+    } finally {
+      setBatchRegBusy(false);
+    }
   }, [rows, BRIDGE, config.resolverKey, extraHeaders, recordRegHealth]);
   const stopBatch = useCallback(() => {
     batchStopRef.current = true;
@@ -3663,30 +3834,7 @@ function AddrRefineTestGui() {
         if (ws[ref]) ws[ref].t = "s";
       }
     }
-    ws["!cols"] = [
-      ...extraHeaders.map(() => 14),
-      34,
-      9,
-      10,
-      11,
-      11,
-      28,
-      28,
-      6,
-      7,
-      21,
-      25,
-      17,
-      9,
-      9,
-      13,
-      11,
-      11,
-      12,
-      17,
-      15
-    , 40, 8, 8, 16, 20, 12, 22].map((w) => ({ wch: w }));
-    ws["!freeze"] = { xSplit: 0, ySplit: 1 };
+    applyWorksheetLayout(XLSX, ws, head);
     return ws;
   };
   const makeSummary = (recs) => {
@@ -3746,15 +3894,16 @@ function AddrRefineTestGui() {
     ws["!cols"] = [{ wch: 26 }, { wch: 12 }, { wch: 10 }, { wch: 10 }];
     return ws;
   };
-  const downloadXlsx = useCallback((mode2) => {
+  const downloadXlsx = useCallback(async (mode2) => {
+    if (batchBusy || batchRegBusy) {
+      alert("처리 중에는 일반 다운로드를 할 수 없습니다. 작업을 중단하거나 완료한 뒤 내려받아주세요.");
+      return;
+    }
     const recs = buildRecords();
-    // 무결성 검증(다중집합 비교): 출력은 시군구 등으로 의도적으로 재정렬
-    // 되므로 '행 순서'가 아니라 "모든 (원본주소+원본열) 쌍이 업로드된
-    // 횟수만큼 정확히 존재"를 검사한다. 부동산번호 누락·뒤섞임을 잡는다.
-    // (중복제거본·실패본은 의도적 부분집합이라 검사 대상 아님 — 전체본 기준)
+    // 무결성 검증(다중집합 비교): 출력 순서와 무관하게 원본주소+원본열이 1:1인지 확인.
     {
       const sig = (raw, extra) => raw + "\u0001" + JSON.stringify(extra || []);
-      const cnt = /* @__PURE__ */ new Map();
+      const cnt = new Map();
       for (const row of rows) {
         const s = sig(row.raw, row.extra);
         cnt.set(s, (cnt.get(s) || 0) + 1);
@@ -3766,19 +3915,36 @@ function AddrRefineTestGui() {
         if (!c) { broken = true; break; }
         cnt.set(s, c - 1);
       }
-      if (!broken) for (const v of cnt.values()) if (v !== 0) { broken = true; break; }
+      if (!broken) for (const value of cnt.values()) if (value !== 0) { broken = true; break; }
       if (broken) {
-        alert(`무결성 오류: 업로드 원본(부동산번호 포함)과 결과가 1:1로 대응하지 않습니다 (업로드 ${rows.length}행 / 결과 ${recs.length}행). 다운로드를 중단합니다 — 새로고침 후 "이어서 하기"로 복구해주세요.`);
+        alert(`무결성 오류: 업로드 원본과 결과가 1:1로 대응하지 않습니다 (업로드 ${rows.length}행 / 결과 ${recs.length}행). 다운로드를 중단합니다.`);
         return;
       }
     }
+
+    const finalReady = batchDone === rows.length && isIrosExportFinal(rows);
+    const partialSuffix = finalReady ? "" : "_PARTIAL";
+    const detailRecords = recordsForMode(recs, mode2);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, makeSummary(recs), "\uC694\uC57D");
-    const sheetName = mode2 === "unique" ? "\uC911\uBCF5\uC81C\uAC70\uBCF8" : mode2 === "fail" ? "\uC2E4\uD328\xB7\uBBF8\uD655\uC815" : "\uC804\uCCB4(\uC911\uBCF5\uD45C\uC2DC)";
+    XLSX.utils.book_append_sheet(wb, makeSummary(recs), "요약");
+    const sheetName = mode2 === "unique" ? "중복제거본" : mode2 === "fail" ? "실패·미확정" : "전체(중복표시)";
     XLSX.utils.book_append_sheet(wb, makeSheet(recs, mode2), sheetName);
-    const fileName = mode2 === "unique" ? "\uC815\uC81C\uACB0\uACFC_\uC911\uBCF5\uC81C\uAC70.xlsx" : mode2 === "fail" ? "\uC815\uC81C\uACB0\uACFC_\uC2E4\uD328\uAC74.xlsx" : "\uC815\uC81C\uACB0\uACFC_\uC804\uCCB4.xlsx";
-    XLSX.writeFile(wb, fileName);
-  }, [rows, extraHeaders]);
+    const baseName = mode2 === "unique" ? "정제결과_중복제거" : mode2 === "fail" ? "정제결과_실패건" : "정제결과_전체";
+    const fileName = `${baseName}${partialSuffix}.xlsx`;
+
+    try {
+      const bytes = buildVerifiedWorkbookArray(XLSX, wb, {
+        summarySheet: "요약",
+        detailSheet: sheetName,
+        expectedHeaders: extraHeaders.length + HEADERS.length,
+        expectedRows: detailRecords.length,
+        expectedSummaryTotal: recs.length
+      });
+      downloadWorkbookArray(bytes, fileName);
+    } catch (error) {
+      alert(`엑셀 무결성 검증 실패: ${error?.message || error}\n다운로드를 중단했습니다.`);
+    }
+  }, [rows, extraHeaders, batchBusy, batchRegBusy, batchDone, buildRecords]);
   const stat = rows.reduce((acc, r) => {
     if (r.result) acc[r.result.status] = (acc[r.result.status] || 0) + 1;
     return acc;
@@ -3794,6 +3960,8 @@ function AddrRefineTestGui() {
     acc.done++;
     return acc;
   }, { ok: 0, multi: 0, unitNo: 0, fail: 0, done: 0 });
+  const irosProgress = irosProgressStats(rows);
+  const exportFinalReady = batchDone === rows.length && isIrosExportFinal(rows);
   const btnP = {
     padding: "12px 26px",
     fontSize: 14,
@@ -4127,14 +4295,14 @@ function AddrRefineTestGui() {
     "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (",
     stat.CONFIRMED || 0,
     "건)"
-  ), (!batchBusy && rows.length > 0 && batchDone === rows.length && ((stat.CONFIRMED || 0) === 0 || (!batchRegBusy && batchTotal > 0 && batchRegDone >= batchTotal))) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 전체 처리 완료 · 정제 ${batchDone}건`, (stat.CONFIRMED || 0) > 0 ? ` · 등기조회 ${batchRegDone}건` : ""), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 13, color: C.cyan } }, `등기조회 ${batchTotal ? Math.round(batchRegDone / batchTotal * 100) : 0}% (${batchRegDone}/${batchTotal}) · 중복제거 후 · 건당 1초`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), (regStat.done > 0) && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 \uC131\uACF5 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uB2E4\uAC74 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 \uC2E4\uD328 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
+  ), (!batchBusy && rows.length > 0 && batchDone === rows.length && ((stat.CONFIRMED || 0) === 0 || (!batchRegBusy && batchTotal > 0 && batchRegDone >= batchTotal))) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 전체 처리 완료 · 정제 ${batchDone}건`, (stat.CONFIRMED || 0) > 0 ? ` · 등기조회 ${batchRegDone}건` : ""), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), (regStat.done > 0) && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 \uC131\uACF5 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uB2E4\uAC74 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 \uC2E4\uD328 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => downloadXlsx("all"),
       disabled: batchDone === 0,
       style: { ...btnS, opacity: batchDone === 0 ? 0.5 : 1 }
     },
-    "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"
+    exportFinalReady ? "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC" : "중간결과 다운로드 (PARTIAL)"
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -4147,7 +4315,7 @@ function AddrRefineTestGui() {
         color: C.ok
       }
     },
-    "\uC911\uBCF5\uC81C\uAC70 \uB2E4\uC6B4\uB85C\uB4DC"
+    exportFinalReady ? "\uC911\uBCF5\uC81C\uAC70 \uB2E4\uC6B4\uB85C\uB4DC" : "중복제거 PARTIAL"
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -4160,7 +4328,7 @@ function AddrRefineTestGui() {
         color: C.warn
       }
     },
-    "\uC2E4\uD328\uAC74 \uB2E4\uC6B4\uB85C\uB4DC"
+    exportFinalReady ? "\uC2E4\uD328\uAC74 \uB2E4\uC6B4\uB85C\uB4DC" : "실패건 PARTIAL"
   ), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uD655\uC815 ", stat.CONFIRMED || 0, " \xB7 \uD655\uC778\uD544\uC694 ", stat.AMBIGUOUS || 0, " \xB7 \uC2E4\uD328 ", stat.FAILED || 0)), rows.length > PREVIEW_ROWS && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, `아래 목록은 상위 ${PREVIEW_ROWS}행 미리보기입니다 (전체 ${rows.length.toLocaleString()}행) — 전체 결과는 엑셀 다운로드로 확인하세요`), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
     padding: "11px 14px",
     borderBottom: `1px solid ${C.cardLine}`,
