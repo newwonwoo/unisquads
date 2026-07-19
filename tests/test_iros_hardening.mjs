@@ -127,3 +127,5 @@ test("patched app contains the required hardening contracts", async () => {
     assert.ok(source.includes(marker), marker);
   }
 });
+
+// This commit intentionally triggers the branch validation workflow.
