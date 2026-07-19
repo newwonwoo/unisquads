@@ -16,7 +16,7 @@ IROS 등기고유번호 API 리졸버 (순수 requests, Playwright 불필요)
   rgs_rec_stat = 등기기록상태       "현행"
   addr_cls     = "3" (지번검색)
   kind_cls     = "all" (부동산구분 전체)
-  pageUnit     = 10
+  pageUnit     = 직접검색 10 / 전체수집 1000 (미지원 시 500 → 100 → 10 폴백)
   (나머지는 빈 문자열 기본값)
 
 [장점]
@@ -50,6 +50,10 @@ from iros_resolver import (
 BASE = "https://www.iros.go.kr"
 ENTRY = f"{BASE}/index.jsp"
 SEARCH_API = f"{BASE}/biz/Pr20ViaRlrgSrchCtrl/retrieveSmplSrchList.do"
+
+DIRECT_SEARCH_PAGE_UNIT = 10
+FULL_COLLECT_PAGE_UNIT = 1000
+PAGE_UNIT_FALLBACKS = (1000, 500, 100, 10)
 
 import re as _re_html
 _TAG_RE = _re_html.compile(r"<[^>]+>")
@@ -132,7 +136,7 @@ def _build_swrd(address: str, dong: str = "", ho: str = "", buld_name: str = "")
 
 
 def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = "",
-                   page_index="", page_unit=10) -> dict:
+                   page_index="", page_unit=DIRECT_SEARCH_PAGE_UNIT) -> dict:
     """정제주소 → 검색 API 요청 본문.
     2026-07-13 개정: 이 함수를 호출하는 resolve_one_api()는 이제 dong/ho를
     항상 빈 문자열로 넘긴다(swrd에 동/호를 안 넣기로 함 — 이유는
@@ -164,7 +168,7 @@ def _build_payload(address: str, dong: str = "", ho: str = "", buld_name: str = 
         "rd_buld_no2": "",
         "issue_cls": "5",
         "pageIndex": page_index,
-        "pageUnit": page_unit,          # 사람과 동일하게 10건씩 (100은 자동화로 티남)
+        "pageUnit": page_unit,          # 직접검색 10 / 전체수집 1000부터 호환 폴백
         "cmort_flag": "",
         "kap_seq_flag": "",
         "trade_seq_flag": "",
@@ -447,7 +451,7 @@ def _post_search(session, payload, timeout):
 
 
 def _collect_search(address, buld_name="", session=None, timeout=20.0,
-                    page_unit=10, allow_session_retry=True):
+                    page_unit=FULL_COLLECT_PAGE_UNIT, allow_session_retry=True):
     """같은 세션에서 전 페이지를 모으고 완전성을 증명한다."""
     active = session or make_session()
     base_payload = _build_payload(address, dong="", ho="", buld_name=buld_name,
@@ -485,12 +489,13 @@ def _collect_search(address, buld_name="", session=None, timeout=20.0,
 
     # IROS 배포별로 허용 pageUnit이 다르다. 큰 단위가 빈 구조를 반환하면
     # 1000 → 500 → 100 → 10 순으로 낮추고, 실제 허용 단위에서 페이지를 순회한다.
-    fallback_units = [1000, 500, 100, 10]
-    if total is None and not first_rows and page_unit in fallback_units and page_unit != 10:
-        pos = fallback_units.index(page_unit)
+    if (total is None and not first_rows
+            and page_unit in PAGE_UNIT_FALLBACKS
+            and page_unit != DIRECT_SEARCH_PAGE_UNIT):
+        pos = PAGE_UNIT_FALLBACKS.index(page_unit)
         return _collect_search(
             address, buld_name=buld_name, session=active, timeout=timeout,
-            page_unit=fallback_units[pos + 1],
+            page_unit=PAGE_UNIT_FALLBACKS[pos + 1],
             allow_session_retry=allow_session_retry,
         )
 
@@ -560,7 +565,7 @@ def _direct_search(address, dong, ho, buld_name="", session=None, timeout=20.0):
     """단건용 정확검색. 전체 캐시를 만들지 않으며 1건 정확 일치 때만 사용."""
     active = session or make_session()
     payload = _build_payload(address, dong=dong, ho=ho, buld_name=buld_name,
-                             page_index="", page_unit=10)
+                             page_index="", page_unit=DIRECT_SEARCH_PAGE_UNIT)
     data, code = _post_search(active, payload, timeout)
     if code in (401, 403):
         active = make_session()
@@ -633,7 +638,8 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
 
     # PNU/지번 전체수집 경로
     data, code, meta, active = _collect_search(
-        pure_lot_addr, session=active, timeout=timeout, page_unit=10
+        pure_lot_addr, session=active, timeout=timeout,
+        page_unit=FULL_COLLECT_PAGE_UNIT,
     )
     if code == 503 and meta.get("service_unavailable"):
         return _attach_collection(
@@ -669,7 +675,7 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
     for query_addr, query_name in fallbacks:
         data2, code2, meta2, active = _collect_search(
             query_addr, buld_name=query_name, session=active,
-            timeout=timeout, page_unit=10,
+            timeout=timeout, page_unit=FULL_COLLECT_PAGE_UNIT,
         )
         c2 = _parse_json_response(data2) if data2 and not (
             isinstance(data2, dict) and "_raw" in data2
@@ -685,7 +691,8 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
         main_no = orig_beonji.split("-")[0]
         addr_main = _strip_trailing_buldname(address.replace(orig_beonji, main_no, 1))
         data3, code3, meta3, active = _collect_search(
-            addr_main, session=active, timeout=timeout, page_unit=10
+            addr_main, session=active, timeout=timeout,
+            page_unit=FULL_COLLECT_PAGE_UNIT,
         )
         c3 = _parse_json_response(data3) if data3 and not (
             isinstance(data3, dict) and "_raw" in data3
