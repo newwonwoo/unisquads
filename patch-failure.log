@@ -1,9 +1,6 @@
 Traceback (most recent call last):
   File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 587, in <module>
     main()
-  File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 562, in main
-    text = replace_once(
-           ^^^^^^^^^^^^^
-  File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 12, in replace_once
-    raise RuntimeError(f"{label}: expected 1 occurrence, found {count}")
-RuntimeError: IROS run message UI: expected 1 occurrence, found 0
+  File "/home/runner/work/unisquads/unisquads/tools/apply_iros_hardening.py", line 580, in main
+    raise RuntimeError(f"required marker missing after patch: {marker}")
+RuntimeError: required marker missing after patch: compression: true
