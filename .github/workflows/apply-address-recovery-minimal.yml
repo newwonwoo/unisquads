@@ -24,16 +24,35 @@ jobs:
           node-version: '22'
 
       - name: Apply minimal patch
+        id: apply_patch
+        shell: bash
         run: |
-          git fetch origin main
+          set +e
+          git fetch origin main:refs/remotes/origin/main > apply-patch.log 2>&1
           if grep -q 'from "./address-recovery-rules.mjs";' public/app.js; then
-            echo "Core patch already applied"
+            echo "Core patch already applied" >> apply-patch.log
           else
-            git show origin/main:.github/scripts/apply_address_recovery_patch.py > /tmp/apply_address_recovery_patch.py
-            python /tmp/apply_address_recovery_patch.py
+            git show origin/main:.github/scripts/apply_address_recovery_patch.py > /tmp/apply_address_recovery_patch.py 2>> apply-patch.log
+            python /tmp/apply_address_recovery_patch.py >> apply-patch.log 2>&1
           fi
-          git show origin/main:.github/scripts/apply_address_export_filter_fix.py > /tmp/apply_address_export_filter_fix.py
-          python /tmp/apply_address_export_filter_fix.py
+          core_code=$?
+          if [ "$core_code" -eq 0 ]; then
+            git show origin/main:.github/scripts/apply_address_export_filter_fix.py > /tmp/apply_address_export_filter_fix.py 2>> apply-patch.log
+            python /tmp/apply_address_export_filter_fix.py >> apply-patch.log 2>&1
+            patch_code=$?
+          else
+            patch_code=$core_code
+          fi
+          cat apply-patch.log
+          exit "$patch_code"
+
+      - name: Upload patch diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: address-patch-diagnostics
+          path: apply-patch.log
+          retention-days: 1
 
       - name: Install test dependency
         run: npm install --no-save xlsx@0.18.5
