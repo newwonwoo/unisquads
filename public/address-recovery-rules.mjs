@@ -8,7 +8,8 @@ function normalizeBuildingName(value) {
   return String(value || "")
     .replace(/<[^>]+>/g, "")
     .replace(/\s+/g, "")
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/(?:제?상가동|상가)$/, "");
 }
 
 export function isBuildingPartToken(value) {
@@ -22,11 +23,7 @@ export function shouldEscalateJusoMultiToNaver(candidateCount, buildingName) {
 export function sameBuildingIdentity(inputName, resultName) {
   const input = normalizeBuildingName(inputName);
   const result = normalizeBuildingName(resultName);
-  if (!input || !result) return false;
-  if (input === result) return true;
-  const shorter = input.length <= result.length ? input : result;
-  const longer = input.length <= result.length ? result : input;
-  return shorter.length >= 4 && longer.includes(shorter);
+  return Boolean(input && result && input === result);
 }
 
 export function canAcceptNaverRegionCorrection({
