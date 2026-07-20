@@ -113,6 +113,59 @@ export function irosProgressStats(rows, current = IROS_RUN_VERSIONS) {
   };
 }
 
+export function irosOutcomeStats(rows, current = IROS_RUN_VERSIONS) {
+  const out = {
+    addressConfirmed: 0,
+    inputRequired: 0,
+    target: 0,
+    judged: 0,
+    resolved: 0,
+    multiple: 0,
+    unitNotFound: 0,
+    otherFailure: 0,
+    stale: 0,
+    retryable: 0,
+    pendingRecovery: 0,
+    retryRequired: 0,
+    unstarted: 0,
+    pending: 0
+  };
+  for (const row of rows || []) {
+    const result = row?.result;
+    if (!result || !["CONFIRMED", "확정"].includes(result.status)) continue;
+    out.addressConfirmed += 1;
+    if ((result.isJip && !result.unit?.ho) || row?.reg?.status === "UNIT_INPUT_REQUIRED") {
+      out.inputRequired += 1;
+      continue;
+    }
+    out.target += 1;
+    const reg = row?.reg;
+    if (!reg) continue;
+    if (!isCurrentIrosResult(reg, current)) {
+      out.stale += 1;
+      continue;
+    }
+    if (reg.recovery_pending === true) {
+      out.pendingRecovery += 1;
+      continue;
+    }
+    if (isRetryableIrosStatus(reg.status)) {
+      out.retryable += 1;
+      continue;
+    }
+    if (!reg.status) continue;
+    out.judged += 1;
+    if (reg.status === "RESOLVED") out.resolved += 1;
+    else if (reg.status === "REG_MULTI" || reg.status === "MULTIPLE") out.multiple += 1;
+    else if (reg.status === "REG_UNIT_NOT_FOUND") out.unitNotFound += 1;
+    else out.otherFailure += 1;
+  }
+  out.retryRequired = out.stale + out.retryable + out.pendingRecovery;
+  out.pending = Math.max(0, out.target - out.judged);
+  out.unstarted = Math.max(0, out.pending - out.retryRequired);
+  return out;
+}
+
 export function isIrosExportFinal(rows, current = IROS_RUN_VERSIONS) {
   return irosProgressStats(rows, current).final;
 }
