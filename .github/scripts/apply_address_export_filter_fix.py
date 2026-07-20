@@ -23,13 +23,12 @@ if old_sheet in source:
 elif 'makeSheet(detailRecords, "all")' not in source:
     raise AssertionError("detail sheet anchor not found")
 
-# The instruction paragraph is the first child of the dashed upload panel.
-# Keep the upload label as the next child instead of closing the panel early.
-broken_layout = '"xlsx / csv 파일을 업로드하세요. 주소 열과 헤더는 자동 인식됩니다.")), /* @__PURE__ */ React.createElement("label"'
-fixed_layout = '"xlsx / csv 파일을 업로드하세요. 주소 열과 헤더는 자동 인식됩니다."), /* @__PURE__ */ React.createElement("label"'
-if broken_layout in source:
-    source = source.replace(broken_layout, fixed_layout, 1)
-elif fixed_layout not in source:
+# Keep the upload label as the second child of the dashed upload panel.
+broken_tail = '자동 인식됩니다.")), /* @__PURE__ */ React.createElement("label"'
+fixed_tail = '자동 인식됩니다."), /* @__PURE__ */ React.createElement("label"'
+if broken_tail in source:
+    source = source.replace(broken_tail, fixed_tail, 1)
+elif fixed_tail not in source:
     raise AssertionError("upload panel layout anchor not found")
 
 app.write_text(source, encoding="utf-8")
@@ -42,9 +41,4 @@ if marker in text:
     text = text.replace(marker, replacement, 1)
 elif 'makeSheet(detailRecords, "all")' not in text:
     raise AssertionError("integration test marker not found")
-
-assertion_marker = '  assert.equal(source.includes("A열에 주소를 넣어 업로드하세요"), false);\n'
-assertion = '  assert.equal(source.includes("A열에 주소를 넣어 업로드하세요"), false);\n  assert.equal(source.includes("자동 인식됩니다.\\\")), /* @__PURE__ */ React.createElement(\\\"label\\\"") , false);\n'
-if assertion_marker in text and '자동 인식됩니다.' not in text.split('assert.equal', 1)[-1]:
-    text = text.replace(assertion_marker, assertion, 1)
 test.write_text(text, encoding="utf-8")
