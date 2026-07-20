@@ -44,6 +44,11 @@ import {
   buildSourceRawValues,
   summarizeRefineStatuses
 } from "./batch-ui-stats.mjs";
+import {
+  canAcceptNaverRegionCorrection,
+  isBuildingPartToken,
+  shouldEscalateJusoMultiToNaver
+} from "./address-recovery-rules.mjs";
 
 if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
 const { useState, useEffect, useCallback, useRef } = React;
@@ -248,6 +253,7 @@ function extractRegion(text) {
     if (s.startsWith(sido)) { out.sido = canonSido(sido); s = s.slice(sido.length).trim(); break; }
   }
   for (const t of s.split(" ")) {
+    if (isBuildingPartToken(t)) continue;
     if (RE_SGG.test(t) && out.sgg.length < 2 && !out.bjd) { out.sgg.push(t); continue; }
     if (RE_BJD.test(t)) {
       const leaf = /(동|리|가)$/.test(t);
@@ -945,7 +951,7 @@ function extractEupRi(addr) {
   }
   // 행정동(도곡1동) → 법정동(도곡동)
   const norm = (x) => { const m = x.match(/^([\uAC00-\uD7A3]+)\d+(\uB3D9)$/); return m ? m[1] + m[2] : x; };
-  const list = [...new Set(cands.map(norm))];
+  const list = [...new Set(cands.map(norm))].filter((x) => !isBuildingPartToken(x));
   return { eup, emd: list[0] || "", emdCands: list };
 }
 
@@ -966,6 +972,7 @@ function extractSggEmd(addr) {
   if (!emd) { const m = s.match(/([가-힣]+)\d+(동)/); if (m) emd = m[1] + m[2]; }
   // 괄호 안 법정동 ((방어동), (중동,대길이룸)) 추출
   if (!emd) { const p = s.match(/[（(]([가-힣]+(?:동|리|읍|면))[,，)）]/); if (p) emd = p[1]; }
+  if (isBuildingPartToken(emd)) emd = "";
   return { sgg, emd };
 }
 
@@ -1063,12 +1070,26 @@ async function cascade(pre, clients) {
   const roadQuery = (pre.road && pre.buldNo) ? [_head, pre.road, pre.buldNo].filter(Boolean).join(" ") : "";
   const jibunQuery = pre.jibun ? [_head, pre.eup, pre.emd, pre.jibun].filter(Boolean).join(" ") : "";
   let items = [];
+  let pendingJusoMulti = null;
+  const deferJusoMulti = (mapped, level) => {
+    if (!shouldEscalateJusoMultiToNaver(mapped.length, bldNameForGate)) return false;
+    pendingJusoMulti = {
+      candidates: mapped,
+      level,
+      jusoQuery: tried.join(" \u25B8 "),
+      count: mapped.length
+    };
+    return true;
+  };
   if (!skipJuso) {
     if (roadQuery) {
       tried.push(roadQuery);
       items = await safeCall(clients.juso, roadQuery);
-      if (items.length > 0)
-        return { candidates: items.map(fromJuso), level: "R1", jusoQuery: tried.join(" \u25B8 "), count: items.length };
+      if (items.length > 0) {
+        const mapped = items.map(fromJuso);
+        if (!deferJusoMulti(mapped, "R1"))
+          return { candidates: mapped, level: "R1", jusoQuery: tried.join(" \u25B8 "), count: mapped.length };
+      }
     }
     if (jibunQuery) {
       // 요소를 줄여가며 재시도한다. 읍면·리가 개편·폐지된 곳은 전체 조합으로는
@@ -1099,8 +1120,11 @@ async function cascade(pre, clients) {
         tried.push(q);
         items = await safeCall(clients.juso, q);
         if (!items.length) continue;
-        if (!_multiRi)
-          return { candidates: items.map(fromJuso), level: "J1", jusoQuery: tried.join(" \u25B8 "), count: items.length };
+        if (!_multiRi) {
+          const mapped = items.map(fromJuso);
+          if (deferJusoMulti(mapped, "J1")) break;
+          return { candidates: mapped, level: "J1", jusoQuery: tried.join(" \u25B8 "), count: mapped.length };
+        }
         _collected.push(...items);
       }
       if (_collected.length) {
@@ -1110,7 +1134,9 @@ async function cascade(pre, clients) {
           if (seen.has(k)) return false;
           seen.add(k); return true;
         });
-        return { candidates: uniq.map(fromJuso), level: "J1", jusoQuery: tried.join(" \u25B8 "), count: uniq.length };
+        const mapped = uniq.map(fromJuso);
+        if (!deferJusoMulti(mapped, "J1"))
+          return { candidates: mapped, level: "J1", jusoQuery: tried.join(" \u25B8 "), count: mapped.length };
       }
     }
     // 구성을 못 뽑았고 건물명도 없을 때만 기존 방식(원문·지번코어)으로 폴백한다.
@@ -1236,6 +1262,11 @@ async function cascade(pre, clients) {
             // 후보 검증정보 부족(시군구·지번 없음) → 네이버 단독 확정 금지(문서 원칙)
             _reviewNeeded = "naver_unverified";
           }
+          if (pendingJusoMulti) {
+            const recoveredPnu = buildPnu(cand);
+            const pendingPnus = new Set(pendingJusoMulti.candidates.map(buildPnu).filter(Boolean));
+            if (_reviewNeeded || !recoveredPnu || !pendingPnus.has(recoveredPnu)) return pendingJusoMulti;
+          }
           return {
             candidates: [cand], level: "L3",
             jusoQuery: tried.join(" \u25B8 ") + " \u25B8 [\uB124\uC774\uBC84]" + bldName +
@@ -1248,6 +1279,7 @@ async function cascade(pre, clients) {
           };
         }
       } else {
+        if (pendingJusoMulti) return pendingJusoMulti;
         // 3단계 모두 정상 호출 + 0건 → 인적 입력오류(보완사항 1: 시스템오류와 구분됨)
         return {
           candidates: [], level: "L4_NORESULT",
@@ -1257,7 +1289,7 @@ async function cascade(pre, clients) {
       }
     }
   }
-  return { candidates: [], level: null, jusoQuery: tried.join(" \u25B8 "), count: 0 };
+  return pendingJusoMulti || { candidates: [], level: null, jusoQuery: tried.join(" \u25B8 "), count: 0 };
 }
 function pad4(n) {
   const v = String(n ?? "").replace(/\D/g, "");
@@ -1871,6 +1903,22 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
     // 것을 막지 않기 위함(부전타워 만화리→교리, 당진군→당진시 실측).
     const _rel = (cascadeResult.candidates || []).map((x) => x.relJibun || "").join(" ");
     const v = validateRegion(pre.cleaned, result.jibunAddr, level === "L3", _rel);
+    if (canAcceptNaverRegionCorrection({
+      level,
+      validation: v,
+      naverPnuOk,
+      reviewNeeded: result.reviewNeeded,
+      addressMatchEvidence: result.addressMatchEvidence,
+      inputBuildingName: pre.bldName,
+      resultBuildingName: result.bdNm
+    })) {
+      v.status = "MATCH";
+      v.reason = "네이버 단일후보·정확도로·PNU·건물명 일치로 원문 행정동 오류 교정";
+      result.addressMatchEvidence = [...new Set([
+        ...(result.addressMatchEvidence || []),
+        "NAVER_EXACT_ADMIN_CORRECTION"
+      ])];
+    }
     result.validation = v;
     // 용도 검증(2026-07-17): 원문이 주거인데 결과가 비주거면 확정하지 않는다.
     //   하안주공8단지 808동 → 하안북초등학교 / 신개금주공3단지 → 부산당감3동우체국
@@ -3843,6 +3891,10 @@ function AddrRefineTestGui() {
   };
   const makeSummary = (recs) => {
     const ok = recs.filter((r) => r.status === "\uD655\uC815" || r.status === "CONFIRMED");
+    const reviewStatuses = new Set(["AMBIGUOUS", "VALIDATION_FAILED", "NAVER_CONFIRMED_PNU_FAILED", "HUMAN_INPUT_ERROR"]);
+    const review = recs.filter((r) => reviewStatuses.has(r.status));
+    const failed = recs.filter((r) =>
+      r.status !== "\uD655\uC815" && r.status !== "CONFIRMED" && !reviewStatuses.has(r.status));
     const uniq = new Set(ok.map((r) => r.pk).filter(Boolean)).size;
     const refineRate = recs.length ? ok.length / recs.length : 0;
     const aoa = [
@@ -3850,7 +3902,8 @@ function AddrRefineTestGui() {
       [],
       ["\uC804\uCCB4 \uCC98\uB9AC \uAC74\uC218", recs.length],
       ["\uC815\uC81C \uC131\uACF5(\uD655\uC815)", ok.length],
-      ["\uC815\uC81C \uC2E4\uD328", recs.length - ok.length],
+      ["확인 필요", review.length],
+      ["\uC815\uC81C \uC2E4\uD328", failed.length],
       ["주소 정제율", refineRate],
       ["주소 정제율 목표", 0.95],
       ["목표 달성", refineRate >= 0.95 ? "Y" : "N"],
@@ -3880,8 +3933,8 @@ function AddrRefineTestGui() {
     aggBy("aptType", "\uC8FC\uD0DD\uC720\uD615");
     const failM = /* @__PURE__ */ new Map();
     for (const r of recs) {
-      if ((r.status === "\uD655\uC815" || r.status === "CONFIRMED") && r.regNo) continue;
-      const k = r.failCode || "\uBBF8\uC2E4\uD589";
+      if (r.status === "\uD655\uC815" || r.status === "CONFIRMED") continue;
+      const k = r.failCode || "미분류";
       failM.set(k, (failM.get(k) || 0) + 1);
     }
     if (failM.size) {
@@ -3891,7 +3944,7 @@ function AddrRefineTestGui() {
       aoa.push([]);
     }
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    for (const rowIndex of [5, 6]) {
+    for (const rowIndex of [6, 7]) {
       const ref = XLSX.utils.encode_cell({ r: rowIndex, c: 1 });
       if (ws[ref]) ws[ref].z = "0.0%";
     }
@@ -3926,14 +3979,16 @@ function AddrRefineTestGui() {
       }
     }
 
-    const finalReady = batchDone === rows.length && isIrosExportFinal(rows);
+    const hasIrosResults = rows.some((row) => Boolean(row.reg));
+    const finalReady = batchDone === rows.length && (!hasIrosResults || isIrosExportFinal(rows));
     const partialSuffix = finalReady ? "" : "_PARTIAL";
     const detailRecords = recordsForMode(recs, mode2);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, makeSummary(recs), "요약");
     const sheetName = mode2 === "unique" ? "중복제거본" : mode2 === "fail" ? "실패·미확정" : "전체(중복표시)";
     XLSX.utils.book_append_sheet(wb, makeSheet(recs, mode2), sheetName);
-    const baseName = mode2 === "unique" ? "정제결과_중복제거" : mode2 === "fail" ? "정제결과_실패건" : "정제결과_전체";
+    const prefix = hasIrosResults ? "정제결과" : "주소정제결과";
+    const baseName = mode2 === "unique" ? `${prefix}_중복제거` : mode2 === "fail" ? `${prefix}_확인필요·실패건` : `${prefix}_전체`;
     const fileName = `${baseName}${partialSuffix}.xlsx`;
 
     try {
@@ -3967,7 +4022,10 @@ function AddrRefineTestGui() {
     return acc;
   }, { ok: 0, multi: 0, unitNo: 0, fail: 0, done: 0 });
   const irosProgress = irosProgressStats(rows);
-  const exportFinalReady = batchDone === rows.length && isIrosExportFinal(rows);
+  const addressFinalReady = batchDone === rows.length;
+  const irosStarted = regStat.done > 0;
+  const irosFinalReady = irosStarted && isIrosExportFinal(rows);
+  const exportFinalReady = addressFinalReady && (!irosStarted || irosFinalReady);
   const btnP = {
     padding: "12px 26px",
     fontSize: 14,
@@ -4287,7 +4345,7 @@ function AddrRefineTestGui() {
     textAlign: "center",
     backdropFilter: "blur(4px)",
     WebkitBackdropFilter: "blur(4px)"
-  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv \uD30C\uC77C\uC758 ", /* @__PURE__ */ React.createElement("strong", { style: { color: C.ink } }, "A\uC5F4"), "\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4 \uC5C5\uB85C\uB4DC\uD558\uC138\uC694. \uD5E4\uB354 \uD589\uC740 \uC790\uB3D9 \uC778\uC2DD\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileParsing && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.cyan, marginTop: 10 } }, "⏳ 파일 처리 중... (행 수가 많으면 몇 초 걸릴 수 있어요)"), uploadStats && /* @__PURE__ */ React.createElement("div", { style: {
+  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv 파일을 업로드하세요. 주소 열과 헤더는 자동 인식됩니다.")), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileParsing && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.cyan, marginTop: 10 } }, "⏳ 파일 처리 중... (행 수가 많으면 몇 초 걸릴 수 있어요)"), uploadStats && /* @__PURE__ */ React.createElement("div", { style: {
       width: "min(100%, 720px)",
       margin: "16px auto 0",
       display: "grid",
@@ -4320,14 +4378,14 @@ function AddrRefineTestGui() {
     "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (",
     stat.CONFIRMED || 0,
     "건)"
-  ), (!batchBusy && rows.length > 0 && batchDone === rows.length && ((stat.CONFIRMED || 0) === 0 || (!batchRegBusy && batchTotal > 0 && batchRegDone >= batchTotal))) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 전체 처리 완료 · 정제 ${batchDone}건`, (stat.CONFIRMED || 0) > 0 ? ` · 등기조회 ${batchRegDone}건` : ""), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), (regStat.done > 0) && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 \uC131\uACF5 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uB2E4\uAC74 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 \uC2E4\uD328 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
+  ), (!batchBusy && rows.length > 0 && addressFinalReady) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 주소 정제 완료 · ${batchDone}/${rows.length}행 · 확정 ${refineSummary.confirmed} · 확인필요 ${refineSummary.review} · 실패 ${refineSummary.failed}`), irosStarted && !batchRegBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13, color: irosFinalReady ? C.ok : C.warn, fontWeight: 600, margin: "2px 0 0" } }, irosFinalReady ? `✅ 등기고유번호 추출 완료 · ${irosProgress.done}/${irosProgress.total}건` : `등기고유번호 추출 · ${irosProgress.done}/${irosProgress.total}건 · 남은 ${irosProgress.remaining}건`), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), (regStat.done > 0) && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 \uC131\uACF5 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uB2E4\uAC74 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 \uC2E4\uD328 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => downloadXlsx("all"),
       disabled: batchDone === 0,
       style: { ...btnS, opacity: batchDone === 0 ? 0.5 : 1 }
     },
-    exportFinalReady ? "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC" : "현재까지 결과 다운로드"
+    exportFinalReady ? (irosStarted ? "전체 결과 다운로드" : "주소정제 결과 다운로드") : "현재까지 결과 다운로드"
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -4340,7 +4398,7 @@ function AddrRefineTestGui() {
         color: C.ok
       }
     },
-    exportFinalReady ? "\uC911\uBCF5\uC81C\uAC70 \uB2E4\uC6B4\uB85C\uB4DC" : "현재까지 중복제거 결과"
+    exportFinalReady ? "중복제거 결과 다운로드" : "현재까지 중복제거 결과"
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -4353,7 +4411,7 @@ function AddrRefineTestGui() {
         color: C.warn
       }
     },
-    exportFinalReady ? "\uC2E4\uD328\uAC74 \uB2E4\uC6B4\uB85C\uB4DC" : "현재까지 실패건 결과"
+    exportFinalReady ? "확인필요·실패건 다운로드" : "현재까지 확인필요·실패건"
   ), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uC815\uC81C\uB300\uC0C1 ", refineSummary.total, " \xB7 \uD655\uC815 ", refineSummary.confirmed, " \xB7 \uD655\uC778\uD544\uC694 ", refineSummary.review, " \xB7 \uC2E4\uD328 ", refineSummary.failed)), rows.length > PREVIEW_ROWS && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, `아래 목록은 상위 ${PREVIEW_ROWS}행 미리보기입니다 (전체 ${rows.length.toLocaleString()}행) — 전체 결과는 엑셀 다운로드로 확인하세요`), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
     padding: "11px 14px",
     borderBottom: `1px solid ${C.cardLine}`,
