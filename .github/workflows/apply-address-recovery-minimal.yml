@@ -1,0 +1,51 @@
+name: Apply minimal address recovery patch
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ github.event.pull_request.head.ref == 'agent/address-recovery-minimal' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/address-recovery-minimal
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply minimal patch
+        run: |
+          git fetch origin main
+          git show origin/main:.github/scripts/apply_address_recovery_patch.py > /tmp/apply_address_recovery_patch.py
+          python /tmp/apply_address_recovery_patch.py
+
+      - name: Install test dependency
+        run: npm install --no-save xlsx@0.18.5
+
+      - name: Validate
+        run: |
+          node --check public/app.js
+          node --test tests/test_address_recovery_rules.mjs tests/test_address_recovery_integration.mjs tests/test_batch_ui_stats.mjs tests/test_iros_hardening.mjs tests/test_unit_match.mjs
+          python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Commit tested patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/app.js public/address-recovery-rules.mjs tests/test_address_recovery_rules.mjs tests/test_address_recovery_integration.mjs
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Fix narrow address recovery and result states"
+            git push origin HEAD:agent/address-recovery-minimal
+          fi
