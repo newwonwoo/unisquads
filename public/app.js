@@ -3982,11 +3982,13 @@ function AddrRefineTestGui() {
     const hasIrosResults = rows.some((row) => Boolean(row.reg));
     const finalReady = batchDone === rows.length && (!hasIrosResults || isIrosExportFinal(rows));
     const partialSuffix = finalReady ? "" : "_PARTIAL";
-    const detailRecords = recordsForMode(recs, mode2);
+    const detailRecords = mode2 === "fail" && !hasIrosResults
+      ? recs.filter((rec) => rec.status !== "\uD655\uC815" && rec.status !== "CONFIRMED")
+      : recordsForMode(recs, mode2);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, makeSummary(recs), "요약");
     const sheetName = mode2 === "unique" ? "중복제거본" : mode2 === "fail" ? "실패·미확정" : "전체(중복표시)";
-    XLSX.utils.book_append_sheet(wb, makeSheet(recs, mode2), sheetName);
+    XLSX.utils.book_append_sheet(wb, makeSheet(detailRecords, "all"), sheetName);
     const prefix = hasIrosResults ? "정제결과" : "주소정제결과";
     const baseName = mode2 === "unique" ? `${prefix}_중복제거` : mode2 === "fail" ? `${prefix}_확인필요·실패건` : `${prefix}_전체`;
     const fileName = `${baseName}${partialSuffix}.xlsx`;

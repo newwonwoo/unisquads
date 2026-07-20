@@ -13,7 +13,9 @@ test("minimal address recovery integration is wired without IROS collection chan
     "주소정제결과",
     "주소 열과 헤더는 자동 인식됩니다.",
     "주소 정제 완료",
-    "등기고유번호 추출"
+    "등기고유번호 추출",
+    "mode2 === \"fail\" && !hasIrosResults",
+    "makeSheet(detailRecords, \"all\")"
   ]) assert.ok(source.includes(marker), marker);
   assert.equal(source.includes("A열에 주소를 넣어 업로드하세요"), false);
   assert.equal(source.includes('const k = r.failCode || "\uBBF8\uC2E4\uD589"'), false);
