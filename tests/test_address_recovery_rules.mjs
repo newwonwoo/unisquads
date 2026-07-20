@@ -24,7 +24,7 @@ test("JUSO multi candidates escalate only when a building name exists", () => {
 test("building identity remains narrow", () => {
   assert.equal(sameBuildingIdentity("부전타워", "부전타워"), true);
   assert.equal(sameBuildingIdentity("부전타워", "부전타워 상가동"), true);
-  assert.equal(sameBuildingIdentity("태원아파트", "다른태원아파트"), true);
+  assert.equal(sameBuildingIdentity("태원아파트", "다른태원아파트"), false);
   assert.equal(sameBuildingIdentity("현대아파트", "신현대아파트"), false);
 });
 
