@@ -1,0 +1,254 @@
+name: Apply upload source stats UI
+
+on:
+  push:
+    branches:
+      - agent/upload-source-stats-ui
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: ${{ !contains(github.event.head_commit.message, '[upload-stats-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/upload-source-stats-ui
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Patch upload statistics and layout
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app_path = Path('public/app.js')
+          source = app_path.read_text(encoding='utf-8')
+
+          import_anchor = '''import {
+            applyWorksheetLayout,
+            buildVerifiedWorkbookArray,
+            downloadWorkbookArray,
+            recordsForMode
+          } from "./xlsx-integrity.mjs";
+          '''
+          import_replacement = import_anchor + '''import {
+            analyzeSourceUpload,
+            buildSourceRawValues
+          } from "./upload-stats.mjs";
+          '''
+          assert import_anchor in source, 'xlsx import anchor not found'
+          source = source.replace(import_anchor, import_replacement, 1)
+
+          stats_anchor = '''      setExtraHeaders(extraHeaders2);
+
+          // 실측(3만행 기준: XLSX.read 1,349ms / sheet_to_json 143ms / 이 루프
+          '''
+          stats_replacement = '''      setExtraHeaders(extraHeaders2);
+
+          // 표시용 원문 통계는 분할 전 body 기준으로 계산한다.
+          // 정제 파이프라인의 built/statMap은 그대로 유지해 처리 결과에 영향이 없도록 분리한다.
+          const sourceRawValues = buildSourceRawValues(body, addrIdx, detailIdx);
+          const sourceStats = analyzeSourceUpload(sourceRawValues, normalizeRawKey);
+
+          // 실측(3만행 기준: XLSX.read 1,349ms / sheet_to_json 143ms / 이 루프
+          '''
+          assert stats_anchor in source, 'source stats insertion anchor not found'
+          source = source.replace(stats_anchor, stats_replacement, 1)
+
+          old_max = '''      let maxGrp = 0;
+          for (const v of statMap.values()) if (v > maxGrp) maxGrp = v;
+          '''
+          assert old_max in source, 'old max group block not found'
+          source = source.replace(old_max, '', 1)
+
+          old_set = '''      setUploadStats({
+            total: built.length,
+            uniq: statMap.size,
+            maxGrp,
+            empty: body.length - built.length,
+            mapping: addrColIdx >= 0
+          '''
+          new_set = '''      setUploadStats({
+            ...sourceStats,
+            refineRows: built.length,
+            refineTargets: statMap.size,
+            mapping: addrColIdx >= 0
+          '''
+          assert old_set in source, 'old uploadStats object not found'
+          source = source.replace(old_set, new_set, 1)
+
+          old_metric = '''uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.dim, marginTop: 12, fontFamily: mono } }, `총 ${uploadStats.total.toLocaleString()}행 · 고유주소 ${uploadStats.uniq.toLocaleString()}건 · 최대 중복그룹 ${uploadStats.maxGrp.toLocaleString()}행` + (uploadStats.empty > 0 ? ` · 빈주소 ${uploadStats.empty.toLocaleString()}행 제외` : ""))'''
+          new_metric = '''uploadStats && /* @__PURE__ */ React.createElement("div", { style: {
+            width: "min(100%, 720px)",
+            margin: "16px auto 0",
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+            gap: 8
+          } }, [
+            ["원문 데이터", `${uploadStats.sourceRows.toLocaleString()}행`, C.ink],
+            ["정제대상 원문", `${uploadStats.targetOriginals.toLocaleString()}건`, C.cyan],
+            ["중복 제외", `${uploadStats.duplicateRows.toLocaleString()}행`, C.ok]
+          ].map(([label, value, color]) => /* @__PURE__ */ React.createElement("div", { key: label, style: {
+            padding: "10px 12px",
+            border: `1px solid ${C.cardLine}`,
+            borderRadius: 10,
+            background: "rgba(11,14,20,0.34)",
+            textAlign: "left"
+          } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: C.faint, marginBottom: 4, letterSpacing: "0.04em" } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, color, fontFamily: mono, fontWeight: 700 } }, value)))), uploadStats && (uploadStats.emptyRows > 0 || uploadStats.refineRows !== uploadStats.addressRows || uploadStats.refineTargets !== uploadStats.targetOriginals) && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, margin: "8px 0 0", fontFamily: mono } }, [
+            uploadStats.emptyRows > 0 ? `빈주소 ${uploadStats.emptyRows.toLocaleString()}행 제외` : "",
+            uploadStats.refineRows !== uploadStats.addressRows ? `복수지번·세대 분리 후 ${uploadStats.refineRows.toLocaleString()}행` : "",
+            uploadStats.refineTargets !== uploadStats.targetOriginals ? `실제 정제 호출 단위 ${uploadStats.refineTargets.toLocaleString()}건` : ""
+          ].filter(Boolean).join(" · "))'''
+          assert old_metric in source, 'old upload metric UI not found'
+          source = source.replace(old_metric, new_metric, 1)
+
+          old_progress = '''batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 고유주소 ${batchGroupDone}/${batchGroupTotal} · 행 ${batchDone}/${rows.length}` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}건)` : `일괄 정제 (${rows.length}건)`)'''
+          new_progress = '''batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${uploadStats?.targetOriginals?.toLocaleString() || rows.length.toLocaleString()}건)`)'''
+          assert old_progress in source, 'batch progress label not found'
+          source = source.replace(old_progress, new_progress, 1)
+
+          replacements = {
+            '"중간결과 다운로드 (PARTIAL)"': '"현재까지 결과 다운로드"',
+            '"중복제거 PARTIAL"': '"현재까지 중복제거 결과"',
+            '"실패건 PARTIAL"': '"현재까지 실패건 결과"'
+          }
+          for old, new in replacements.items():
+            assert old in source, f'download label not found: {old}'
+            source = source.replace(old, new, 1)
+
+          app_path.write_text(source, encoding='utf-8')
+
+          Path('public/upload-stats.mjs').write_text('''function defaultNormalizeRawKey(value) {
+            return String(value ?? "").normalize("NFC").trim().replace(/\\s+/g, " ");
+          }
+
+          export function buildSourceRawValues(body, addrIdx = 0, detailIdx = -1) {
+            return (body || []).map((row) => {
+              const addr = String(row?.[addrIdx] ?? "").trim();
+              const detail = detailIdx >= 0 ? String(row?.[detailIdx] ?? "").trim() : "";
+              return detail ? `${addr} ${detail}`.replace(/\\s+/g, " ").trim() : addr;
+            });
+          }
+
+          export function analyzeSourceUpload(rawValues, normalizeKey = defaultNormalizeRawKey) {
+            const values = Array.isArray(rawValues) ? rawValues : [];
+            const counts = new Map();
+            let addressRows = 0;
+
+            for (const value of values) {
+              const raw = String(value ?? "").trim();
+              if (!raw) continue;
+              addressRows++;
+              const key = normalizeKey(raw);
+              if (!key) continue;
+              counts.set(key, (counts.get(key) || 0) + 1);
+            }
+
+            let maxDuplicateRows = 0;
+            for (const count of counts.values()) {
+              if (count > maxDuplicateRows) maxDuplicateRows = count;
+            }
+
+            return {
+              sourceRows: values.length,
+              addressRows,
+              targetOriginals: counts.size,
+              duplicateRows: Math.max(0, addressRows - counts.size),
+              maxDuplicateRows,
+              emptyRows: Math.max(0, values.length - addressRows)
+            };
+          }
+          ''', encoding='utf-8')
+
+          Path('tests/test_upload_stats.mjs').write_text('''import assert from "node:assert/strict";
+          import { readFile } from "node:fs/promises";
+          import test from "node:test";
+
+          import {
+            analyzeSourceUpload,
+            buildSourceRawValues
+          } from "../public/upload-stats.mjs";
+
+          test("upload source stats are calculated before split/refine grouping", () => {
+            const rawValues = [
+              "서울 강남구 역삼동 1",
+              " 서울   강남구 역삼동 1 ",
+              "부산 해운대구 우동 2",
+              "부산 해운대구 우동 2",
+              "대구 중구 동성로 3",
+              ""
+            ];
+            assert.deepEqual(analyzeSourceUpload(rawValues), {
+              sourceRows: 6,
+              addressRows: 5,
+              targetOriginals: 3,
+              duplicateRows: 2,
+              maxDuplicateRows: 2,
+              emptyRows: 1
+            });
+          });
+
+          test("address and detail columns are combined exactly once for source stats", () => {
+            const rows = [
+              ["서울 서초구 반포동 1", "101동 101호"],
+              ["서울 서초구 반포동 1", "101동 101호"],
+              ["부산 기장군 기장읍 교리 271-8", ""]
+            ];
+            const values = buildSourceRawValues(rows, 0, 1);
+            assert.deepEqual(values, [
+              "서울 서초구 반포동 1 101동 101호",
+              "서울 서초구 반포동 1 101동 101호",
+              "부산 기장군 기장읍 교리 271-8"
+            ]);
+            assert.equal(analyzeSourceUpload(values).targetOriginals, 2);
+          });
+
+          test("UI stats are display-only and preserve the existing refine grouping", async () => {
+            const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+            for (const marker of [
+              "const statMap = /* @__PURE__ */ new Map();",
+              "refineTargets: statMap.size",
+              "targetOriginals: sourceStats.targetOriginals",
+              "정제대상 원문",
+              "중복 제외",
+              "처리단위 ${batchGroupDone}/${batchGroupTotal}",
+              "현재까지 결과 다운로드"
+            ]) assert.ok(source.includes(marker), marker);
+            assert.equal(source.includes("최대 중복그룹"), false);
+          });
+          ''', encoding='utf-8')
+
+          hardening_path = Path('tests/test_iros_hardening.mjs')
+          hardening = hardening_path.read_text(encoding='utf-8')
+          assert '"중간결과 다운로드 (PARTIAL)"' in hardening
+          hardening = hardening.replace('"중간결과 다운로드 (PARTIAL)"', '"현재까지 결과 다운로드"', 1)
+          hardening_path.write_text(hardening, encoding='utf-8')
+          PY
+
+      - name: Install test dependency
+        run: npm install --no-save xlsx@0.18.5
+
+      - name: Validate JavaScript and tests
+        run: |
+          node --check public/app.js
+          node --test tests/test_upload_stats.mjs tests/test_iros_hardening.mjs
+
+      - name: Validate Python safety tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Commit patch and remove one-shot workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/app.js public/upload-stats.mjs tests/test_upload_stats.mjs tests/test_iros_hardening.mjs
+          git rm .github/workflows/apply-upload-source-stats-ui.yml
+          git commit -m "Fix upload source statistics and batch UI [upload-stats-applied]"
+          git push origin HEAD:agent/upload-source-stats-ui
