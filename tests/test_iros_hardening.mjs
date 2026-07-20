@@ -119,7 +119,7 @@ test("patched app contains the required hardening contracts", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   for (const marker of [
     "buildVerifiedWorkbookArray",
-    "중간결과 다운로드 (PARTIAL)",
+    "현재까지 결과 다운로드",
     "recovery_version: IROS_RUN_VERSIONS.recovery",
     "기본 PNU ${batchBaseDone}/${batchBaseTotal}",
     "finally {\n      setBatchRegBusy(false);"

@@ -39,6 +39,11 @@ import {
   downloadWorkbookArray,
   recordsForMode
 } from "./xlsx-integrity.mjs";
+import {
+  analyzeBatchUpload,
+  buildSourceRawValues,
+  summarizeRefineStatuses
+} from "./batch-ui-stats.mjs";
 
 if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
 const { useState, useEffect, useCallback, useRef } = React;
@@ -3450,6 +3455,10 @@ function AddrRefineTestGui() {
       }
       setExtraHeaders(extraHeaders2);
 
+      // 화면 표시용 원문 통계만 분할 전 데이터에서 계산한다.
+      // 실제 정제용 built/statMap은 그대로 유지해 판정·호출 결과에 영향을 주지 않는다.
+      const sourceRawValues = buildSourceRawValues(body, addrIdx, detailIdx);
+
       // 실측(3만행 기준: XLSX.read 1,349ms / sheet_to_json 143ms / 이 루프
       // 63ms) 결과, 이 행 빌드 루프는 전체 소요시간의 4%에 불과해 굳이
       // 청크로 쪼개거나 %를 표시할 이유가 없다(진짜 병목은 위 XLSX.read).
@@ -3490,14 +3499,9 @@ function AddrRefineTestGui() {
         const k = normalizeRawKey(row.raw) + (uo0 ? `#${uo0.dong || ""}-${uo0.ho || ""}` : "");
         statMap.set(k, (statMap.get(k) || 0) + 1);
       }
-      let maxGrp = 0;
-      for (const v of statMap.values()) if (v > maxGrp) maxGrp = v;
       const colLetter = (i) => i < 26 ? String.fromCharCode(65 + i) + "열" : `${i + 1}번째 열`;
       setUploadStats({
-        total: built.length,
-        uniq: statMap.size,
-        maxGrp,
-        empty: body.length - built.length,
+        ...analyzeBatchUpload(sourceRawValues, built.length, statMap.size, normalizeRawKey),
         mapping: addrColIdx >= 0
           ? {
               mode: "header",
@@ -3949,6 +3953,8 @@ function AddrRefineTestGui() {
     if (r.result) acc[r.result.status] = (acc[r.result.status] || 0) + 1;
     return acc;
   }, {});
+  // 화면 합계 전용: 기능 로직용 stat은 그대로 두고 모든 종료상태를 3분류한다.
+  const refineSummary = summarizeRefineStatuses(rows);
   // 등기조회 결과 집계(2026-07-15): 화면에 성공/다건/실패가 안 보여 추가.
   const regStat = rows.reduce((acc, r) => {
     const s = r.reg?.status;
@@ -4281,7 +4287,26 @@ function AddrRefineTestGui() {
     textAlign: "center",
     backdropFilter: "blur(4px)",
     WebkitBackdropFilter: "blur(4px)"
-  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv \uD30C\uC77C\uC758 ", /* @__PURE__ */ React.createElement("strong", { style: { color: C.ink } }, "A\uC5F4"), "\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4 \uC5C5\uB85C\uB4DC\uD558\uC138\uC694. \uD5E4\uB354 \uD589\uC740 \uC790\uB3D9 \uC778\uC2DD\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileParsing && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.cyan, marginTop: 10 } }, "⏳ 파일 처리 중... (행 수가 많으면 몇 초 걸릴 수 있어요)"), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.dim, marginTop: 12, fontFamily: mono } }, `총 ${uploadStats.total.toLocaleString()}행 · 고유주소 ${uploadStats.uniq.toLocaleString()}건 · 최대 중복그룹 ${uploadStats.maxGrp.toLocaleString()}행` + (uploadStats.empty > 0 ? ` · 빈주소 ${uploadStats.empty.toLocaleString()}행 제외` : "")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 고유주소 ${batchGroupDone}/${batchGroupTotal} · 행 ${batchDone}/${rows.length}` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}건)` : `일괄 정제 (${rows.length}건)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), bridgeUp && (stat.CONFIRMED || 0) > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
+  } }, /* @__PURE__ */ React.createElement("p", { style: { margin: "0 0 14px", fontSize: 13, color: C.dim } }, "xlsx / csv \uD30C\uC77C\uC758 ", /* @__PURE__ */ React.createElement("strong", { style: { color: C.ink } }, "A\uC5F4"), "\uC5D0 \uC8FC\uC18C\uB97C \uB123\uC5B4 \uC5C5\uB85C\uB4DC\uD558\uC138\uC694. \uD5E4\uB354 \uD589\uC740 \uC790\uB3D9 \uC778\uC2DD\uB429\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("label", { style: { ...btnP, display: "inline-block" } }, "\uD30C\uC77C \uC5C5\uB85C\uB4DC", /* @__PURE__ */ React.createElement("input", { type: "file", accept: ".xlsx,.xls,.csv", onChange: onFile, style: { display: "none" } })), fileParsing && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12.5, color: C.cyan, marginTop: 10 } }, "⏳ 파일 처리 중... (행 수가 많으면 몇 초 걸릴 수 있어요)"), uploadStats && /* @__PURE__ */ React.createElement("div", { style: {
+      width: "min(100%, 720px)",
+      margin: "16px auto 0",
+      display: "grid",
+      gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+      gap: 8
+    } }, [
+      ["정제대상 원문", `${uploadStats.addressRows.toLocaleString()}행`, C.ink],
+      ["실제 정제 호출", `${uploadStats.refineTargets.toLocaleString()}건`, C.cyan],
+      ["중복 결과 재사용", `${uploadStats.duplicateReuse.toLocaleString()}행`, C.ok]
+    ].map(([label, value, color]) => /* @__PURE__ */ React.createElement("div", { key: label, style: {
+      padding: "10px 12px",
+      border: `1px solid ${C.cardLine}`,
+      borderRadius: 10,
+      background: "rgba(11,14,20,0.34)",
+      textAlign: "left"
+    } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: C.faint, marginBottom: 4, letterSpacing: "0.04em" } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, color, fontFamily: mono, fontWeight: 700 } }, value)))), uploadStats && (uploadStats.emptyRows > 0 || uploadStats.refineRows !== uploadStats.addressRows) && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, margin: "8px 0 0", fontFamily: mono } }, [
+      uploadStats.emptyRows > 0 ? `빈주소 ${uploadStats.emptyRows.toLocaleString()}행 제외` : "",
+      uploadStats.refineRows !== uploadStats.addressRows ? `복수지번·세대 분리 후 처리행 ${uploadStats.refineRows.toLocaleString()}행` : ""
+    ].filter(Boolean).join(" · ")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${rows.length}행)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), bridgeUp && (stat.CONFIRMED || 0) > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: lookupBatchUniqueNo,
@@ -4302,7 +4327,7 @@ function AddrRefineTestGui() {
       disabled: batchDone === 0,
       style: { ...btnS, opacity: batchDone === 0 ? 0.5 : 1 }
     },
-    exportFinalReady ? "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC" : "중간결과 다운로드 (PARTIAL)"
+    exportFinalReady ? "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC" : "현재까지 결과 다운로드"
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -4315,7 +4340,7 @@ function AddrRefineTestGui() {
         color: C.ok
       }
     },
-    exportFinalReady ? "\uC911\uBCF5\uC81C\uAC70 \uB2E4\uC6B4\uB85C\uB4DC" : "중복제거 PARTIAL"
+    exportFinalReady ? "\uC911\uBCF5\uC81C\uAC70 \uB2E4\uC6B4\uB85C\uB4DC" : "현재까지 중복제거 결과"
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -4328,8 +4353,8 @@ function AddrRefineTestGui() {
         color: C.warn
       }
     },
-    exportFinalReady ? "\uC2E4\uD328\uAC74 \uB2E4\uC6B4\uB85C\uB4DC" : "실패건 PARTIAL"
-  ), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uD655\uC815 ", stat.CONFIRMED || 0, " \xB7 \uD655\uC778\uD544\uC694 ", stat.AMBIGUOUS || 0, " \xB7 \uC2E4\uD328 ", stat.FAILED || 0)), rows.length > PREVIEW_ROWS && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, `아래 목록은 상위 ${PREVIEW_ROWS}행 미리보기입니다 (전체 ${rows.length.toLocaleString()}행) — 전체 결과는 엑셀 다운로드로 확인하세요`), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
+    exportFinalReady ? "\uC2E4\uD328\uAC74 \uB2E4\uC6B4\uB85C\uB4DC" : "현재까지 실패건 결과"
+  ), batchDone > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12, color: C.dim } }, "\uC815\uC81C\uB300\uC0C1 ", refineSummary.total, " \xB7 \uD655\uC815 ", refineSummary.confirmed, " \xB7 \uD655\uC778\uD544\uC694 ", refineSummary.review, " \xB7 \uC2E4\uD328 ", refineSummary.failed)), rows.length > PREVIEW_ROWS && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, textAlign: "center", margin: "-4px 0 12px" } }, `아래 목록은 상위 ${PREVIEW_ROWS}행 미리보기입니다 (전체 ${rows.length.toLocaleString()}행) — 전체 결과는 엑셀 다운로드로 확인하세요`), /* @__PURE__ */ React.createElement("div", { style: { background: C.card, border: `1px solid ${C.cardLine}`, borderRadius: 13, overflow: "auto", backdropFilter: "blur(10px)" } }, /* @__PURE__ */ React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 12.5 } }, /* @__PURE__ */ React.createElement("thead", null, /* @__PURE__ */ React.createElement("tr", { style: { textAlign: "left" } }, ["#", "\uC785\uB825", "\uC0C1\uD0DC", "\uC815\uC81C \uACB0\uACFC", "PNU", "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638"].map((h) => /* @__PURE__ */ React.createElement("th", { key: h, style: {
     padding: "11px 14px",
     borderBottom: `1px solid ${C.cardLine}`,
     fontSize: 10.5,
