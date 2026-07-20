@@ -25,13 +25,15 @@ jobs:
 
       - name: Apply minimal patch
         run: |
+          git fetch origin main
           if grep -q 'from "./address-recovery-rules.mjs";' public/app.js; then
-            echo "Patch already applied"
+            echo "Core patch already applied"
           else
-            git fetch origin main
             git show origin/main:.github/scripts/apply_address_recovery_patch.py > /tmp/apply_address_recovery_patch.py
             python /tmp/apply_address_recovery_patch.py
           fi
+          git show origin/main:.github/scripts/apply_address_export_filter_fix.py > /tmp/apply_address_export_filter_fix.py
+          python /tmp/apply_address_export_filter_fix.py
 
       - name: Install test dependency
         run: npm install --no-save xlsx@0.18.5
