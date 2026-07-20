@@ -25,6 +25,7 @@ import {
 import {
   IROS_RUN_VERSIONS,
   buildIrosSnapshot,
+  irosOutcomeStats,
   irosProgressStats,
   isCurrentIrosResult,
   isIrosExportFinal,
@@ -1273,6 +1274,8 @@ async function cascade(pre, clients) {
               (naverJusoQuery ? ` \u25B8 [PNU]${naverJusoQuery}` : ""),
             count: 1,
             naverAddr,                                 // 진단: 네이버가 준 주소
+            naverJibunAddr: top.address || "",
+            naverRoadAddr: top.roadAddress || "",
             naverPnuOk: !!cand.pnuOk,                  // PNU 확보 여부
             addressMatchEvidence: naverAddressMatchEvidence,
             reviewNeeded: _reviewNeeded,
@@ -1853,7 +1856,7 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
       validation: { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" },
     };
   }
-  const { candidates, level, jusoQuery, count, humanInputError, naverAddr, naverPnuOk } = cascadeResult;
+  const { candidates, level, jusoQuery, count, humanInputError, naverAddr, naverJibunAddr, naverRoadAddr, naverPnuOk } = cascadeResult;
 
   // ── L4 네이버 최종 판정 결과 처리 (2026-07-15) ──────────────────
   // 네이버는 '최종 정상주소 판정 엔진'. 주소 판정과 PNU 확보를 분리한다.
@@ -1872,6 +1875,8 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
         unit: pre.unit,
         searchLevel: "L3", jusoQuery, candCount: count,
         naverAddr,
+        naverJibunAddr: naverJibunAddr || "",
+        naverRoadAddr: naverRoadAddr || "",
         message: `\uB124\uC774\uBC84 \uC8FC\uC18C \uD655\uC778(PNU \uBBF8\uD655\uBCF4): ${naverAddr || c.jibunAddr || ""}`,
         validation: { status: "NOT_AVAILABLE", reason: "네이버 확정", inputSgg: "", resultSgg: "" },
       };
@@ -1898,6 +1903,9 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
     ...(result.addressMatchEvidence || []),
     ...(cascadeResult.addressMatchEvidence || [])
   ])];
+  result.naverAddr = naverAddr || "";
+  result.naverJibunAddr = naverJibunAddr || "";
+  result.naverRoadAddr = naverRoadAddr || "";
   if (result.status === "CONFIRMED") {
     // L4(네이버 확정)는 시도만 검증 — 네이버가 시군구/법정동 오류를 교정한
     // 것을 막지 않기 위함(부전타워 만화리→교리, 당진군→당진시 실측).
@@ -3729,6 +3737,9 @@ function AddrRefineTestGui() {
         aptType,
         jibun,
         road: r.roadAddr || "",
+        naverJibun: r.naverJibunAddr || "",
+        naverRoad: r.naverRoadAddr || "",
+        irosInput: okStatus ? (r.jibunAddr || r.irosQuery || "") : "",
         dong: r.unit?.dong || "",
         ho: r.unit?.ho || "",
         pnu,
@@ -3804,7 +3815,7 @@ function AddrRefineTestGui() {
     }
     return recs;
   }, [rows]);
-  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "조회일시", "비고", "juso\uAC80\uC0C9\uC5B4", "\uD6C4\uBCF4\uAC74\uC218", "\uAC80\uC0C9\uACBD\uB85C", "\uC785\uB825\uC9C0\uC5ED", "\uACB0\uACFC\uC9C0\uC5ED", "\uAC80\uC99D\uC0C1\uD0DC", "\uAC80\uC99D\uC0AC\uC720", "\uAC80\uD1A0\uC720\uD615", "옛주소규칙", "옛주소맵버전", "옛주소입력", "옛주소현행", "주소상태", "세대상태", "파이프라인버전", "결과지문", "적용모듈", "의존성지문", "전파기준행", "전파근거해시", "주소매칭근거", "IROS전략", "IROS검색범위", "IROS부동산구분", "IROS총건수", "IROS원본수신수", "IROS파싱수", "IROS고유후보수", "IROS페이지수", "IROS유효PageUnit", "IROS완전여부", "IROS파서버전", "IROS매처버전", "IROS캐시해시", "IROS매칭근거"];
+  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "조회일시", "비고", "juso\uAC80\uC0C9\uC5B4", "\uD6C4\uBCF4\uAC74\uC218", "\uAC80\uC0C9\uACBD\uB85C", "\uC785\uB825\uC9C0\uC5ED", "\uACB0\uACFC\uC9C0\uC5ED", "\uAC80\uC99D\uC0C1\uD0DC", "\uAC80\uC99D\uC0AC\uC720", "\uAC80\uD1A0\uC720\uD615", "옛주소규칙", "옛주소맵버전", "옛주소입력", "옛주소현행", "주소상태", "세대상태", "파이프라인버전", "결과지문", "적용모듈", "의존성지문", "전파기준행", "전파근거해시", "주소매칭근거", "네이버지번주소", "네이버도로명주소", "최종IROS입력주소", "IROS전략", "IROS검색범위", "IROS부동산구분", "IROS총건수", "IROS원본수신수", "IROS파싱수", "IROS고유후보수", "IROS페이지수", "IROS유효PageUnit", "IROS완전여부", "IROS파서버전", "IROS매처버전", "IROS캐시해시", "IROS매칭근거"];
   const recToRow = (rec) => [
     ...rec.extra,
     rec.raw,
@@ -3848,6 +3859,9 @@ function AddrRefineTestGui() {
     rec.propagatedFrom,
     rec.propagationEvidenceHash,
     rec.addressMatchEvidence,
+    rec.naverJibun,
+    rec.naverRoad,
+    rec.irosInput,
     rec.irosStrategy,
     rec.irosScope,
     rec.irosClass,
@@ -3895,10 +3909,11 @@ function AddrRefineTestGui() {
     const review = recs.filter((r) => reviewStatuses.has(r.status));
     const failed = recs.filter((r) =>
       r.status !== "\uD655\uC815" && r.status !== "CONFIRMED" && !reviewStatuses.has(r.status));
+    const iros = irosOutcomeStats(rows);
     const uniq = new Set(ok.map((r) => r.pk).filter(Boolean)).size;
     const refineRate = recs.length ? ok.length / recs.length : 0;
     const aoa = [
-      ["\uBD80\uB3D9\uC0B0 \uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC815\uC81C\xB7\uC911\uBCF5\uC81C\uAC70 \uACB0\uACFC"],
+      ["주소정제·등기조회 결과"],
       [],
       ["\uC804\uCCB4 \uCC98\uB9AC \uAC74\uC218", recs.length],
       ["\uC815\uC81C \uC131\uACF5(\uD655\uC815)", ok.length],
@@ -3910,6 +3925,18 @@ function AddrRefineTestGui() {
       ["목표까지 추가 확정 필요", Math.max(0, Math.ceil(recs.length * 0.95) - ok.length)],
       ["\uACE0\uC720 \uBD80\uB3D9\uC0B0(\uC911\uBCF5\uC81C\uAC70 \uD6C4)", uniq],
       ["\uC911\uBCF5 \uC81C\uAC70\uB41C \uAC74\uC218", ok.length - uniq],
+      [],
+      ["[등기조회 집계]"],
+      ["주소확정", iros.addressConfirmed],
+      ["조회 가능", iros.target],
+      ["동·호 입력보완", iros.inputRequired],
+      ["조회 판정 완료", iros.judged],
+      ["고유번호 추출 성공", iros.resolved],
+      ["복수결과", iros.multiple],
+      ["세대미일치", iros.unitNotFound],
+      ["기타 실패", iros.otherFailure],
+      ["재시도 필요", iros.retryRequired],
+      ["미조회", iros.unstarted],
       []
     ];
     const aggBy = (field2, label) => {
@@ -3987,7 +4014,7 @@ function AddrRefineTestGui() {
       : recordsForMode(recs, mode2);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, makeSummary(recs), "요약");
-    const sheetName = mode2 === "unique" ? "중복제거본" : mode2 === "fail" ? "실패·미확정" : "전체(중복표시)";
+    const sheetName = mode2 === "unique" ? "중복제거본" : mode2 === "fail" ? "확인필요·실패" : "전체(중복표시)";
     XLSX.utils.book_append_sheet(wb, makeSheet(detailRecords, "all"), sheetName);
     const prefix = hasIrosResults ? "정제결과" : "주소정제결과";
     const baseName = mode2 === "unique" ? `${prefix}_중복제거` : mode2 === "fail" ? `${prefix}_확인필요·실패건` : `${prefix}_전체`;
@@ -4012,20 +4039,18 @@ function AddrRefineTestGui() {
   }, {});
   // 화면 합계 전용: 기능 로직용 stat은 그대로 두고 모든 종료상태를 3분류한다.
   const refineSummary = summarizeRefineStatuses(rows);
-  // 등기조회 결과 집계(2026-07-15): 화면에 성공/다건/실패가 안 보여 추가.
-  const regStat = rows.reduce((acc, r) => {
-    const s = r.reg?.status;
-    if (!s) return acc;
-    if (s === "RESOLVED") acc.ok++;
-    else if (s === "REG_MULTI" || s === "MULTIPLE") acc.multi++;
-    else if (s === "REG_UNIT_NOT_FOUND") acc.unitNo++;
-    else acc.fail++;   // NOT_FOUND, SESSION_ERROR, RATE_LIMIT 등 전부
-    acc.done++;
-    return acc;
-  }, { ok: 0, multi: 0, unitNo: 0, fail: 0, done: 0 });
+  // 표시·요약 전용 IROS 집계. 수집·매칭·재개 판정에는 사용하지 않는다.
+  const irosOutcome = irosOutcomeStats(rows);
+  const regStat = {
+    ok: irosOutcome.resolved,
+    multi: irosOutcome.multiple,
+    unitNo: irosOutcome.unitNotFound,
+    fail: irosOutcome.otherFailure,
+    done: irosOutcome.judged
+  };
   const irosProgress = irosProgressStats(rows);
   const addressFinalReady = batchDone === rows.length;
-  const irosStarted = regStat.done > 0;
+  const irosStarted = rows.some((row) => Boolean(row.reg));
   const irosFinalReady = irosStarted && isIrosExportFinal(rows);
   const exportFinalReady = addressFinalReady && (!irosStarted || irosFinalReady);
   const btnP = {
@@ -4366,7 +4391,7 @@ function AddrRefineTestGui() {
     } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: C.faint, marginBottom: 4, letterSpacing: "0.04em" } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, color, fontFamily: mono, fontWeight: 700 } }, value)))), uploadStats && (uploadStats.emptyRows > 0 || uploadStats.refineRows !== uploadStats.addressRows) && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, margin: "8px 0 0", fontFamily: mono } }, [
       uploadStats.emptyRows > 0 ? `빈주소 ${uploadStats.emptyRows.toLocaleString()}행 제외` : "",
       uploadStats.refineRows !== uploadStats.addressRows ? `복수지번·세대 분리 후 처리행 ${uploadStats.refineRows.toLocaleString()}행` : ""
-    ].filter(Boolean).join(" · ")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${rows.length}행)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), bridgeUp && (stat.CONFIRMED || 0) > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
+    ].filter(Boolean).join(" · ")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${rows.length}행)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), bridgeUp && irosOutcome.target > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: lookupBatchUniqueNo,
@@ -4378,9 +4403,9 @@ function AddrRefineTestGui() {
       }
     },
     "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (",
-    stat.CONFIRMED || 0,
+    irosOutcome.target,
     "건)"
-  ), (!batchBusy && rows.length > 0 && addressFinalReady) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 주소 정제 완료 · ${batchDone}/${rows.length}행 · 확정 ${refineSummary.confirmed} · 확인필요 ${refineSummary.review} · 실패 ${refineSummary.failed}`), irosStarted && !batchRegBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13, color: irosFinalReady ? C.ok : C.warn, fontWeight: 600, margin: "2px 0 0" } }, irosFinalReady ? `✅ 등기고유번호 추출 완료 · ${irosProgress.done}/${irosProgress.total}건` : `등기고유번호 추출 · ${irosProgress.done}/${irosProgress.total}건 · 남은 ${irosProgress.remaining}건`), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), (regStat.done > 0) && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 \uC131\uACF5 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uB2E4\uAC74 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 \uC2E4\uD328 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
+  ), (!batchBusy && rows.length > 0 && addressFinalReady) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 주소 정제 완료 · ${batchDone}/${rows.length}행 · 확정 ${refineSummary.confirmed} · 확인필요 ${refineSummary.review} · 실패 ${refineSummary.failed}`), irosStarted && !batchRegBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13, color: irosFinalReady ? C.ok : C.warn, fontWeight: 600, margin: "2px 0 0" } }, irosFinalReady ? `✅ 등기조회 판정 완료 · ${irosOutcome.judged}/${irosOutcome.target}건 · 고유번호 ${irosOutcome.resolved}건` : `등기조회 판정 · ${irosOutcome.judged}/${irosOutcome.target}건 · 재시도 ${irosOutcome.retryRequired} · 미조회 ${irosOutcome.unstarted}`), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), irosStarted && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 고유번호 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 복수 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), irosOutcome.inputRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 입력보완 ${irosOutcome.inputRequired}`), irosOutcome.retryRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 재시도 ${irosOutcome.retryRequired}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 기타실패 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => downloadXlsx("all"),

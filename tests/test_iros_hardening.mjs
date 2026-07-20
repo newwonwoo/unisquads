@@ -6,6 +6,7 @@ import * as XLSX from "xlsx";
 import {
   IROS_RUN_VERSIONS,
   buildIrosSnapshot,
+  irosOutcomeStats,
   irosProgressStats,
   isIrosExportFinal,
   isReusableIrosResult,
@@ -58,6 +59,44 @@ test("current terminal results are reusable while partial results retry", () => 
     { total: progress.total, done: progress.done, retryable: progress.retryable },
     { total: 2, done: 1, retryable: 1 }
   );
+});
+
+test("IROS judgement and unique-number extraction remain separate KPIs", () => {
+  const rows = [
+    confirmedRow(withIrosVersions({ status: "RESOLVED", unique_no: "1" })),
+    confirmedRow(withIrosVersions({ status: "REG_MULTI" })),
+    confirmedRow(withIrosVersions({ status: "REG_UNIT_NOT_FOUND" })),
+    confirmedRow(withIrosVersions({ status: "REG_NOT_FOUND" })),
+    confirmedRow(withIrosVersions({ status: "REG_PARTIAL_RESPONSE" })),
+    confirmedRow(null),
+    { result: { status: "CONFIRMED", isJip: true, unit: { dong: "101", ho: "" } }, reg: null }
+  ];
+  const outcome = irosOutcomeStats(rows);
+  assert.deepEqual({
+    addressConfirmed: outcome.addressConfirmed,
+    inputRequired: outcome.inputRequired,
+    target: outcome.target,
+    judged: outcome.judged,
+    resolved: outcome.resolved,
+    multiple: outcome.multiple,
+    unitNotFound: outcome.unitNotFound,
+    otherFailure: outcome.otherFailure,
+    retryRequired: outcome.retryRequired,
+    unstarted: outcome.unstarted
+  }, {
+    addressConfirmed: 7,
+    inputRequired: 1,
+    target: 6,
+    judged: 4,
+    resolved: 1,
+    multiple: 1,
+    unitNotFound: 1,
+    otherFailure: 1,
+    retryRequired: 1,
+    unstarted: 1
+  });
+  assert.equal(outcome.resolved + outcome.multiple + outcome.unitNotFound + outcome.otherFailure, outcome.judged);
+  assert.equal(outcome.judged + outcome.retryRequired + outcome.unstarted, outcome.target);
 });
 
 test("snapshot persists all four IROS module versions and phase checkpoint", () => {
@@ -122,6 +161,8 @@ test("patched app contains the required hardening contracts", async () => {
     "현재까지 결과 다운로드",
     "recovery_version: IROS_RUN_VERSIONS.recovery",
     "기본 PNU ${batchBaseDone}/${batchBaseTotal}",
+    "등기조회 판정 완료",
+    "네이버지번주소",
     "finally {\n      setBatchRegBusy(false);"
   ]) {
     assert.ok(source.includes(marker), marker);
