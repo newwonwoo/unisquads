@@ -39,6 +39,7 @@ test("Naver administrative correction requires all exact evidence", () => {
     resultBuildingName: "부전타워"
   };
   assert.equal(canAcceptNaverRegionCorrection(base), true);
+  assert.equal(canAcceptNaverRegionCorrection({ ...base, validation: { status: "MISMATCH", reason: "읍면 불일치(신현읍≠문동동)" } }), true);
   assert.equal(canAcceptNaverRegionCorrection({ ...base, validation: { status: "MISMATCH", reason: "시도 불일치(부산≠경기)" } }), false);
   assert.equal(canAcceptNaverRegionCorrection({ ...base, naverPnuOk: false }), false);
   assert.equal(canAcceptNaverRegionCorrection({ ...base, reviewNeeded: "naver_jibun_mismatch" }), false);
