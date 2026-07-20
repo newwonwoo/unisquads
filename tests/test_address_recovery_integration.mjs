@@ -11,6 +11,7 @@ test("minimal address recovery integration is wired without IROS collection chan
     "NAVER_EXACT_ADMIN_CORRECTION",
     "확인 필요",
     "주소정제결과",
+    "주소정제·등기조회 결과",
     "주소 열과 헤더는 자동 인식됩니다.",
     "주소 정제 완료",
     "등기조회 판정 완료",
