@@ -30,10 +30,22 @@ jobs:
         run: npm install --no-save xlsx@0.18.5
 
       - name: Validate existing behavior and new KPI invariants
+        shell: bash
         run: |
-          node --check public/app.js
-          node --test tests/test_iros_hardening.mjs tests/test_address_recovery_integration.mjs tests/test_address_recovery_rules.mjs tests/test_batch_ui_stats.mjs tests/test_unit_match.mjs
-          python -m unittest discover -s tests -p 'test_*.py'
+          set -o pipefail
+          {
+            node --check public/app.js
+            node --test tests/test_iros_hardening.mjs tests/test_address_recovery_integration.mjs tests/test_address_recovery_rules.mjs tests/test_batch_ui_stats.mjs tests/test_unit_match.mjs
+            python -m unittest discover -s tests -p 'test_*.py'
+          } 2>&1 | tee validation.log
+
+      - name: Upload validation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iros-kpi-validation
+          path: validation.log
+          retention-days: 1
 
       - name: Commit tested files and remove branch tooling
         run: |
