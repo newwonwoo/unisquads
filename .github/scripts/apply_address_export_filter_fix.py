@@ -39,6 +39,6 @@ marker = '    "등기고유번호 추출"\n'
 replacement = '    "등기고유번호 추출",\n    "mode2 === \\"fail\\" && !hasIrosResults",\n    "makeSheet(detailRecords, \\"all\\")"\n'
 if marker in text:
     text = text.replace(marker, replacement, 1)
-elif 'makeSheet(detailRecords, "all")' not in text:
+elif 'makeSheet(detailRecords' not in text:
     raise AssertionError("integration test marker not found")
 test.write_text(text, encoding="utf-8")
