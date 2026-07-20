@@ -1,0 +1,46 @@
+name: Apply minimal IROS KPI export patch
+
+on:
+  push:
+    branches:
+      - agent/iros-kpi-export-minimal
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/iros-kpi-export-minimal
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply display and export-only patch
+        run: python .github/scripts/apply_iros_kpi_export_patch.py
+
+      - name: Install test dependency
+        run: npm install --no-save xlsx@0.18.5
+
+      - name: Validate existing behavior and new KPI invariants
+        run: |
+          node --check public/app.js
+          node --test tests/test_iros_hardening.mjs tests/test_address_recovery_integration.mjs tests/test_address_recovery_rules.mjs tests/test_batch_ui_stats.mjs tests/test_unit_match.mjs
+          python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Commit tested files and remove temporary tooling
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/scripts/apply_iros_kpi_export_patch.py
+          rm -f .github/workflows/apply-iros-kpi-export-minimal.yml
+          git add public/app.js public/iros-run-contract.mjs tests/test_iros_hardening.mjs tests/test_address_recovery_integration.mjs
+          git add -u .github/scripts/apply_iros_kpi_export_patch.py .github/workflows/apply-iros-kpi-export-minimal.yml
+          git commit -m "Separate IROS judgement and extraction KPIs"
+          git push origin HEAD:agent/iros-kpi-export-minimal
