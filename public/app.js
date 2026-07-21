@@ -646,21 +646,9 @@ function splitUnitsForBatch(raw) {
   return real.length >= 2 ? real : null;
 }
 function splitRowsForBatch(raw) {
-  let s = raw.replace(/([가-훣]+구)\s+([가-훣]+동)\s+[가-훣]+시?\s*\1\s+\2/g, "$1 $2").replace(/\s+/g, " ").trim();
-  const addrPart = s.replace(/\d+동|\d+호|\d+층|제\d+/g, "");
-  if (!/(\d+(?:-\d+)?)\s*,\s*(\d+(?:-\d+)?)/.test(addrPart)) return [raw];
-  if (/\d+동|\d+호|지하|지층|B\d/.test(s)) return [raw];
-  if (/\d{5,}/.test(s) || /\d+-\d+-\d+/.test(s)) return [raw];
-  const dongs = (s.match(/[가-훣]+동/g) || []).filter((d) => !/\d/.test(d));
-  if ([...new Set(dongs)].length >= 2) return [raw];
-  const m = s.match(/^(.*?[가-훣]+동)\s+([\d\-,\s]+?)(\s+.*)?$/);
-  if (!m) return [raw];
-  if (m[3] && /[가-훣]/.test(m[3])) return [raw];
-  const jibuns = m[2].split(/[,，]/).map((x) => x.trim()).filter((x) => /^\d+-?\d*$/.test(x));
-  if (jibuns.length <= 1) return [raw];
-  if (jibuns.some((j) => { const p = j.split("-"); return p.length === 2 && p[1].length >= 3; })) return [raw];
-  if (!jibuns.every((j) => /^\d{1,4}(-\d{1,2})?$/.test(j))) return [raw];
-  return jibuns.map((j) => `${m[1]} ${j}`.replace(/\s+/g, " ").trim());
+  // 복수지번은 업로드 단계 정규식만으로 나누지 않는다.
+  // JUSO로 각 지번을 검증한 뒤 서로 다른 정확 PNU가 확인된 경우에만 행 분리한다.
+  return [raw];
 }
 function preprocess(raw) {
   if (typeof raw !== "string" || raw.trim() === "")
@@ -1122,7 +1110,14 @@ async function probeExplicitLots(pre, clients, tried) {
 
   // 동·호/건물명이 있거나 여러 지번이 같은 건물관리번호로 수렴하면 집합건물이다.
   const aggregate = selectAggregateBuildingCandidates(allCandidates, pre.unit);
-  if (aggregate.length) {
+  const hasBuildingStructure = Boolean(pre.unit?.dong || pre.unit?.ho || pre.bldName);
+  const aggregateKey = aggregate.length ? aggregateCandidateKey(aggregate[0]) : "";
+  const contributingProbes = aggregateKey
+    ? probes.filter((probe) => probe.mapped.some((candidate) => aggregateCandidateKey(candidate) === aggregateKey)).length
+    : 0;
+  // 동·호/건물명이 있으면 한 지번에서만 건물이 확인돼도 집합건물 경로가 타당하다.
+  // 그런 단서가 없으면 최소 두 개의 명시 지번이 같은 건물로 수렴해야 토지 오인을 막는다.
+  if (aggregate.length && (hasBuildingStructure || contributingProbes >= 2)) {
     const selected = dedupe(aggregate);
     return {
       candidates: selected,
@@ -1178,35 +1173,43 @@ function sameInputRegion(pre, address) {
   }
   return Boolean(input.sido || input.sgg?.length);
 }
+const ownerRecoveryCache = new Map();
 async function recoverOwnerUnitCandidate(pre, clients) {
   const keyword = pre.ownerKeyword || "";
   if (!keyword || !clients?.naverLocal || !(pre.unit?.dong || pre.unit?.ho)) return null;
   const zipRegions = pre.zipcode ? lookupZip(pre.zipcode) : [];
   const zipSggList = zipRegions.map((entry) => String(entry).split("|")[1] || "").filter(Boolean);
-  const queries = [...new Set([
-    [pre.sgg, pre.eup, pre.emd, keyword].filter(Boolean).join(" "),
-    [pre.sgg, pre.emd, keyword].filter(Boolean).join(" "),
-    [pre.sgg, keyword].filter(Boolean).join(" "),
-    ...zipSggList.map((sgg) => [sgg, keyword].filter(Boolean).join(" "))
-  ].filter((query) => query && query !== keyword))];
-  const recovered = [];
-  const tried = [];
-  for (const query of queries) {
-    tried.push(`[소유자]${query}`);
-    const items = await safeCall(clients.naverLocal, query);
-    for (const item of items || []) {
-      const shownAddress = item.address || item.roadAddress || "";
-      if (!sameInputRegion(pre, shownAddress) && !addressMatchesZipRegions(shownAddress, zipRegions)) continue;
-      const naverAddress = item.roadAddress || item.address || "";
-      const found = await recoverJusoCandidateForNaver(naverAddress, clients);
-      const candidate = found.candidate;
-      if (!candidate || !candidate.isJip) continue;
-      if (pre.unit?.dong && !candidateSupportsDong(candidate, pre.unit.dong)) continue;
-      recovered.push({ candidate, item, found });
+  const cacheKey = [pre.sgg, pre.eup, pre.emd, keyword, pre.zipcode || ""].join("|");
+  let recovered = ownerRecoveryCache.get(cacheKey);
+  if (!recovered) {
+    const queries = [...new Set([
+      [pre.sgg, pre.eup, pre.emd, keyword].filter(Boolean).join(" "),
+      [pre.sgg, pre.emd, keyword].filter(Boolean).join(" "),
+      [pre.sgg, keyword].filter(Boolean).join(" "),
+      ...zipSggList.map((sgg) => [sgg, keyword].filter(Boolean).join(" "))
+    ].filter((query) => query && query !== keyword))];
+    recovered = [];
+    const tried = [];
+    for (const query of queries) {
+      tried.push(`[소유자]${query}`);
+      const items = await safeCall(clients.naverLocal, query);
+      for (const item of items || []) {
+        const shownAddress = item.address || item.roadAddress || "";
+        if (!sameInputRegion(pre, shownAddress) && !addressMatchesZipRegions(shownAddress, zipRegions)) continue;
+        const naverAddress = item.roadAddress || item.address || "";
+        const found = await recoverJusoCandidateForNaver(naverAddress, clients);
+        const candidate = found.candidate;
+        if (!candidate || !candidate.isJip) continue;
+        recovered.push({ candidate, item, found, tried: [...tried] });
+      }
     }
+    ownerRecoveryCache.set(cacheKey, recovered);
   }
+  const unitMatched = recovered.filter((entry) =>
+    !pre.unit?.dong || candidateSupportsDong(entry.candidate, pre.unit.dong)
+  );
   const groups = new Map();
-  for (const entry of recovered) {
+  for (const entry of unitMatched) {
     const key = aggregateCandidateKey(entry.candidate) || buildPnu(entry.candidate);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
@@ -1219,7 +1222,7 @@ async function recoverOwnerUnitCandidate(pre, clients) {
   return {
     candidates: [candidate],
     level: "L3_OWNER",
-    jusoQuery: tried.join(" ▸ ") + (first.found.query ? ` ▸ [PNU]${first.found.query}` : ""),
+    jusoQuery: (first.tried || []).join(" ▸ ") + (first.found.query ? ` ▸ [PNU]${first.found.query}` : ""),
     count: entries.length,
     naverAddr: first.item.roadAddress || first.item.address || "",
     naverJibunAddr: first.item.address || "",
@@ -2009,7 +2012,7 @@ function propagateAddressGroup(rows, groupHints, evidenceFor = null) {
 // 우편번호+소유자가 있으면 그것을, 없으면 시군구+법정동을 쓴다.
 function groupKeyOf(pre, zip, owner) {
   const z = String(zip || "").replace(/\.\d+$/, "").replace(/[^0-9]/g, "");
-  const o = String(owner || "");
+  const o = normalizeOwnerKey(owner);
   return (z && o) ? (z + "|" + o) : [pre.sgg, pre.emd].join("|");
 }
 function buildGroupHints(rows) {
@@ -2082,15 +2085,16 @@ function buildGroupHints(rows) {
 }
 function pipelineEvidenceForRow(row, groupHints, dongsoAnchors) {
   const p = preprocess(String(row?.raw || ""));
-  const owner = String((row?.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+  const owner = ownerOfRow(row);
   const directHint = groupHints?.get([p.sgg, p.emd, p.jibun].join("|")) || "";
   const unitHint = groupHints?.get(groupKeyOf(p, row?.zip, owner) + "|JIBUN_AS_UNIT") || "";
+  const unitAfterMissHint = groupHints?.get(groupKeyOf(p, row?.zip, owner) + "|UNIT_AFTER_LOT_MISS") || "";
   const anchorKey = [p.sgg, p.eup, p.emd].filter(Boolean).join("|");
   const dongsoAnchor = /동소/.test(String(row?.raw || ""))
     ? dongsoAnchors?.get(anchorKey) || ""
     : "";
   return {
-    groupHints: [directHint, unitHint].filter(Boolean).join("|"),
+    groupHints: [directHint, unitHint, unitAfterMissHint].filter(Boolean).join("|"),
     dongsoAnchor,
     oldAddressMap: findOldAdminTokens(row?.raw || "")
   };
@@ -2262,6 +2266,8 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
   result.naverAddr = naverAddr || "";
   result.naverJibunAddr = naverJibunAddr || "";
   result.naverRoadAddr = naverRoadAddr || "";
+  result.multiLotRecovery = cascadeResult.multiLotRecovery === true;
+  result.ownerUnitRecovery = cascadeResult.ownerUnitRecovery === true;
   if (result.status === "CONFIRMED") {
     // L4(네이버 확정)는 시도만 검증 — 네이버가 시군구/법정동 오류를 교정한
     // 것을 막지 않기 위함(부전타워 만화리→교리, 당진군→당진시 실측).
