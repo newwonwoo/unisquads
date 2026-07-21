@@ -27,7 +27,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python .github/scripts/apply_address_quality_p1_v4.py 2>&1 | tee patch.log
+          python .github/scripts/apply_address_quality_p1_v5.py 2>&1 | tee patch.log
 
       - name: Install test dependency
         run: npm install --no-save xlsx@0.18.5
@@ -68,6 +68,7 @@ jobs:
           rm -f .github/scripts/apply_address_quality_p1_v2.py
           rm -f .github/scripts/apply_address_quality_p1_v3.py
           rm -f .github/scripts/apply_address_quality_p1_v4.py
+          rm -f .github/scripts/apply_address_quality_p1_v5.py
           rm -f .github/workflows/patch-address-quality-p1.yml
           git add public/app.js public/admin-successor.mjs public/pipeline-contract.mjs
           git add public/address-quality-rules.mjs
