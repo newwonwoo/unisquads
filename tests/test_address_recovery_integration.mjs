@@ -6,6 +6,11 @@ test("minimal address recovery integration is wired without IROS collection chan
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   for (const marker of [
     "shouldEscalateJusoMultiToNaver",
+    "parseCompactAlphaUnit",
+    "normalizeAttachedAdminSpacing",
+    "propagateBuildingAnchorGroups",
+    "BUILDING_ANCHOR_UNIQUE_PNU",
+    "검증배제후보지번주소",
     "pendingJusoMulti",
     "isBuildingPartToken(t)",
     "NAVER_EXACT_ADMIN_CORRECTION",
