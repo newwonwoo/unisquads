@@ -58,6 +58,18 @@ import {
   normalizeOwnerKey,
   parseCompactAlphaUnit
 } from "./address-quality-rules.mjs";
+import {
+  addressMatchesZipRegions,
+  aggregateCandidateKey,
+  canAcceptZipBuildingCorrection,
+  candidateSupportsDong,
+  extractExplicitLotRefs,
+  hasOmittedExtraLots,
+  isLandMultiProbeEligible,
+  isUnitLikeLot,
+  ownerSearchKeyword,
+  selectAggregateBuildingCandidates
+} from "./address-multilot-rules.mjs";
 
 if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
 const { useState, useEffect, useCallback, useRef } = React;
@@ -733,7 +745,9 @@ function preprocess(raw) {
     jibun: _jc.jibun || "",
     road: _rd.road,
     buldNo: _rd.buldNo,
-    bldName: extractBuildingName(structuralRaw)
+    bldName: extractBuildingName(structuralRaw),
+    lotRefs: extractExplicitLotRefs(raw),
+    omittedExtraLots: hasOmittedExtraLots(raw)
   };
 }
 function fromJuso(item) {
@@ -1074,6 +1088,150 @@ function pickNaverCandidate(items, origRaw, bldName, zipRegions) {
   const confident = hasRegionCheck && strong && gap && top.sc > 0;
   return { picked: top.item, confident, reason: top.rs.join(",") };
 }
+function lotParts(value) {
+  const text = String(value || "").replace(/^산/, "");
+  const [main, sub = "0"] = text.split("-");
+  return { mountain: String(value || "").startsWith("산"), main, sub };
+}
+function candidateMatchesLotRef(candidate, ref) {
+  const wanted = lotParts(ref?.lot);
+  return String(candidate?.mtYn || "0") === (wanted.mountain ? "1" : "0") &&
+    Number(candidate?.mnnm) === Number(wanted.main) &&
+    Number(candidate?.slno || 0) === Number(wanted.sub || 0);
+}
+function lotQuery(pre, ref) {
+  return [pre.sidoFull, pre.sgg, pre.eup, ref.legal, ref.lot]
+    .filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+async function probeExplicitLots(pre, clients, tried) {
+  const refs = Array.isArray(pre.lotRefs) ? pre.lotRefs : [];
+  if (refs.length < 2 || !clients?.juso) return null;
+  const probes = [];
+  const allCandidates = [];
+  for (const ref of refs) {
+    const query = lotQuery(pre, ref);
+    if (!query) continue;
+    if (!tried.includes(query)) tried.push(query);
+    const items = await safeCall(clients.juso, query);
+    const mapped = items.map(fromJuso);
+    const exact = mapped.filter((candidate) => candidateMatchesLotRef(candidate, ref));
+    probes.push({ ref, query, mapped, exact });
+    allCandidates.push(...mapped);
+  }
+  if (!allCandidates.length) return null;
+
+  // 동·호/건물명이 있거나 여러 지번이 같은 건물관리번호로 수렴하면 집합건물이다.
+  const aggregate = selectAggregateBuildingCandidates(allCandidates, pre.unit);
+  if (aggregate.length) {
+    const selected = dedupe(aggregate);
+    return {
+      candidates: selected,
+      level: "M1",
+      jusoQuery: tried.join(" ▸ "),
+      count: allCandidates.length,
+      reviewNeeded: "aggregate_multilot_building",
+      addressMatchEvidence: ["MULTILOT_BUILDING_CLUSTER"],
+      multiLotRecovery: true
+    };
+  }
+
+  // 순수 토지는 각 명시 지번이 하나의 정확한 PNU로 검증될 때만 행 분리한다.
+  if (!isLandMultiProbeEligible({
+    raw: pre.raw,
+    refs,
+    unit: pre.unit,
+    buildingName: pre.bldName
+  })) return null;
+  const parcels = [];
+  for (const probe of probes) {
+    const exact = dedupe(probe.exact);
+    const pnuSet = new Set(exact.map(buildPnu).filter(Boolean));
+    if (pnuSet.size !== 1) return null;
+    const candidate = exact.find((item) => buildPnu(item)) || exact[0];
+    if (!candidate) return null;
+    parcels.push({ ref: probe.ref, candidate });
+  }
+  const distinct = new Set(parcels.map(({ candidate }) => buildPnu(candidate)).filter(Boolean));
+  if (distinct.size !== parcels.length) return null;
+  return {
+    candidates: parcels.map(({ candidate }) => candidate),
+    multiParcelCandidates: parcels,
+    level: "M1_LAND",
+    jusoQuery: tried.join(" ▸ "),
+    count: allCandidates.length,
+    addressMatchEvidence: ["MULTILOT_LAND_EXACT_PNU"],
+    multiLotRecovery: true
+  };
+}
+function ownerOfRow(row) {
+  return String(row?.owner || (row?.extra || []).find((value) =>
+    value && /[가-힣]/.test(String(value))
+  ) || "");
+}
+function sameInputRegion(pre, address) {
+  const input = extractRegion(pre.regionText || pre.cleaned || pre.raw || "");
+  const result = extractRegion(address || "");
+  if (input.sido && result.sido && input.sido !== result.sido) return false;
+  if (input.sgg?.length && result.sgg?.length) {
+    const left = input.sgg[0], right = result.sgg[0];
+    if (left !== right && !left.includes(right) && !right.includes(left)) return false;
+  }
+  return Boolean(input.sido || input.sgg?.length);
+}
+async function recoverOwnerUnitCandidate(pre, clients) {
+  const keyword = pre.ownerKeyword || "";
+  if (!keyword || !clients?.naverLocal || !(pre.unit?.dong || pre.unit?.ho)) return null;
+  const zipRegions = pre.zipcode ? lookupZip(pre.zipcode) : [];
+  const zipSggList = zipRegions.map((entry) => String(entry).split("|")[1] || "").filter(Boolean);
+  const queries = [...new Set([
+    [pre.sgg, pre.eup, pre.emd, keyword].filter(Boolean).join(" "),
+    [pre.sgg, pre.emd, keyword].filter(Boolean).join(" "),
+    [pre.sgg, keyword].filter(Boolean).join(" "),
+    ...zipSggList.map((sgg) => [sgg, keyword].filter(Boolean).join(" "))
+  ].filter((query) => query && query !== keyword))];
+  const recovered = [];
+  const tried = [];
+  for (const query of queries) {
+    tried.push(`[소유자]${query}`);
+    const items = await safeCall(clients.naverLocal, query);
+    for (const item of items || []) {
+      const shownAddress = item.address || item.roadAddress || "";
+      if (!sameInputRegion(pre, shownAddress) && !addressMatchesZipRegions(shownAddress, zipRegions)) continue;
+      const naverAddress = item.roadAddress || item.address || "";
+      const found = await recoverJusoCandidateForNaver(naverAddress, clients);
+      const candidate = found.candidate;
+      if (!candidate || !candidate.isJip) continue;
+      if (pre.unit?.dong && !candidateSupportsDong(candidate, pre.unit.dong)) continue;
+      recovered.push({ candidate, item, found });
+    }
+  }
+  const groups = new Map();
+  for (const entry of recovered) {
+    const key = aggregateCandidateKey(entry.candidate) || buildPnu(entry.candidate);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  if (groups.size !== 1) return null;
+  const entries = [...groups.values()][0];
+  const first = entries[0];
+  const candidate = { ...first.candidate, source: "owner-unit-recovery" };
+  return {
+    candidates: [candidate],
+    level: "L3_OWNER",
+    jusoQuery: tried.join(" ▸ ") + (first.found.query ? ` ▸ [PNU]${first.found.query}` : ""),
+    count: entries.length,
+    naverAddr: first.item.roadAddress || first.item.address || "",
+    naverJibunAddr: first.item.address || "",
+    naverRoadAddr: first.item.roadAddress || "",
+    naverPnuOk: true,
+    zipRegions,
+    reviewNeeded: "owner_zip_unit_recovered",
+    addressMatchEvidence: ["OWNER_ZIP_UNIT_UNIQUE", ...(first.found.evidence || [])],
+    ownerUnitRecovery: true
+  };
+}
+
 async function cascade(pre, clients) {
   const { cleaned, searchText } = pre;
   // jusoQuery: juso에 '실제로' 전달된 문자열(진단용). 전처리가 주소를 깨뜨렸는지
@@ -1097,6 +1255,8 @@ async function cascade(pre, clients) {
   const jibunQuery = pre.jibun ? [_head, pre.eup, pre.emd, pre.jibun].filter(Boolean).join(" ") : "";
   let items = [];
   let pendingJusoMulti = null;
+  const multiLotProbe = await probeExplicitLots(pre, clients, tried);
+  if (multiLotProbe) return multiLotProbe;
   const deferJusoMulti = (mapped, level) => {
     if (!shouldEscalateJusoMultiToNaver(mapped.length, bldNameForGate)) return false;
     pendingJusoMulti = {
@@ -1205,9 +1365,8 @@ async function cascade(pre, clients) {
       // \ubcf5\uad6c \uc9c0\uc5ed\uc740 \uac80\uc0c9\ubc94\uc704\uc77c \ubfd0 \ucd5c\uc885\uc8fc\uc18c \uc544\ub2d8. \ub124\uc774\ubc84 \uacb0\uacfc\uc640 \ub300\uc870\ub294 \ud6c4\ubcf4\uac80\uc99d\uc5d0\uc11c.
       // 우편번호 복구 후보(다중매핑=인접지역 순환조회). 시군구 없을 때만.
       let zipSggList = [];
-      let zipRegions = [];   // ["시도|시군구", ...] 후보검증 지역대조용
-      if (!sgg && pre?.zipcode) {
-        zipRegions = lookupZip(pre.zipcode);   // ["경기도|의정부시", ...]
+      const zipRegions = pre?.zipcode ? lookupZip(pre.zipcode) : [];   // 교정·인접지역 검증에도 사용
+      if (!sgg && zipRegions.length) {
         zipSggList = zipRegions.map((zr) => (zr.split("|")[1] || "")).filter(Boolean);
       }
       // 검색어 3단계화(보완사항 3): 좁은 것부터. 3단계 다 0건이어야 인적오류 확정.
@@ -1304,6 +1463,7 @@ async function cascade(pre, clients) {
             naverPnuOk: !!cand.pnuOk,                  // PNU 확보 여부
             addressMatchEvidence: naverAddressMatchEvidence,
             reviewNeeded: _reviewNeeded,
+            zipRegions,
           };
         }
       } else {
@@ -1573,7 +1733,7 @@ function collectAddressPropagationGroups(rows, groupHints) {
     // 지번 자리의 N-M이 집단 판정상 동·호면 지번을 비운다(전파 대상이 된다)
     if (groupHints && p.jibun) {
       const jp = p.jibun.split("-");
-      const _own = String((row.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+      const _own = ownerOfRow(row);
       if (jp.length === 2 && Number(jp[1]) >= 100 &&
           groupHints.get(groupKeyOf(p, row.zip, _own) + "|JIBUN_AS_UNIT") === "UNIT") {
         p.unit = { dong: jp[0], ho: jp[1] };
@@ -1581,7 +1741,7 @@ function collectAddressPropagationGroups(rows, groupHints) {
       }
     }
     const zip = String(row.zip || "").replace(/\.\d+$/, "").replace(/[^0-9]/g, "");
-    const owner = String((row.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+    const owner = ownerOfRow(row);
     const key = zip + "|" + owner + "|" + (p.emd || "");
     if (!zip || !owner || !p.emd) continue;
     if (!groups.has(key)) groups.set(key, []);
@@ -1596,7 +1756,7 @@ function collectOwnerZipPropagationGroups(rows, groupHints) {
     if (!raw) continue;
     const p = preprocess(raw);
     const zip = String(row.zip || "").replace(/\.\d+$/, "").replace(/[^0-9]/g, "");
-    const owner = String((row.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+    const owner = ownerOfRow(row);
     if (!zip || !owner) continue;
     if (groupHints && p.jibun) {
       const jp = p.jibun.split("-");
@@ -1686,7 +1846,7 @@ function collectBuildingAnchorGroups(rows) {
     if (!raw) continue;
     const p = preprocess(raw);
     if (!p.bldName || !isDistinctiveBuildingName(p.bldName)) continue;
-    const owner = normalizeOwnerKey((row.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+    const owner = normalizeOwnerKey(ownerOfRow(row));
     if (!owner) continue;
     const region = extractRegion(p.regionText || p.cleaned || raw);
     const zip = String(row.zip || "").replace(/\.\d+$/, "").replace(/[^0-9]/g, "");
@@ -1884,7 +2044,7 @@ function buildGroupHints(rows) {
     if (!raw) continue;
     const p = preprocess(raw);
     if (!p.jibun) continue;
-    const owner = String((row.extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+    const owner = ownerOfRow(row);
     const key = groupKeyOf(p, row.zip, owner);
     if (!byEmd.has(key)) byEmd.set(key, []);
     byEmd.get(key).push(p.jibun);
@@ -1899,6 +2059,24 @@ function buildGroupHints(rows) {
     const dongs = new Set(unitLike.map((x) => x[0]));
     if (dongs.size < 2 && unitLike.length < 3) continue;
     out.set(key + "|JIBUN_AS_UNIT", "UNIT");
+  }
+  // 정상 지번 기준행이 없어도, 같은 소유자·우편번호 그룹의 N-M이 여러 세대로
+  // 흩어지면 '지번으로 먼저 조회하고 0건일 때만' 동·호로 재해석한다.
+  const afterMiss = new Map();
+  for (const row of rows) {
+    const p = preprocess(String(row?.raw || ""));
+    const unit = isUnitLikeLot(p.jibun);
+    if (!unit || p.unit?.dong || p.unit?.ho || p.bldName) continue;
+    const key = groupKeyOf(p, row.zip, ownerOfRow(row));
+    if (!afterMiss.has(key)) afterMiss.set(key, []);
+    afterMiss.get(key).push(unit);
+  }
+  for (const [key, units] of afterMiss) {
+    if (units.length < 3) continue;
+    const dongs = new Set(units.map((unit) => unit.dong));
+    const hos = new Set(units.map((unit) => unit.ho));
+    if (dongs.size < 2 && hos.size < 3) continue;
+    out.set(key + "|UNIT_AFTER_LOT_MISS", "UNIT");
   }
   return out;
 }
@@ -1928,6 +2106,7 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
   const pre = preprocess(_raw);
   // 복수세대 분리행: 배치가 지정한 세대를 그대로 쓴다(원문에는 여러 세대가 있다)
   if (unitOverride) pre.unit = { dong: unitOverride.dong || null, ho: unitOverride.ho || null };
+  pre.ownerKeyword = ownerSearchKeyword(owner);
   // 집단 판정(2026-07-17): 지번 뒤 N-M을 배치 전체 분포로 확정한다.
   //   UNIT  → 동·호로 채택 (juso 호출 없이 확정)
   //   JIBUN → 별개 지번. 동·호로 쓰지 않는다
@@ -1969,7 +2148,70 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
       validation: { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" },
     };
   }
-  const { candidates, level, jusoQuery, count, humanInputError, naverAddr, naverJibunAddr, naverRoadAddr, naverPnuOk } = cascadeResult;
+  const firstHadNoCandidates = !(cascadeResult?.candidates || []).length;
+  if (firstHadNoCandidates) {
+    const unitLike = isUnitLikeLot(pre.jibun);
+    const unitAfterMiss = groupHints?.get(groupKeyOf(pre, zipcode, owner) + "|UNIT_AFTER_LOT_MISS") === "UNIT";
+    if (unitLike && unitAfterMiss && !pre.unit?.dong && !pre.unit?.ho) {
+      pre.unit = unitLike;
+      pre.jibun = "";
+    }
+    if ((pre.unit?.dong || pre.unit?.ho) && !pre.bldName) {
+      const recovered = await recoverOwnerUnitCandidate(pre, clients);
+      if (recovered) cascadeResult = recovered;
+    }
+  }
+  const {
+    candidates, level, jusoQuery, count, humanInputError,
+    naverAddr, naverJibunAddr, naverRoadAddr, naverPnuOk,
+    multiParcelCandidates, zipRegions = []
+  } = cascadeResult;
+
+  if (Array.isArray(multiParcelCandidates) && multiParcelCandidates.length >= 2) {
+    const parcelResults = [];
+    for (const { ref, candidate } of multiParcelCandidates) {
+      const parcelPre = {
+        ...pre,
+        unit: { dong: null, ho: null },
+        jibun: ref.lot,
+        emd: ref.legal,
+        emdCands: [ref.legal]
+      };
+      const parcel = resolve([candidate], parcelPre);
+      const validation = validateRegion(pre.regionText || pre.cleaned, parcel.jibunAddr, false, candidate.relJibun || "");
+      if (parcel.status !== "CONFIRMED" || validation.status === "MISMATCH") {
+        return {
+          status: "AMBIGUOUS",
+          unit: pre.unit,
+          candidates: multiParcelCandidates.map(({ candidate: item }) => item),
+          searchLevel: level,
+          jusoQuery,
+          candCount: count,
+          message: "복수지번 개별 검증 결과가 일치하지 않아 행 분리를 보류했습니다.",
+          validation: { status: "NOT_AVAILABLE", reason: "복수지번 분리 보류", inputSgg: "", resultSgg: "" }
+        };
+      }
+      parcel.validation = validation;
+      parcel.source = "juso-land-multilot";
+      parcel.reviewNeeded = null;
+      parcel.addressMatchEvidence = ["MULTILOT_LAND_EXACT_PNU"];
+      parcel.multiLotRecovery = true;
+      parcel.parcelRaw = lotQuery(pre, ref);
+      parcelResults.push(parcel);
+    }
+    return {
+      status: "CONFIRMED",
+      multiParcelResults: parcelResults,
+      multiLotRecovery: true,
+      source: "juso-land-multilot",
+      unit: { dong: null, ho: null },
+      searchLevel: level,
+      jusoQuery,
+      candCount: count,
+      validation: { status: "MATCH", reason: "명시된 복수지번을 각각 정확 PNU로 검증", inputSgg: "", resultSgg: "" },
+      addressMatchEvidence: ["MULTILOT_LAND_EXACT_PNU"]
+    };
+  }
 
   // ── L4 네이버 최종 판정 결과 처리 (2026-07-15) ──────────────────
   // 네이버는 '최종 정상주소 판정 엔진'. 주소 판정과 PNU 확보를 분리한다.
@@ -2040,6 +2282,22 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
         ...(result.addressMatchEvidence || []),
         "NAVER_EXACT_ADMIN_CORRECTION"
       ])];
+    } else if (canAcceptZipBuildingCorrection({
+      validation: v,
+      naverPnuOk,
+      addressMatchEvidence: result.addressMatchEvidence,
+      inputBuildingName: pre.bldName,
+      resultBuildingName: result.bdNm,
+      resultAddress: result.jibunAddr || result.roadAddr,
+      zipRegions
+    })) {
+      v.status = "MATCH";
+      v.reason = "정확 건물명·도로·PNU와 우편번호 지역근거로 인접지역 교정";
+      result.reviewNeeded = result.reviewNeeded || "zip_building_region_correction";
+      result.addressMatchEvidence = [...new Set([
+        ...(result.addressMatchEvidence || []),
+        "ZIP_BUILDING_REGION_CORRECTION"
+      ])];
     }
     result.validation = v;
     // 용도 검증(2026-07-17): 원문이 주거인데 결과가 비주거면 확정하지 않는다.
@@ -2064,6 +2322,36 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
   }
   return result;
 }
+function expandResolvedMultiParcelRows(rows, evidenceFor = null) {
+  const expanded = [];
+  for (const row of rows) {
+    const parcels = row.result?.multiParcelResults;
+    if (!Array.isArray(parcels) || parcels.length < 2) {
+      expanded.push(row);
+      continue;
+    }
+    for (let index = 0; index < parcels.length; index++) {
+      const parcel = { ...cloneResult(parcels[index]) };
+      delete parcel.multiParcelResults;
+      const child = {
+        ...row,
+        rowId: `${row.rowId || "row"}-parcel-${index + 1}`,
+        raw: parcel.parcelRaw || row.raw,
+        sourceRaw: row.raw,
+        result: null
+      };
+      delete parcel.parcelRaw;
+      child.result = attachPipelineMetadata(
+        child,
+        parcel,
+        evidenceFor ? evidenceFor(child) : {}
+      );
+      expanded.push(child);
+    }
+  }
+  return expanded;
+}
+
 const MOCK_JUSO_DB = [
   { keys: ["\uC5ED\uC0BC", "\uD14C\uD5E4\uB780\uB85C 212"], item: { admCd: "1168010100", mtYn: "0", lnbrMnnm: "736", lnbrSlno: "25", roadAddr: "\uC11C\uC6B8\uD2B9\uBCC4\uC2DC \uAC15\uB0A8\uAD6C \uD14C\uD5E4\uB780\uB85C 212", jibunAddr: "\uC11C\uC6B8\uD2B9\uBCC4\uC2DC \uAC15\uB0A8\uAD6C \uC5ED\uC0BC\uB3D9 736-25", bdMgtSn: "1168010100107360025000001", bdNm: "\uBA40\uD2F0\uCEA0\uD37C\uC2A4" } },
   { keys: ["\uC2E0\uC815\uB3D9"], item: { admCd: "1147010300", mtYn: "0", lnbrMnnm: "100", lnbrSlno: "1", roadAddr: "\uC11C\uC6B8\uD2B9\uBCC4\uC2DC \uC591\uCC9C\uAD6C \uC911\uC559\uB85C 100", jibunAddr: "\uC11C\uC6B8\uD2B9\uBCC4\uC2DC \uC591\uCC9C\uAD6C \uC2E0\uC815\uB3D9 100-1", bdMgtSn: null, bdNm: "" } },
@@ -3599,6 +3887,7 @@ function AddrRefineTestGui() {
       const detailColIdx = findColIdx(header0, [/상세\s*주소/]);
       // 우편번호(2026-07-17): 시군구 없는 주소의 지역 복구용. 소재지우편번호 등.
       const zipColIdx = findColIdx(header0, [/우편\s*번호|우편|zip/i]);
+      const ownerColIdx = findColIdx(header0, [/소유자\s*명|소유자|소유인|채무자\s*명/]);
       const addrColIdx = findColIdx(
         header0,
         [/주소|address/i],
@@ -3644,21 +3933,24 @@ function AddrRefineTestGui() {
             : extraHeaders2.map((_, i) => r[i + 1] ?? "");
           // 우편번호(2026-07-17): 시군구 복구용. 각 분리행에 복제.
           const zip = zipColIdx >= 0 ? String(r[zipColIdx] ?? "").trim() : "";
-          // W9: 순수 토지 복수지번은 지번마다 행 분리. extra(업로드 원본열)는 각 행에 복제.
+          const owner = ownerColIdx >= 0
+            ? String(r[ownerColIdx] ?? "").trim()
+            : String(extra.find((value) => value && /[가-힣]/.test(String(value))) || "");
+          // W9: 순수 토지 복수지번은 API로 각 지번을 검증한 뒤에만 행 분리한다.
           // 복수세대 우선: 한 행에 세대가 둘 이상이면 세대별로 나눈다.
           // 동·호만 다르고 나머지(원본주소·extra·우편번호)는 그대로 승계한다.
           const units = splitUnitsForBatch(raw);
           if (units) {
             return units.map((u, unitIndex) => ({
               rowId: `row-${sourceIndex + 1}-unit-${unitIndex + 1}`,
-              raw, extra, zip, result: null,
+              raw, extra, zip, owner, result: null,
               unitOverride: { dong: u[0], ho: u[1] }
             }));
           }
           const splits = splitRowsForBatch(raw);
           return splits.map((sraw, splitIndex) => ({
             rowId: `row-${sourceIndex + 1}-split-${splitIndex + 1}`,
-            raw: sraw, extra, zip, result: null
+            raw: sraw, extra, zip, owner, result: null
           }));
         })
         .filter((row) => row.raw !== "");   // 주소가 실제로 비어있는 행은 제외
@@ -3698,7 +3990,7 @@ function AddrRefineTestGui() {
     setAutoStopMsg("");
     batchStopRef.current = false;
     await loadZipMap();   // 우편번호 복구맵 1회 로드(캐시). 실패해도 복구만 스킵.
-    const next = rows.map((row) => ({
+    let next = rows.map((row) => ({
       ...row,
       result: row.result ? cloneResult(row.result) : null,
       reg: row.reg ? cloneResult(row.reg) : row.reg
@@ -3745,14 +4037,14 @@ function AddrRefineTestGui() {
       if (batchStopRef.current) break;
       let r;
       try {
-        r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, (next[idxs[0]].extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");  // 대표는 그룹 첫 행의 원본 raw + 우편번호
+        r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));  // 대표는 그룹 첫 행의 원본 raw + 우편번호
         consecTransient = 0;
       } catch (e) {
         // W4(2026-07-17): transient(API 순간한도 429 등)면 800ms 대기 후 1회 자동 재시도.
         // 순간한도는 잠깐 기다리면 풀림. 1회만(2회+는 배치 지연). 실패 시 기존 TRANSIENT 기록.
         try {
           await new Promise((res) => setTimeout(res, 800));
-          r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, (next[idxs[0]].extra || []).find((x) => x && /[가-힣]/.test(String(x))) || "");
+          r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));
           consecTransient = 0;
         } catch (e2) {
           r = { status: "FAILED", failKind: "TRANSIENT",
@@ -3788,6 +4080,7 @@ function AddrRefineTestGui() {
     // R8'(2026-07-17): 모든 조회가 끝난 뒤 마지막에 전파한다. 앞 단계가
     // CONFIRMED를 늘릴수록 기준행이 생기는 그룹도 늘어나므로 순서가 중요하다.
     if (!batchStopRef.current) {
+      next = expandResolvedMultiParcelRows(next, evidenceFor);
       propagateBuildingAnchorGroups(next, evidenceFor);
       propagateAddressGroup(next, groupHints, evidenceFor);
     }

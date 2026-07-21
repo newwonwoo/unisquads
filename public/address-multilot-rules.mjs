@@ -166,7 +166,7 @@ export function addressMatchesZipRegions(address, zipRegions) {
     const zipSido = canonSidoToken(zipSidoRaw);
     if (!zipSido || zipSido !== resultSido) return false;
     const zipSgg = String(zipSggRaw || "").replace(/\s+/g, "");
-    if (!zipSgg) return true;
+    if (!zipSgg || canonSidoToken(zipSgg) === resultSido) return true;
     const compactResult = result.replace(/\s+/g, "");
     return compactResult.includes(zipSgg);
   });
