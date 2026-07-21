@@ -24,7 +24,10 @@ jobs:
           node-version: '22'
 
       - name: Apply conservative address quality patch
-        run: python .github/scripts/apply_address_quality_p1.py
+        shell: bash
+        run: |
+          set -o pipefail
+          python .github/scripts/apply_address_quality_p1.py 2>&1 | tee patch.log
 
       - name: Install test dependency
         run: npm install --no-save xlsx@0.18.5
@@ -51,7 +54,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: address-quality-p1-validation
-          path: validation.log
+          path: |
+            patch.log
+            validation.log
+          if-no-files-found: warn
           retention-days: 2
 
       - name: Commit tested files and remove temporary tooling
