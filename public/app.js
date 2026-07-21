@@ -1,7 +1,7 @@
 import {
   IROS_MODULE_VERSIONS,
   MATCHER_VERSION,
-  alternateRawLotAddress,
+  alternateRawLotAddresses,
   buildingEvidenceKind,
   buildingKey,
   candidateHasNoDong,
@@ -9,6 +9,8 @@ import {
   candidateMatchesUnit,
   filterExpectedPropertyClass,
   matchedCandidateUnitVariant,
+  rawUnitRecoverySignature,
+  selectUniqueRawUnitCandidate,
   unitKey
 } from "./unit-match.mjs";
 import {
@@ -3211,9 +3213,14 @@ function AddrRefineTestGui() {
         continue;
       }
       if (isReusableIrosResult(row.reg)) continue;
-      if (isCurrentIrosResult(row.reg) && row.reg?.recovery_pending && row.reg?.recovery_address) {
-        addPendingAlternate(row.reg.recovery_address, { idx, row });
-        continue;
+      if (isCurrentIrosResult(row.reg) && row.reg?.recovery_pending) {
+        const pendingAddresses = Array.isArray(row.reg.recovery_addresses)
+          ? row.reg.recovery_addresses.filter(Boolean)
+          : [row.reg.recovery_address].filter(Boolean);
+        if (pendingAddresses.length) {
+          for (const address of pendingAddresses) addPendingAlternate(address, { idx, row });
+          continue;
+        }
       }
       targets.push({ idx, row });
     }
@@ -3356,6 +3363,8 @@ function AddrRefineTestGui() {
         cands = typed.candidates;
       }
       stageCounts.property_class = cands.length;
+      const unitCandidatePool = cands;
+      let rawUnitRecovery = null;
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
           const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
@@ -3389,6 +3398,30 @@ function AddrRefineTestGui() {
       }
       stageCounts.unit = cands.length;
 
+      // R-IROS-RAW-UNIT: 기존 동·호 결과가 단일 한 건이 아닐 때만 원문의
+      // N-M호 또는 N층M호 구조를 보조증거로 사용한다. 여러 표기가 서로 다른
+      // 고유번호를 가리키면 확정하지 않는다.
+      if ((wantDong || wantHo) && cands.length !== 1) {
+        const recovered = selectUniqueRawUnitCandidate(
+          unitCandidatePool,
+          row.raw,
+          row.result.unit || {}
+        );
+        if (recovered) {
+          cands = [recovered.candidate];
+          rawUnitRecovery = {
+            source: recovered.variant.source,
+            dong: recovered.variant.dong,
+            ho: recovered.variant.ho,
+            signature: rawUnitRecoverySignature(row.raw, row.result.unit || {})
+          };
+          stageCounts.raw_unit_recovery = 1;
+          applyModule("R-IROS-RAW-UNIT", IROS_MODULE_VERSIONS.R_IROS_RAW_UNIT);
+        } else {
+          stageCounts.raw_unit_recovery = 0;
+        }
+      }
+
       if (!cands.length) {
         return {
           status: (wantDong || wantHo) ? "REG_UNIT_NOT_FOUND" : "REG_NOT_FOUND",
@@ -3397,6 +3430,7 @@ function AddrRefineTestGui() {
           failure_stage: (wantDong || wantHo) ? "UNIT" : "CANDIDATE",
           stage_counts: stageCounts,
           applied_modules: appliedModules,
+          raw_unit_recovery: rawUnitRecovery,
           message: (wantDong || wantHo) ? "완전 후보에서 일치 세대 없음" : "완전 후보 없음",
           at: nowText()
         };
@@ -3449,7 +3483,8 @@ function AddrRefineTestGui() {
           strategy: "PNU_CACHE",
           stage_counts: stageCounts,
           applied_modules: appliedModules,
-          message: "PNU 완전후보에서 동·호 일치",
+          raw_unit_recovery: rawUnitRecovery,
+          message: rawUnitRecovery ? "원문 세대구조로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치",
           at: nowText()
         };
       }
@@ -3458,6 +3493,7 @@ function AddrRefineTestGui() {
           status: "REG_MULTI", candidates: cands, complete: true,
           failure_stage: "UNIQUENESS", stage_counts: stageCounts,
           applied_modules: appliedModules,
+          raw_unit_recovery: rawUnitRecovery,
           message: `${cands.length}건`, at: nowText()
         };
       }
@@ -3574,8 +3610,12 @@ function AddrRefineTestGui() {
       const lotEvidence = encodeURIComponent(
         String(queryAddress || member.row.result.jibunAddr || member.row.result.irosQuery || "")
       );
+      const rawUnitEvidence = rawUnitRecoverySignature(
+        member.row.raw,
+        member.row.result.unit || {}
+      );
       const matchCacheKey = collection.content_hash
-        ? `regmatch:${collection.content_hash}:${MATCHER_VERSION}:${lotEvidence}:${wantDong}:${wantHo}:${encodeURIComponent(strictEvidence)}`
+        ? `regmatch:${collection.content_hash}:${MATCHER_VERSION}:${lotEvidence}:${wantDong}:${wantHo}:${encodeURIComponent(rawUnitEvidence)}:${encodeURIComponent(strictEvidence)}`
         : "";
       let matchedResult = matchCacheKey ? await idbGet(matchCacheKey) : null;
       if (!matchedResult) {
@@ -3587,6 +3627,7 @@ function AddrRefineTestGui() {
             dong_key: wantDong,
             ho_key: wantHo,
             lot_key: lotEvidence,
+            raw_unit_signature: rawUnitEvidence,
             strict: strictEvidence
           }
         };
@@ -3622,15 +3663,18 @@ function AddrRefineTestGui() {
         let reg = await matchMember(member, collection);
         if (reg.status === "REG_UNIT_NOT_FOUND") {
           const normalizedAddress = member.row.result.jibunAddr || member.row.result.irosQuery || "";
-          const alternateAddress = alternateRawLotAddress(member.row.raw, normalizedAddress);
-          if (alternateAddress) {
+          const alternateAddresses = alternateRawLotAddresses(member.row.raw, normalizedAddress);
+          if (alternateAddresses.length) {
             reg = withIrosVersions({
               ...reg,
               recovery_pending: true,
-              recovery_address: alternateAddress,
+              recovery_address: alternateAddresses[0],
+              recovery_addresses: alternateAddresses,
               recovery_attempted: false
             });
-            addAlternateMember(alternateAddress, member);
+            for (const alternateAddress of alternateAddresses) {
+              addAlternateMember(alternateAddress, member);
+            }
           }
         }
         next[member.idx] = { ...next[member.idx], reg };
@@ -3643,6 +3687,11 @@ function AddrRefineTestGui() {
     }
 
     const alternateEntries = [...alternateGroups.entries()];
+    const alternateAttempts = new Map();
+    const addAlternateAttempt = (member, address, recovered) => {
+      if (!alternateAttempts.has(member.idx)) alternateAttempts.set(member.idx, []);
+      alternateAttempts.get(member.idx).push({ address, recovered });
+    };
     setBatchAltTotal(alternateEntries.length);
     runState.alternateTotal = alternateEntries.length;
     for (let a = 0; a < alternateEntries.length; a++) {
@@ -3651,51 +3700,8 @@ function AddrRefineTestGui() {
       const identity = `ALTLOT:${alternateAddress}`;
       const { collection, cacheHit } = await loadCollection(identity, members[0].row, alternateAddress);
       for (const member of members) {
-        const prior = next[member.idx].reg || member.row.reg || {};
         const recovered = await matchMember(member, collection, alternateAddress);
-        if (recovered.status === "RESOLVED" || recovered.status === "REG_MULTI") {
-          const moduleTag = `R-IROS-MULTILOT@${IROS_MODULE_VERSIONS.R_IROS_MULTILOT}`;
-          const appliedModules = [...(recovered.applied_modules || [])];
-          if (!appliedModules.includes(moduleTag)) appliedModules.push(moduleTag);
-          next[member.idx] = {
-            ...next[member.idx],
-            reg: withIrosVersions({
-              ...recovered,
-              applied_modules: appliedModules,
-              recovery_module: moduleTag,
-              recovery_address: alternateAddress,
-              recovery_pending: false,
-              recovery_attempted: true,
-              message: recovered.status === "RESOLVED"
-                ? "원문 대체지번 완전후보에서 동·호 일치"
-                : recovered.message
-            })
-          };
-        } else if (isRetryableIrosStatus(recovered.status)) {
-          next[member.idx] = {
-            ...next[member.idx],
-            reg: withIrosVersions({
-              ...prior,
-              recovery_pending: true,
-              recovery_address: alternateAddress,
-              recovery_attempted: true,
-              recovery_error_status: recovered.status,
-              recovery_error_message: recovered.message || ""
-            })
-          };
-        } else {
-          next[member.idx] = {
-            ...next[member.idx],
-            reg: withIrosVersions({
-              ...prior,
-              recovery_pending: false,
-              recovery_address: alternateAddress,
-              recovery_attempted: true,
-              recovery_result_status: recovered.status,
-              recovery_result_message: recovered.message || ""
-            })
-          };
-        }
+        addAlternateAttempt(member, alternateAddress, recovered);
       }
       recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
       setBatchAltDone(a + 1);
@@ -3708,6 +3714,103 @@ function AddrRefineTestGui() {
       });
       if (!cacheHit && a < alternateEntries.length - 1 && !batchStopRef.current)
         await new Promise((res) => setTimeout(res, 1e3));
+    }
+
+    // 여러 명시 대체지번은 첫 성공을 채택하지 않는다. 모든 조회가 끝난 뒤
+    // 한 고유번호로만 수렴했을 때 확정하고, 복수결과 또는 서로 다른 고유번호가
+    // 하나라도 남으면 REG_MULTI로 보존한다.
+    if (!batchStopRef.current) {
+      for (const [idx, attempts] of alternateAttempts.entries()) {
+        const prior = next[idx].reg || {};
+        const addresses = [...new Set(attempts.map((attempt) => attempt.address))];
+        const retryable = attempts.filter((attempt) => isRetryableIrosStatus(attempt.recovered.status));
+        if (retryable.length) {
+          const first = retryable[0].recovered;
+          next[idx] = {
+            ...next[idx],
+            reg: withIrosVersions({
+              ...prior,
+              recovery_pending: true,
+              recovery_address: addresses[0] || "",
+              recovery_addresses: addresses,
+              recovery_attempted: true,
+              recovery_error_status: first.status,
+              recovery_error_message: first.message || ""
+            })
+          };
+          continue;
+        }
+
+        const resolved = attempts.filter((attempt) => attempt.recovered.status === "RESOLVED");
+        const multiple = attempts.filter((attempt) => attempt.recovered.status === "REG_MULTI");
+        const resolvedNos = new Set(resolved.map((attempt) => attempt.recovered.unique_no).filter(Boolean));
+        const moduleTag = `R-IROS-MULTILOT@${IROS_MODULE_VERSIONS.R_IROS_MULTILOT}`;
+
+        if (resolvedNos.size === 1 && multiple.length === 0) {
+          const chosen = resolved[0].recovered;
+          const appliedModules = [...(chosen.applied_modules || [])];
+          if (!appliedModules.includes(moduleTag)) appliedModules.push(moduleTag);
+          next[idx] = {
+            ...next[idx],
+            reg: withIrosVersions({
+              ...chosen,
+              applied_modules: appliedModules,
+              recovery_module: moduleTag,
+              recovery_address: addresses[0] || "",
+              recovery_addresses: addresses,
+              recovery_pending: false,
+              recovery_attempted: true,
+              message: "명시 대체지번 전체 조회가 한 고유번호로 수렴"
+            })
+          };
+          continue;
+        }
+
+        if (resolvedNos.size > 1 || multiple.length > 0) {
+          const candidateMap = new Map();
+          for (const attempt of [...resolved, ...multiple]) {
+            for (const candidate of attempt.recovered.candidates || []) {
+              const key = candidate.unique_no || JSON.stringify(candidate);
+              if (!candidateMap.has(key)) candidateMap.set(key, candidate);
+            }
+          }
+          const appliedModules = [...(prior.applied_modules || [])];
+          if (!appliedModules.includes(moduleTag)) appliedModules.push(moduleTag);
+          next[idx] = {
+            ...next[idx],
+            reg: withIrosVersions({
+              ...prior,
+              status: "REG_MULTI",
+              candidates: [...candidateMap.values()],
+              complete: true,
+              failure_stage: "ALTERNATE_LOT_UNIQUENESS",
+              applied_modules: appliedModules,
+              recovery_module: moduleTag,
+              recovery_address: addresses[0] || "",
+              recovery_addresses: addresses,
+              recovery_pending: false,
+              recovery_attempted: true,
+              recovery_result_status: "REG_MULTI",
+              message: "명시 대체지번 조회 결과가 하나의 고유번호로 수렴하지 않음"
+            })
+          };
+          continue;
+        }
+
+        const terminal = attempts[0]?.recovered || {};
+        next[idx] = {
+          ...next[idx],
+          reg: withIrosVersions({
+            ...prior,
+            recovery_pending: false,
+            recovery_address: addresses[0] || "",
+            recovery_addresses: addresses,
+            recovery_attempted: true,
+            recovery_result_status: terminal.status || "REG_NOT_FOUND",
+            recovery_result_message: terminal.message || "명시 대체지번에서도 일치 세대 없음"
+          })
+        };
+      }
     }
 
     const finalProgress = irosProgressStats(next);

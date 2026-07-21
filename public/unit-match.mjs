@@ -1,11 +1,14 @@
-export const MATCHER_VERSION = "iros-matcher-v5";
+import { extractExplicitLotRefs } from "./address-multilot-rules.mjs";
+
+export const MATCHER_VERSION = "iros-matcher-v6";
 
 export const IROS_MODULE_VERSIONS = Object.freeze({
   IROS_CANDIDATE_NORMALIZE: "2",
-  R_IROS_MULTILOT: "1",
+  R_IROS_MULTILOT: "2",
   R_IROS_BUILDING_EVIDENCE: "1",
   R_IROS_HO_BUILDING: "1",
-  R_IROS_BUILDING_DISAMBIG: "1"
+  R_IROS_BUILDING_DISAMBIG: "1",
+  R_IROS_RAW_UNIT: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -87,6 +90,100 @@ export function candidateHasNoDong(candidate) {
   return candidateUnitVariants(candidate).every((variant) => !variant.dong);
 }
 
+function uniqueUnitVariants(variants) {
+  return variants.filter((variant, index, source) =>
+    variant.dong && variant.ho &&
+    source.findIndex((other) =>
+      other.dong === variant.dong && other.ho === variant.ho && other.source === variant.source
+    ) === index
+  );
+}
+
+// 원문에 명시된 구조만 보조 후보로 만든다. 기존 동·호 매칭이 단일 결과이면
+// 이 후보는 사용하지 않으며, 실패 또는 복수결과일 때만 완전 후보 안에서 재매칭한다.
+export function rawUnitRecoveryVariants(rawAddress, currentUnit = {}) {
+  const raw = String(rawAddress || "");
+  const currentDong = dongAliasKey(currentUnit?.dong);
+  const currentHo = unitKey(currentUnit?.ho, "ho");
+  const variants = [];
+
+  // 501-101호처럼 왼쪽 숫자가 전처리에서 유실된 형식. 한 자리 왼쪽값은
+  // 지하층·층표기와 충돌할 수 있어 여기서는 2자리 이상만 허용한다.
+  if (!currentDong && currentHo) {
+    const matches = [...raw.matchAll(/(?:^|\s)(\d{2,4})\s*-\s*(\d{2,5})\s*호(?=\s|$)/g)];
+    const match = matches.at(-1);
+    if (match && unitKey(match[2], "ho") === currentHo) {
+      variants.push({
+        dong: dongAliasKey(match[1]),
+        ho: currentHo,
+        source: "raw_dong_room"
+      });
+    }
+  }
+
+  // 101동 6층8호처럼 층이 전처리에서 사라진 형식. 등기부 호 표기는
+  // 608, 6-8, 6층8 세 가지가 존재할 수 있으므로 모두 조회하되, 전체가
+  // 동일한 고유번호 한 건으로 수렴할 때만 자동확정한다.
+  if (currentDong && currentHo) {
+    const matches = [...raw.matchAll(/(?:^|\s)(\d{1,2})\s*층\s*(\d{1,3})\s*호(?=\s|$)/g)];
+    const match = matches.at(-1);
+    if (match && unitKey(match[2], "ho") === currentHo) {
+      const floor = String(Number(match[1]));
+      const room = String(Number(match[2]));
+      const combined = `${floor}${room.padStart(2, "0")}`;
+      for (const ho of [combined, `${floor}-${room}`, `${floor}층${room}`]) {
+        variants.push({
+          dong: currentDong,
+          ho: unitKey(ho, "ho"),
+          source: "raw_floor_room"
+        });
+      }
+    }
+  }
+
+  return uniqueUnitVariants(variants);
+}
+
+export function rawUnitRecoverySignature(rawAddress, currentUnit = {}) {
+  const variants = rawUnitRecoveryVariants(rawAddress, currentUnit);
+  return variants.length
+    ? variants.map((variant) => `${variant.source}:${variant.dong}:${variant.ho}`).join("|")
+    : "none";
+}
+
+function candidateIdentity(candidate) {
+  return String(candidate?.unique_no || "") || [
+    candidate?.dong || "", candidate?.ho || "", candidate?.buldnm || "",
+    candidate?.add_item || "", candidate?.sojae || ""
+  ].join("|");
+}
+
+export function selectUniqueRawUnitCandidate(candidates, rawAddress, currentUnit = {}) {
+  const variants = rawUnitRecoveryVariants(rawAddress, currentUnit);
+  if (!variants.length) return null;
+  const matches = [];
+  for (const variant of variants) {
+    for (const candidate of candidates || []) {
+      if (candidateMatchesUnit(candidate, variant.dong, variant.ho)) {
+        matches.push({ candidate, variant });
+      }
+    }
+  }
+  const unique = new Map();
+  for (const match of matches) {
+    const key = candidateIdentity(match.candidate);
+    if (key && !unique.has(key)) unique.set(key, match);
+  }
+  if (unique.size !== 1) return null;
+  const selected = [...unique.values()][0];
+  return {
+    candidate: selected.candidate,
+    variant: selected.variant,
+    variantsTried: variants,
+    matchedCandidateCount: 1
+  };
+}
+
 export function buildingKey(value) {
   return String(value || "").replace(/[^0-9A-Za-z가-힣]/g, "").toLowerCase();
 }
@@ -120,16 +217,28 @@ function extractLegalLot(value) {
   };
 }
 
-// 정제 대표지번과 원문 지번이 다를 때만 대체 검색주소를 만든다. 법정동과
-// 산 여부가 같아야 하므로 동·호 숫자를 지번으로 오인해 재조회하지 않는다.
-export function alternateRawLotAddress(rawAddress, normalizedAddress) {
-  const raw = extractLegalLot(rawAddress);
+// 원문에 명시된 모든 같은 법정동 대체지번을 만든다. 생략된 "외 N필지"는
+// 생성하지 않으며, 정제 대표지번과 같은 지번도 제외한다.
+export function alternateRawLotAddresses(rawAddress, normalizedAddress) {
   const normalized = extractLegalLot(normalizedAddress);
-  if (!raw || !normalized) return "";
-  if (raw.legal !== normalized.legal || raw.mountain !== normalized.mountain) return "";
-  if (raw.lot === normalized.lot) return "";
+  if (!normalized) return [];
+  const refs = extractExplicitLotRefs(rawAddress);
   const base = String(normalizedAddress || "");
-  return `${base.slice(0, normalized.lotStart)}${raw.lot}${base.slice(normalized.lotEnd)}`.trim();
+  const out = [];
+  for (const ref of refs) {
+    const mountain = String(ref?.lot || "").startsWith("산");
+    const lot = String(ref?.lot || "").replace(/^산\s*/, "");
+    if (ref?.legal !== normalized.legal || mountain !== normalized.mountain) continue;
+    if (!lot || lot === normalized.lot) continue;
+    const address = `${base.slice(0, normalized.lotStart)}${lot}${base.slice(normalized.lotEnd)}`.trim();
+    if (address && !out.includes(address)) out.push(address);
+  }
+  return out;
+}
+
+// 하위호환: 기존 단일 대체지번 호출자는 첫 번째 명시 대체지번만 사용한다.
+export function alternateRawLotAddress(rawAddress, normalizedAddress) {
+  return alternateRawLotAddresses(rawAddress, normalizedAddress)[0] || "";
 }
 
 export function candidateMatchesAddressLot(candidate, address) {
