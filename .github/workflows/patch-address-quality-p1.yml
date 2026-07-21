@@ -1,0 +1,73 @@
+name: Patch address quality P1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-clean:
+    if: ${{ github.event.pull_request.head.ref == 'agent/address-quality-95-p1' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/address-quality-95-p1
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply conservative address quality patch
+        run: python .github/scripts/apply_address_quality_p1.py
+
+      - name: Install test dependency
+        run: npm install --no-save xlsx@0.18.5
+
+      - name: Validate parser, propagation, export, and existing IROS contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            node --check public/app.js
+            node --test \
+              tests/test_address_quality_rules.mjs \
+              tests/test_admin_successor.mjs \
+              tests/test_address_recovery_integration.mjs \
+              tests/test_address_recovery_rules.mjs \
+              tests/test_batch_ui_stats.mjs \
+              tests/test_iros_hardening.mjs \
+              tests/test_unit_match.mjs
+            python -m unittest discover -s tests -p 'test_*.py'
+          } 2>&1 | tee validation.log
+
+      - name: Upload validation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: address-quality-p1-validation
+          path: validation.log
+          retention-days: 2
+
+      - name: Commit tested files and remove temporary tooling
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/scripts/apply_address_quality_p1.py
+          rm -f .github/workflows/patch-address-quality-p1.yml
+          git add public/app.js public/admin-successor.mjs public/pipeline-contract.mjs
+          git add public/address-quality-rules.mjs
+          git add tests/test_address_quality_rules.mjs tests/test_admin_successor.mjs
+          git add tests/test_address_recovery_integration.mjs
+          git add -u
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Improve conservative address recovery quality"
+            git push origin HEAD:agent/address-quality-95-p1
+          fi
