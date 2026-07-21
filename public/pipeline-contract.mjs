@@ -1,15 +1,17 @@
-export const PIPELINE_VERSION = "addr-pipeline-v2";
+export const PIPELINE_VERSION = "addr-pipeline-v3";
 
 export const MODULE_VERSIONS = Object.freeze({
   COMMON_NORMALIZE: "4",
   UNIT_PARSE: "7",
-  JUSO_LOOKUP: "4",
-  NAVER_RECOVERY: "4",
-  REGION_VALIDATE: "5",
-  GROUP_HINT: "2",
+  JUSO_LOOKUP: "5",
+  NAVER_RECOVERY: "5",
+  REGION_VALIDATE: "6",
+  GROUP_HINT: "3",
   DONGSO_RECOVERY: "2",
   GROUP_PROPAGATION: "5",
-  OLD_ADDRESS: "4"
+  OLD_ADDRESS: "4",
+  MULTILOT_RECOVERY: "1",
+  OWNER_UNIT_RECOVERY: "1"
 });
 
 function canonical(value) {
@@ -87,6 +89,8 @@ export function appliedModulesFor(result, upstreamEvidence = {}) {
   if (upstreamEvidence.dongsoAnchor) modules.push("DONGSO_RECOVERY");
   if (upstreamEvidence.propagatedFrom) modules.push("GROUP_PROPAGATION");
   if (upstreamEvidence.oldAddressMap || result?.validation?.oldAddressMap) modules.push("OLD_ADDRESS");
+  if (result?.multiLotRecovery || result?.source === "juso-land-multilot") modules.push("MULTILOT_RECOVERY");
+  if (result?.ownerUnitRecovery || result?.source === "owner-unit-recovery") modules.push("OWNER_UNIT_RECOVERY");
   return [...new Set(modules)].sort();
 }
 
