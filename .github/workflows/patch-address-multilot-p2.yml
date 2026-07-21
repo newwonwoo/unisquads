@@ -27,7 +27,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python .github/scripts/apply_address_multilot_p2.py 2>&1 | tee patch.log
+          {
+            python .github/scripts/apply_address_multilot_p2.py
+            python .github/scripts/fix_address_multilot_p2.py
+          } 2>&1 | tee patch.log
 
       - name: Install test dependency
         run: npm install --no-save xlsx@0.18.5
@@ -66,6 +69,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           rm -f .github/scripts/apply_address_multilot_p2.py
+          rm -f .github/scripts/fix_address_multilot_p2.py
           rm -f .github/workflows/patch-address-multilot-p2.yml
           git add public/app.js public/pipeline-contract.mjs public/address-multilot-rules.mjs
           git add tests/test_address_multilot_rules.mjs tests/test_admin_successor.mjs
