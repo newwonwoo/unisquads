@@ -1,4 +1,4 @@
-export const ADMIN_SUCCESSOR_MAP_VERSION = "admin-successor-v2";
+export const ADMIN_SUCCESSOR_MAP_VERSION = "admin-successor-v3";
 
 const RULES = Object.freeze([
   // 시군구 통폐합·승격
@@ -14,6 +14,10 @@ const RULES = Object.freeze([
   { id: "SGG_IRI_IKSAN", kind: "SGG", from: "이리시", to: "익산시" },
   { id: "SGG_DONGGWANGYANG_GWANGYANG", kind: "SGG", from: "동광양시", to: "광양시" },
   { id: "SGG_INCHEON_SEOGU_GEOMDAN", kind: "SGG", sido: "인천", from: "서구", to: "검단구" },
+  { id: "SGG_INCHEON_SEOGU_SEOHAE", kind: "SGG", sido: "인천", from: "서구", to: "서해구" },
+  { id: "SGG_INCHEON_JUNGGU_JEMULPO", kind: "SGG", sido: "인천", from: "중구", to: "제물포구" },
+  { id: "SGG_INCHEON_JUNGGU_YEONGJONG", kind: "SGG", sido: "인천", from: "중구", to: "영종구" },
+  { id: "SGG_INCHEON_NAMGU_MICHUHOL", kind: "SGG", sido: "인천", from: "남구", to: "미추홀구" },
 
   // 실데이터에서 반복 확인된 읍면동 개편. 같은 어간이라는 이유만으로는 통과시키지 않는다.
   { id: "BJD_BAEBANG_PROMOTION", kind: "BJD", from: "배방면", to: "배방읍" },
