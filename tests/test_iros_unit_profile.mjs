@@ -17,6 +17,7 @@ test("unit intent preserves original dong-floor-room semantics", () => {
       floor: "6",
       room: "8",
       recoveredDong: "",
+      subBuilding: null,
       evidence: ["RAW_FLOOR_ROOM"]
     }
   );
@@ -24,6 +25,18 @@ test("unit intent preserves original dong-floor-room semantics", () => {
     unitIntentSignature("진흥아파트 101동 1층8호", { dong: "101", ho: "8" }),
     unitIntentSignature("진흥아파트 101동 6층8호", { dong: "101", ho: "8" })
   );
+});
+
+test("commercial basement intent remains structured", () => {
+  const intent = extractUnitIntent(
+    "경남 양산시 평산동 태원아파트 평산리 564 상가 지하1층3호",
+    { dong: "", floor: "B1", ho: "3" }
+  );
+  assert.equal(intent.floor, "B1");
+  assert.equal(intent.room, "3");
+  assert.deepEqual(intent.subBuilding, { kind: "COMMERCIAL", token: "상가" });
+  assert.equal(intent.evidence.includes("RAW_BASEMENT_ROOM"), true);
+  assert.equal(intent.evidence.includes("RAW_SUB_BUILDING_COMMERCIAL"), true);
 });
 
 test("one-digit N-M without floor text is not forced into a dong", () => {
@@ -88,6 +101,24 @@ test("hyphen and floor-text buildings use their own observed conventions", () =>
   assert.equal(text.status, "UNIQUE");
   assert.equal(text.candidate.unique_no, "D");
   assert.equal(text.strategy, "PROFILE_FLOOR_ROOM_TEXT");
+});
+
+test("commercial basement profile selects the commercial unit only", () => {
+  const result = matchUnitByBuildingProfile(
+    [
+      { unique_no: "R", buldnm: "태원아파트", dong: "102", ho: "1204" },
+      { unique_no: "S", buldnm: "태원아파트", dong: "상가", ho: "지하1층3" },
+      { unique_no: "S2", buldnm: "태원아파트", dong: "상가", ho: "지하1층4" }
+    ],
+    "태원아파트 상가 지하1층3호",
+    { dong: "", floor: "B1", ho: "3" },
+    "태원아파트",
+    { kind: "COMMERCIAL", token: "상가" }
+  );
+  assert.equal(result.status, "UNIQUE");
+  assert.equal(result.candidate.unique_no, "S");
+  assert.equal(result.strategy, "PROFILE_BASEMENT_ROOM");
+  assert.equal(result.audit.sub_building_filter_applied, true);
 });
 
 test("raw N-M room is interpreted by the building candidate structure", () => {
