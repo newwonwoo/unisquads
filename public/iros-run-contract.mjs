@@ -1,8 +1,8 @@
 export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
   parser: "iros-parser-v4",
-  matcher: "iros-matcher-v7",
-  recovery: "iros-recovery-v4"
+  matcher: "iros-matcher-v8",
+  recovery: "iros-recovery-v5"
 });
 
 export const IROS_RETRYABLE_STATUSES = Object.freeze([

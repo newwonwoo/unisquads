@@ -63,6 +63,11 @@ import {
   parseCompactAlphaUnit
 } from "./address-quality-rules.mjs";
 import {
+  extractSubBuildingIntent,
+  floorIntentFromText,
+  narrowByExplicitSubBuilding
+} from "./address-subbuilding-rules.mjs";
+import {
   addressMatchesZipRegions,
   aggregateCandidateKey,
   canAcceptZipBuildingCorrection,
@@ -404,7 +409,7 @@ function validateRegion(inputText, resultJibun, sidoOnly = false, relJibunText =
 const JIP_KEYWORDS = /(아파트|apt|빌라|빌리지|[가-힣]{2,}빌|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오|아이파크|e편한|이편한|더샵|롯데캐슬|래미안|센트|리버|파크|하이츠|스카이|타워|주상복합|헤리티지|포레|아이유쉘|쉐르빌|베르디움|엘크루|리슈빌|스위첸|데시앙|꿈에그린|우방|한신|현대|삼성|엘지|지에스)/i;
 const JIBUN_CONTEXT = /(동|읍|면|리|로|길|가)\s*$/;
 const RE_DONG_HO = /제?\s*(\d{1,4})\s*동\s*-?\s*제?\s*(\d{1,4}(?:-\d{1,4})?)\s*호/;
-const RE_DONG_BARE_HO = /(?:^|\s)제?\s*(\d{1,4})\s*동\s+(\d{2,5}(?:-\d{1,4})?)(?=\s|$)/;
+const RE_DONG_BARE_HO = /(?:^|\s)제?\s*(\d{1,4})\s*동\s*(\d{2,5}(?:-\d{1,4})?)(?=\s|$)/;
 const RE_DONG_ONLY = /(?:^|\s)제?\s*(\d{1,4})\s*동(?=\s|$)(?!\s*\d*\s*호)/;
 const RE_HO_ONLY = /제?\s*(\d{1,4})\s*호/;
 const RE_FLOOR = /(지하\s*\d{1,3}|B\s*\d{1,2}|반지하|[지제]?\s*\d{1,3})\s*층/gi;
@@ -427,6 +432,7 @@ function extractUnit(str) {
     compactAlpha = true;
     text = text.replace(compact.matched, " ");
   } else {
+    floor = floorIntentFromText(text) || null;
     text = text.replace(RE_FLOOR, " ");
     const pair = text.match(RE_DONG_HO);
     if (pair) {
@@ -738,6 +744,7 @@ function preprocess(raw) {
     road: _rd.road,
     buldNo: _rd.buldNo,
     bldName: extractBuildingName(structuralRaw),
+    subBuilding: extractSubBuildingIntent(raw),
     lotRefs: extractExplicitLotRefs(raw),
     omittedExtraLots: hasOmittedExtraLots(raw)
   };
@@ -1616,6 +1623,12 @@ function resolve(candidates, pre) {
     return { status: "FAILED", reason: "NOT_FOUND", unit, message: "\uC77C\uCE58\uD558\uB294 \uC8FC\uC18C\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC624\uD0C0 \uD655\uC778 \uB610\uB294 \uC2E0\uCD95/\uBBF8\uB4F1\uB85D \uD544\uC9C0 \uC5EC\uBD80\uB97C \uD655\uC778\uD574\uC8FC\uC138\uC694." };
   const addressNarrowing = exactAddressCandidates(deduped, pre);
   deduped = addressNarrowing.candidates;
+  const addressEvidence = [...addressEvidence];
+  const subBuildingNarrowing = narrowByExplicitSubBuilding(deduped, pre?.subBuilding);
+  if (subBuildingNarrowing.applied) {
+    deduped = subBuildingNarrowing.candidates;
+    addressEvidence.push(subBuildingNarrowing.evidence);
+  }
   if (deduped.length === 1) {
     const c = deduped[0];
     return {
@@ -1626,10 +1639,11 @@ function resolve(candidates, pre) {
       pnu: buildPnu(c),
       bdMgtSn: c.bdMgtSn || null,
       unit,
+      subBuilding: pre?.subBuilding || null,
       irosQuery: buildIrosQuery(c, unit),
       source: c.source,
       isJip: !!c.isJip,
-      addressMatchEvidence: addressNarrowing.evidence
+      addressMatchEvidence: addressEvidence
     };
   }
   // R7(2026-07-17): 복수 후보 중 원문 건물명과 bdNm이 일치하는 것을 채택한다.
@@ -1656,9 +1670,10 @@ function resolve(candidates, pre) {
         status: "CONFIRMED",
         jibunAddr: cand.jibunAddr, roadAddr: cand.roadAddr,
         bdNm: cand.bdNm || null, pnu: buildPnu(cand), bdMgtSn: cand.bdMgtSn || null,
-        unit, irosQuery: buildIrosQuery(cand, unit), source: cand.source,
+        unit, subBuilding: pre?.subBuilding || null,
+        irosQuery: buildIrosQuery(cand, unit), source: cand.source,
         isJip: !!cand.isJip, reviewNeeded: "bldname_matched",
-        addressMatchEvidence: addressNarrowing.evidence
+        addressMatchEvidence: addressEvidence
       };
     }
   }
@@ -1676,11 +1691,12 @@ function resolve(candidates, pre) {
       pnu: buildPnu(rep),
       bdMgtSn: rep.bdMgtSn || null,
       unit,
+      subBuilding: pre?.subBuilding || null,
       irosQuery: buildIrosQuery(rep, unit),
       source: rep.source,
       isJip: !!rep.isJip,
       reviewNeeded: "juso_multi",
-      addressMatchEvidence: addressNarrowing.evidence
+      addressMatchEvidence: addressEvidence
     };
   }
   const prefixLen = commonPrefixLen(deduped.map((c) => c.admCd));
@@ -1699,8 +1715,9 @@ function resolve(candidates, pre) {
       bdMgtSn: c.bdMgtSn || null,
       isJip: !!c.isJip
     })),
-    addressMatchEvidence: addressNarrowing.evidence,
+    addressMatchEvidence: addressEvidence,
     unit,
+    subBuilding: pre?.subBuilding || null,
     message: buildMessage(requireLevel, dongName, deduped)
   };
 }
@@ -3409,7 +3426,8 @@ function AddrRefineTestGui() {
           unitCandidatePool,
           row.raw,
           row.result.unit || {},
-          row.result.bdNm || ""
+          row.result.bdNm || "",
+          row.result.subBuilding || null
         );
         unitProfileRecovery = profiled.audit;
         stageCounts.unit_profile_matches = profiled.audit?.matched_candidate_count || 0;

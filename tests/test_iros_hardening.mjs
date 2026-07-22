@@ -162,6 +162,8 @@ test("patched app contains the required hardening contracts", async () => {
     "recovery_version: IROS_RUN_VERSIONS.recovery",
     "R-IROS-UNIT-PROFILE",
     "unit_profile_recovery",
+    "subBuilding: pre?.subBuilding || null",
+    "narrowByExplicitSubBuilding",
     "기본 PNU ${batchBaseDone}/${batchBaseTotal}",
     "등기조회 판정 완료",
     "네이버지번주소",
