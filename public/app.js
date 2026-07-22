@@ -74,6 +74,9 @@ import {
   narrowCandidatesByBuildingIntent
 } from "./building-candidate-intent.mjs";
 import {
+  narrowCandidatesByExplicitParcel
+} from "./address-parcel-intent.mjs";
+import {
   addressMatchesZipRegions,
   aggregateCandidateKey,
   canAcceptZipBuildingCorrection,
@@ -1633,6 +1636,19 @@ function resolve(candidates, pre) {
   const addressNarrowing = exactAddressCandidates(deduped, pre);
   deduped = addressNarrowing.candidates;
   const addressEvidence = [...addressNarrowing.evidence];
+
+  // 원문에 명시된 법정동+지번을 독립적인 필지 의도로 사용한다. 옛 리와 현재 동이
+  // 원문에 함께 적힌 경우처럼 동일 어간의 두 표기가 동시에 존재할 때만 교차표기를
+  // 허용하며, 정확히 한 필지군으로 수렴하지 않으면 후보를 줄이지 않는다.
+  const explicitParcelNarrowing = narrowCandidatesByExplicitParcel(deduped, {
+    raw: pre?.raw || "",
+    lotRefs: pre?.lotRefs || []
+  });
+  if (explicitParcelNarrowing.applied) {
+    deduped = explicitParcelNarrowing.candidates;
+    addressEvidence.push(...explicitParcelNarrowing.evidence);
+  }
+
   // 동일 지번의 본동·상가동·관리동 후보는 주소 문자열만으로 구분하지 않는다.
   // 원문의 명시적 동/하위건물 의도와 JUSO bdKdcd·detBdNmList를 공통 모듈에서
   // 대조해 단일 후보로 줄어들 때만 확정한다. 의도가 없으면 복수후보를 유지한다.
@@ -1645,6 +1661,10 @@ function resolve(candidates, pre) {
     deduped = buildingIntentNarrowing.candidates;
     addressEvidence.push(...buildingIntentNarrowing.evidence);
   }
+  const candidateIntentDiagnostics = {
+    parcel: explicitParcelNarrowing.diagnostics,
+    building: buildingIntentNarrowing.diagnostics
+  };
   if (deduped.length === 1) {
     const c = deduped[0];
     return {
@@ -1659,7 +1679,8 @@ function resolve(candidates, pre) {
       irosQuery: buildIrosQuery(c, unit),
       source: c.source,
       isJip: !!c.isJip,
-      addressMatchEvidence: addressEvidence
+      addressMatchEvidence: addressEvidence,
+      candidateIntentDiagnostics
     };
   }
   // R7(2026-07-17): 복수 후보 중 원문 건물명과 bdNm이 일치하는 것을 채택한다.
@@ -1689,7 +1710,8 @@ function resolve(candidates, pre) {
         unit, subBuilding: pre?.subBuilding || null,
         irosQuery: buildIrosQuery(cand, unit), source: cand.source,
         isJip: !!cand.isJip, reviewNeeded: "bldname_matched",
-        addressMatchEvidence: addressEvidence
+        addressMatchEvidence: addressEvidence,
+        candidateIntentDiagnostics
       };
     }
   }
@@ -1712,7 +1734,8 @@ function resolve(candidates, pre) {
       source: rep.source,
       isJip: !!rep.isJip,
       reviewNeeded: "juso_multi",
-      addressMatchEvidence: addressEvidence
+      addressMatchEvidence: addressEvidence,
+      candidateIntentDiagnostics
     };
   }
   const prefixLen = commonPrefixLen(deduped.map((c) => c.admCd));
@@ -1732,6 +1755,7 @@ function resolve(candidates, pre) {
       isJip: !!c.isJip
     })),
     addressMatchEvidence: addressEvidence,
+    candidateIntentDiagnostics,
     unit,
     subBuilding: pre?.subBuilding || null,
     message: buildMessage(requireLevel, dongName, deduped)
