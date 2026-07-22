@@ -165,7 +165,8 @@ test("patched app contains the required hardening contracts", async () => {
     "subBuilding: pre?.subBuilding || null",
     "narrowByExplicitSubBuilding",
     "기본 PNU ${batchBaseDone}/${batchBaseTotal}",
-    "등기조회 판정 완료",
+    "batchWorkflow.statusLabel",
+    "BATCH_PRIMARY_ACTIONS.DOWNLOAD_ALL",
     "네이버지번주소",
     "finally {\n      setBatchRegBusy(false);"
   ]) {

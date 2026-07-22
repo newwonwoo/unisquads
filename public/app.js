@@ -50,6 +50,10 @@ import {
   summarizeRefineStatuses
 } from "./batch-ui-stats.mjs";
 import {
+  BATCH_PRIMARY_ACTIONS,
+  deriveBatchWorkflowState
+} from "./batch-workflow-state.mjs";
+import {
   canAcceptNaverRegionCorrection,
   isBuildingPartToken,
   shouldEscalateJusoMultiToNaver
@@ -4606,6 +4610,17 @@ function AddrRefineTestGui() {
   const irosStarted = rows.some((row) => Boolean(row.reg));
   const irosFinalReady = irosStarted && isIrosExportFinal(rows);
   const exportFinalReady = addressFinalReady && (!irosStarted || irosFinalReady);
+  const batchWorkflow = deriveBatchWorkflowState({
+    rowCount: rows.length,
+    batchDone,
+    batchBusy,
+    batchRegBusy,
+    bridgeUp,
+    irosStarted,
+    irosFinalReady,
+    irosProgress,
+    irosOutcome
+  });
   const btnP = {
     padding: "12px 26px",
     fontSize: 14,
@@ -4944,21 +4959,28 @@ function AddrRefineTestGui() {
     } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: C.faint, marginBottom: 4, letterSpacing: "0.04em" } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, color, fontFamily: mono, fontWeight: 700 } }, value)))), uploadStats && (uploadStats.emptyRows > 0 || uploadStats.refineRows !== uploadStats.addressRows) && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, margin: "8px 0 0", fontFamily: mono } }, [
       uploadStats.emptyRows > 0 ? `빈주소 ${uploadStats.emptyRows.toLocaleString()}행 제외` : "",
       uploadStats.refineRows !== uploadStats.addressRows ? `복수지번·세대 분리 후 처리행 ${uploadStats.refineRows.toLocaleString()}행` : ""
-    ].filter(Boolean).join(" · ")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${rows.length}행)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), bridgeUp && irosOutcome.target > 0 && !batchRegBusy && /* @__PURE__ */ React.createElement(
+    ].filter(Boolean).join(" · ")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${rows.length}행)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), batchWorkflow.primaryAction !== BATCH_PRIMARY_ACTIONS.NONE && !batchRegBusy && /* @__PURE__ */ React.createElement(
     "button",
     {
-      onClick: lookupBatchUniqueNo,
-      disabled: batchDone === 0,
+      onClick: batchWorkflow.primaryAction === BATCH_PRIMARY_ACTIONS.LOOKUP_IROS ||
+        batchWorkflow.primaryAction === BATCH_PRIMARY_ACTIONS.RESUME_IROS
+        ? lookupBatchUniqueNo
+        : () => downloadXlsx("all"),
       style: {
         ...btnP,
-        background: `linear-gradient(135deg, ${C.ok}, ${C.cyan})`,
-        opacity: batchDone === 0 ? 0.5 : 1
+        background: `linear-gradient(135deg, ${C.ok}, ${C.cyan})`
       }
     },
-    "\uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uC77C\uAD04\uC870\uD68C (",
-    irosOutcome.target,
-    "건)"
-  ), (!batchBusy && rows.length > 0 && addressFinalReady) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 주소 정제 완료 · ${batchDone}/${rows.length}행 · 확정 ${refineSummary.confirmed} · 확인필요 ${refineSummary.review} · 실패 ${refineSummary.failed}`), irosStarted && !batchRegBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13, color: irosFinalReady ? C.ok : C.warn, fontWeight: 600, margin: "2px 0 0" } }, irosFinalReady ? `✅ 등기조회 판정 완료 · ${irosOutcome.judged}/${irosOutcome.target}건 · 고유번호 ${irosOutcome.resolved}건` : `등기조회 판정 · ${irosOutcome.judged}/${irosOutcome.target}건 · 재시도 ${irosOutcome.retryRequired} · 미조회 ${irosOutcome.unstarted}`), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), irosStarted && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 고유번호 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 복수 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), irosOutcome.inputRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 입력보완 ${irosOutcome.inputRequired}`), irosOutcome.retryRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 재시도 ${irosOutcome.retryRequired}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 기타실패 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), /* @__PURE__ */ React.createElement(
+    batchWorkflow.primaryLabel
+  ), (!batchBusy && rows.length > 0 && addressFinalReady) && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 13.5, color: C.ok, fontWeight: 600, margin: "4px 0 0" } }, `✅ 주소 정제 완료 · ${batchDone}/${rows.length}행 · 확정 ${refineSummary.confirmed} · 확인필요 ${refineSummary.review} · 실패 ${refineSummary.failed}`), irosStarted && !batchRegBusy && /* @__PURE__ */ React.createElement("p", { style: {
+    width: "100%",
+    textAlign: "center",
+    fontSize: 13,
+    color: batchWorkflow.tone === "success" ? C.ok : C.warn,
+    fontWeight: 600,
+    margin: "2px 0 0"
+  } }, batchWorkflow.statusLabel), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), irosStarted && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 고유번호 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 복수 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), irosOutcome.inputRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 입력보완 ${irosOutcome.inputRequired}`), irosOutcome.retryRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 재시도 ${irosOutcome.retryRequired}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 기타실패 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"),
+  ![BATCH_PRIMARY_ACTIONS.DOWNLOAD_ALL, BATCH_PRIMARY_ACTIONS.DOWNLOAD_ADDRESS].includes(batchWorkflow.primaryAction) && /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => downloadXlsx("all"),
