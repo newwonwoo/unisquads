@@ -158,9 +158,14 @@ function profileMatches(profile, intent) {
   const matches = [];
   const push = (candidate, strategy) => matches.push({ candidate, strategy, profile });
 
+  const hasStructuralRecovery = Boolean(
+    intent.recoveredDong || (intent.floor && intent.room)
+  );
   for (const candidate of profile.candidates) {
-    // 현재 정규화 동·호의 직접 일치도 건물 프로파일의 한 표현방식이다.
-    if ((intent.dong || intent.ho) && candidateMatchesUnit(candidate, intent.dong, intent.ho)) {
+    // 원문에 더 구체적인 동·층 구조가 있으면 불완전한 호-only 직접일치를
+    // 함께 섞지 않는다. 구조정보가 없을 때만 기존 직접표현을 프로파일로 본다.
+    if (!hasStructuralRecovery && (intent.dong || intent.ho) &&
+        candidateMatchesUnit(candidate, intent.dong, intent.ho)) {
       push(candidate, "PROFILE_DIRECT");
     }
 
