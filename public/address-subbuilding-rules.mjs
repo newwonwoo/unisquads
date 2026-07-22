@@ -5,14 +5,23 @@ export const SUB_BUILDING_VERSION = "address-subbuilding-v1";
 
 const COMMERCIAL = /(?:^|\s)(?:제?상가(?:동)?|근린생활시설|근생|판매시설)(?=\s|$)/;
 const MANAGEMENT = /(?:^|\s)(?:관리동|관리사무소|관리실)(?=\s|$)/;
+const BUILDING_CONTEXT = /(아파트|맨션|타운|오피스텔|빌라|연립|다세대|주상복합|주공|캐슬|자이|푸르지오|아이파크|래미안|힐스|더샵|빌딩|프라자|플라자|상가동|근린생활시설)/i;
 
 export function extractSubBuildingIntent(value) {
   const raw = String(value || "").replace(/\s+/g, " ").trim();
-  if (COMMERCIAL.test(raw)) {
-    return { kind: "COMMERCIAL", token: (raw.match(COMMERCIAL) || [""])[0].trim() || "상가" };
+  const commercial = raw.match(COMMERCIAL);
+  if (commercial) {
+    const before = raw.slice(0, commercial.index ?? 0);
+    if (BUILDING_CONTEXT.test(before)) {
+      return { kind: "COMMERCIAL", token: commercial[0].trim() || "상가" };
+    }
   }
-  if (MANAGEMENT.test(raw)) {
-    return { kind: "MANAGEMENT", token: (raw.match(MANAGEMENT) || [""])[0].trim() || "관리동" };
+  const management = raw.match(MANAGEMENT);
+  if (management) {
+    const before = raw.slice(0, management.index ?? 0);
+    if (BUILDING_CONTEXT.test(before)) {
+      return { kind: "MANAGEMENT", token: management[0].trim() || "관리동" };
+    }
   }
   return null;
 }
@@ -21,8 +30,12 @@ function searchableCandidateText(candidate) {
   return [
     candidate?.detBdNmList,
     candidate?.bdNm,
+    candidate?.buldnm,
+    candidate?.dong,
     candidate?.roadAddr,
-    candidate?.jibunAddr
+    candidate?.jibunAddr,
+    candidate?.sojae,
+    candidate?.add_item
   ].filter(Boolean).join(" ").replace(/\s+/g, " ");
 }
 
