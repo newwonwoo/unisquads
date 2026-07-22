@@ -1,0 +1,84 @@
+name: Patch IROS dynamic unit profile v7
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-clean:
+    if: ${{ github.event.pull_request.head.ref == 'agent/iros-dynamic-unit-profile-v7' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/iros-dynamic-unit-profile-v7
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply dynamic profile patch
+        shell: bash
+        run: |
+          set -o pipefail
+          python .github/scripts/apply_iros_dynamic_profile_v7.py 2>&1 | tee patch.log
+
+      - name: Install test dependency
+        run: npm install --no-save xlsx@0.18.5
+
+      - name: Validate dynamic profile and full regression suite
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            node --check public/app.js
+            node --check public/iros-unit-profile.mjs
+            grep -F 'R-IROS-UNIT-PROFILE' public/app.js
+            grep -F 'unit_intent_signature' public/app.js
+            grep -F 'unit_profile_recovery' public/app.js
+            node --test \
+              tests/test_iros_unit_profile.mjs \
+              tests/test_unit_match.mjs \
+              tests/test_iros_hardening.mjs \
+              tests/test_address_multilot_rules.mjs \
+              tests/test_address_quality_rules.mjs \
+              tests/test_admin_successor.mjs \
+              tests/test_address_recovery_integration.mjs \
+              tests/test_address_recovery_rules.mjs \
+              tests/test_batch_ui_stats.mjs
+            python -m unittest discover -s tests -p 'test_*.py'
+          } 2>&1 | tee validation.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iros-dynamic-profile-v7-validation
+          path: |
+            patch.log
+            validation.log
+          if-no-files-found: warn
+          retention-days: 2
+
+      - name: Commit validated files and remove temporary tooling
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/scripts/apply_iros_dynamic_profile_v7.py
+          rm -f .github/workflows/patch-iros-dynamic-profile-v7.yml
+          git add public/app.js public/unit-match.mjs public/iros-run-contract.mjs
+          git add public/iros-unit-profile.mjs
+          git add tests/test_iros_unit_profile.mjs tests/test_iros_hardening.mjs
+          git add -u
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add building-specific IROS unit profiles"
+            git push origin HEAD:agent/iros-dynamic-unit-profile-v7
+          fi
