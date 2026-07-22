@@ -96,13 +96,13 @@ app = replace_once(
     "explicit sub-building narrowing"
 )
 
-# Restrict replacements to the resolve section by replacing the four remaining references.
+# Restrict replacements to the resolve section only.
 resolve_start = app.index("function resolve(candidates, pre)")
 resolve_end = app.index("// R9(2026-07-17) 동소", resolve_start)
 resolve = app[resolve_start:resolve_end]
 count = resolve.count("addressNarrowing.evidence")
-if count != 4:
-    raise RuntimeError(f"resolve evidence references: expected 4, found {count}")
+if count != 5:
+    raise RuntimeError(f"resolve evidence references: expected 5, found {count}")
 resolve = resolve.replace("addressNarrowing.evidence", "addressEvidence")
 app = app[:resolve_start] + resolve + app[resolve_end:]
 
