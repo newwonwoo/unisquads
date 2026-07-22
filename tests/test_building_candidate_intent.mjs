@@ -85,15 +85,14 @@ test("no explicit building-part intent leaves same-parcel candidates unresolved"
   assert.equal(result.candidates.length, 2);
 });
 
-test("building-kind fallback never crosses parcels or unrelated building names", () => {
-  const other = {
+test("building-part intent never crosses parcels even when the building name repeats", () => {
+  const otherParcelCommercial = {
     ...commercial,
     admCd: "4833012000",
-    mnnm: "10",
-    bdNm: "다른아파트"
+    mnnm: "10"
   };
   const result = narrowCandidatesByBuildingIntent(
-    [residential, other],
+    [residential, otherParcelCommercial],
     {
       subBuilding: { kind: "COMMERCIAL", token: "상가" },
       buildingName: "태원아파트"
