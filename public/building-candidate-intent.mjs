@@ -31,14 +31,24 @@ export function candidateSupportsExplicitDong(candidate, dong) {
   });
 }
 
-function sameNamedParcel(candidates, expectedBuildingName = "") {
+function allSameParcel(candidates) {
   if (!candidates.length) return false;
-  const parcels = new Set(candidates.map(candidateParcelKey).filter(Boolean));
-  if (parcels.size !== 1) return false;
+  const keys = candidates.map(candidateParcelKey);
+  return keys.every(Boolean) && new Set(keys).size === 1;
+}
+
+function sameNamedParcel(candidates, expectedBuildingName = "") {
+  if (!allSameParcel(candidates)) return false;
   const expected = buildingKey(expectedBuildingName);
   const names = new Set(candidates.map((candidate) => buildingKey(candidate?.bdNm)).filter(Boolean));
   if (expected) return [...names].every((name) => name === expected || name.includes(expected) || expected.includes(name));
   return names.size <= 1;
+}
+
+function exactBuildingNameScope(candidates, expectedBuildingName) {
+  const expected = buildingKey(expectedBuildingName);
+  if (!expected) return [];
+  return candidates.filter((candidate) => buildingKey(candidate?.bdNm) === expected);
 }
 
 function uniqueCommercialByBuildingKind(candidates, expectedBuildingName) {
@@ -58,12 +68,29 @@ export function narrowCandidatesByBuildingIntent(candidates, intent = {}) {
     explicit_dong: normalizedDongToken(intent?.dong),
     sub_building: intent?.subBuilding?.kind || "",
     building_name: intent?.buildingName || "",
+    exact_name_hits: 0,
     dong_hits: 0,
     sub_building_hits: 0,
-    building_kind_hits: 0
+    building_kind_hits: 0,
+    same_parcel_scope: false
   };
 
-  if (intent?.subBuilding?.kind && current.length > 1) {
+  // 건물명이 명시된 주소는 먼저 완전일치 건물명 후보군으로만 좁힌다.
+  // 한 후보를 임의 선택하는 것이 아니라, 동일 이름의 본동·상가동 후보군을 만든다.
+  if (intent?.buildingName && current.length > 1) {
+    const exactNameHits = exactBuildingNameScope(current, intent.buildingName);
+    diagnostics.exact_name_hits = exactNameHits.length;
+    if (exactNameHits.length) {
+      current = exactNameHits;
+      evidence.push("EXACT_BUILDING_NAME_SCOPE");
+    }
+  }
+
+  diagnostics.same_parcel_scope = allSameParcel(current);
+
+  // 동·상가 같은 하위건물 표기는 동일 지번의 건물군 안에서만 판정한다.
+  // 지역 전체 후보에서 '상가' 하나를 찾는 식의 교차지번 확정은 금지한다.
+  if (diagnostics.same_parcel_scope && intent?.subBuilding?.kind && current.length > 1) {
     let hits = current.filter((candidate) => candidateSupportsSubBuilding(candidate, intent.subBuilding));
     diagnostics.sub_building_hits = hits.length;
     if (!hits.length && intent.subBuilding.kind === "COMMERCIAL") {
@@ -77,7 +104,7 @@ export function narrowCandidatesByBuildingIntent(candidates, intent = {}) {
     }
   }
 
-  if (intent?.dong && current.length > 1) {
+  if (diagnostics.same_parcel_scope && intent?.dong && current.length > 1) {
     const hits = current.filter((candidate) => candidateSupportsExplicitDong(candidate, intent.dong));
     diagnostics.dong_hits = hits.length;
     if (hits.length) {
