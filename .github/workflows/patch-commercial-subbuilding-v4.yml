@@ -38,7 +38,7 @@ jobs:
           set -o pipefail
           {
             node --check public/app.js
-            grep -F 'EXPLICIT_SUB_BUILDING' public/app.js
+            grep -F 'EXPLICIT_SUB_BUILDING' public/address-subbuilding-rules.mjs
             grep -F 'subBuilding: pre?.subBuilding || null' public/app.js
             grep -F 'row.result.subBuilding || null' public/app.js
             node --test \
