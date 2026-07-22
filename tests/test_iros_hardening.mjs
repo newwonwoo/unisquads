@@ -160,6 +160,8 @@ test("patched app contains the required hardening contracts", async () => {
     "buildVerifiedWorkbookArray",
     "현재까지 결과 다운로드",
     "recovery_version: IROS_RUN_VERSIONS.recovery",
+    "R-IROS-UNIT-PROFILE",
+    "unit_profile_recovery",
     "기본 PNU ${batchBaseDone}/${batchBaseTotal}",
     "등기조회 판정 완료",
     "네이버지번주소",
