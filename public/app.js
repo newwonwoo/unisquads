@@ -1623,7 +1623,7 @@ function resolve(candidates, pre) {
     return { status: "FAILED", reason: "NOT_FOUND", unit, message: "\uC77C\uCE58\uD558\uB294 \uC8FC\uC18C\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC624\uD0C0 \uD655\uC778 \uB610\uB294 \uC2E0\uCD95/\uBBF8\uB4F1\uB85D \uD544\uC9C0 \uC5EC\uBD80\uB97C \uD655\uC778\uD574\uC8FC\uC138\uC694." };
   const addressNarrowing = exactAddressCandidates(deduped, pre);
   deduped = addressNarrowing.candidates;
-  const addressEvidence = [...addressEvidence];
+  const addressEvidence = [...addressNarrowing.evidence];
   const subBuildingNarrowing = narrowByExplicitSubBuilding(deduped, pre?.subBuilding);
   if (subBuildingNarrowing.applied) {
     deduped = subBuildingNarrowing.candidates;
