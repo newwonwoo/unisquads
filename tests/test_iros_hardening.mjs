@@ -163,7 +163,7 @@ test("patched app contains the required hardening contracts", async () => {
     "R-IROS-UNIT-PROFILE",
     "unit_profile_recovery",
     "subBuilding: pre?.subBuilding || null",
-    "narrowByExplicitSubBuilding",
+    "narrowCandidatesByBuildingIntent",
     "기본 PNU ${batchBaseDone}/${batchBaseTotal}",
     "batchWorkflow.statusLabel",
     "BATCH_PRIMARY_ACTIONS.DOWNLOAD_ALL",
