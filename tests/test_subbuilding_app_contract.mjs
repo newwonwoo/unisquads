@@ -6,7 +6,7 @@ test("sub-building narrowing starts from exact-address evidence", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.equal(source.includes("const addressEvidence = [...addressEvidence];"), false);
   assert.equal(source.includes("const addressEvidence = [...addressNarrowing.evidence];"), true);
-  assert.equal(source.includes("narrowByExplicitSubBuilding(deduped, pre?.subBuilding)"), true);
+  assert.equal(source.includes("narrowCandidatesByBuildingIntent(deduped, {"), true);
 });
 
 test("attached numeric dong-room and basement floor are preserved", async () => {
