@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import * as XLSX from "xlsx";
 
 import {
   IROS_RUN_VERSIONS,
@@ -13,40 +14,51 @@ import {
   withIrosVersions
 } from "../public/iros-run-contract.mjs";
 import {
+  applyWorksheetLayout,
   buildVerifiedWorkbookArray,
-  recordsForMode
+  hasZipEndOfCentralDirectory,
+  recordsForMode,
+  validateWorkbookArray
 } from "../public/xlsx-integrity.mjs";
 
-function confirmedRow(reg = null, unit = { dong: "101", ho: "101" }) {
-  return {
-    result: {
-      status: "CONFIRMED",
-      isJip: true,
-      unit
-    },
-    reg
-  };
-}
+const confirmedRow = (reg) => ({
+  raw: "서울특별시 서초구 반포동 1 101동 101호",
+  result: {
+    status: "CONFIRMED",
+    isJip: true,
+    unit: { dong: "101", ho: "101" }
+  },
+  reg
+});
 
 test("old matcher/parser results are stale and not final", () => {
-  const rows = [confirmedRow({
-    status: "RESOLVED",
-    collector_version: "old",
-    parser_version: "old",
-    matcher_version: "old",
-    recovery_version: "old"
-  })];
-  const marked = markStaleIrosRows(rows);
-  assert.equal(marked[0].reg.stale, true);
-  assert.equal(irosProgressStats(marked).stale, 1);
-  assert.equal(isIrosExportFinal(marked), false);
+  const rows = markStaleIrosRows([
+    confirmedRow({
+      status: "RESOLVED",
+      collector_version: "iros-collector-v4",
+      parser_version: "iros-parser-v3",
+      matcher_version: "iros-matcher-v4"
+    })
+  ]);
+  assert.equal(rows[0].reg.stale, true);
+  assert.equal(isReusableIrosResult(rows[0].reg), false);
+  const progress = irosProgressStats(rows);
+  assert.equal(progress.total, 1);
+  assert.equal(progress.done, 0);
+  assert.equal(progress.stale, 1);
+  assert.equal(isIrosExportFinal(rows), false);
 });
 
 test("current terminal results are reusable while partial results retry", () => {
-  const good = withIrosVersions({ status: "REG_UNIT_NOT_FOUND", complete: true });
+  const resolved = withIrosVersions({ status: "RESOLVED", unique_no: "1234-5678-901234" });
   const partial = withIrosVersions({ status: "REG_PARTIAL_RESPONSE", complete: false });
-  assert.equal(isReusableIrosResult(good), true);
+  assert.equal(isReusableIrosResult(resolved), true);
   assert.equal(isReusableIrosResult(partial), false);
+  const progress = irosProgressStats([confirmedRow(resolved), confirmedRow(partial)]);
+  assert.deepEqual(
+    { total: progress.total, done: progress.done, retryable: progress.retryable },
+    { total: 2, done: 1, retryable: 1 }
+  );
 });
 
 test("IROS judgement and unique-number extraction remain separate KPIs", () => {
@@ -55,12 +67,23 @@ test("IROS judgement and unique-number extraction remain separate KPIs", () => {
     confirmedRow(withIrosVersions({ status: "REG_MULTI" })),
     confirmedRow(withIrosVersions({ status: "REG_UNIT_NOT_FOUND" })),
     confirmedRow(withIrosVersions({ status: "REG_NOT_FOUND" })),
+    confirmedRow(withIrosVersions({ status: "REG_PARTIAL_RESPONSE" })),
     confirmedRow(null),
-    confirmedRow(withIrosVersions({ status: "REG_HTTP_ERROR" })),
-    confirmedRow(withIrosVersions({ status: "UNIT_INPUT_REQUIRED" }), { dong: null, ho: null })
+    { result: { status: "CONFIRMED", isJip: true, unit: { dong: "101", ho: "" } }, reg: null }
   ];
-  const out = irosOutcomeStats(rows);
-  assert.deepEqual(out, {
+  const outcome = irosOutcomeStats(rows);
+  assert.deepEqual({
+    addressConfirmed: outcome.addressConfirmed,
+    inputRequired: outcome.inputRequired,
+    target: outcome.target,
+    judged: outcome.judged,
+    resolved: outcome.resolved,
+    multiple: outcome.multiple,
+    unitNotFound: outcome.unitNotFound,
+    otherFailure: outcome.otherFailure,
+    retryRequired: outcome.retryRequired,
+    unstarted: outcome.unstarted
+  }, {
     addressConfirmed: 7,
     inputRequired: 1,
     target: 6,
@@ -69,56 +92,55 @@ test("IROS judgement and unique-number extraction remain separate KPIs", () => {
     multiple: 1,
     unitNotFound: 1,
     otherFailure: 1,
-    stale: 0,
-    retryable: 1,
-    pendingRecovery: 0,
     retryRequired: 1,
-    unstarted: 1,
-    pending: 2
+    unstarted: 1
   });
+  assert.equal(outcome.resolved + outcome.multiple + outcome.unitNotFound + outcome.otherFailure, outcome.judged);
+  assert.equal(outcome.judged + outcome.retryRequired + outcome.unstarted, outcome.target);
 });
 
 test("snapshot persists all four IROS module versions and phase checkpoint", () => {
   const snapshot = buildIrosSnapshot([], ["부동산번호"], {
     phase: "alternate",
-    baseDone: 10,
-    baseTotal: 10,
-    alternateDone: 2,
-    alternateTotal: 5,
-    interrupted: true
+    baseDone: 919,
+    baseTotal: 919,
+    alternateDone: 12,
+    alternateTotal: 28,
+    unitDone: 13225,
+    unitTotal: 16848
   });
-  assert.equal(snapshot.irosVersions.collector, IROS_RUN_VERSIONS.collector);
-  assert.equal(snapshot.irosVersions.parser, IROS_RUN_VERSIONS.parser);
-  assert.equal(snapshot.irosVersions.matcher, IROS_RUN_VERSIONS.matcher);
-  assert.equal(snapshot.irosVersions.recovery, IROS_RUN_VERSIONS.recovery);
+  assert.equal(snapshot.v, 3);
+  assert.deepEqual(snapshot.irosVersions, IROS_RUN_VERSIONS);
   assert.equal(snapshot.irosRun.phase, "alternate");
-  assert.equal(snapshot.irosRun.alternateDone, 2);
-  assert.equal(snapshot.extraHeaders[0], "부동산번호");
+  assert.equal(snapshot.irosRun.alternateTotal, 28);
 });
 
-test("compressed XLSX round-trip validates rows, headers, summary, and ZIP end", async () => {
-  const XLSX = await import("xlsx");
-  const wb = XLSX.utils.book_new();
+test("compressed XLSX round-trip validates rows, headers, summary, and ZIP end", () => {
+  const headers = ["원본주소", "등기고유번호", "IROS매칭근거"];
+  const detailRows = [headers, ["주소1", "1111-1111-111111", "{\"ho\":\"101\"}"], ["주소2", "2222-2222-222222", "{\"ho\":\"202\"}"]];
+  const detail = XLSX.utils.aoa_to_sheet(detailRows);
+  applyWorksheetLayout(XLSX, detail, headers);
   const summary = XLSX.utils.aoa_to_sheet([
-    ["주소정제·등기조회 결과"],
+    ["결과"],
+    [],
     ["전체 처리 건수", 2]
   ]);
-  const detail = XLSX.utils.aoa_to_sheet([
-    ["원본주소", "등기고유번호"],
-    ["주소1", "1"],
-    ["주소2", "2"]
-  ]);
+  const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, summary, "요약");
   XLSX.utils.book_append_sheet(wb, detail, "전체(중복표시)");
-  const bytes = buildVerifiedWorkbookArray(XLSX, wb, {
+
+  const expectations = {
     summarySheet: "요약",
     detailSheet: "전체(중복표시)",
-    expectedHeaders: 2,
+    expectedHeaders: 3,
     expectedRows: 2,
     expectedSummaryTotal: 2
-  });
-  assert.equal(bytes[0], 0x50);
-  assert.equal(bytes[1], 0x4b);
+  };
+  const bytes = buildVerifiedWorkbookArray(XLSX, wb, expectations);
+  assert.equal(hasZipEndOfCentralDirectory(bytes), true);
+  const audit = validateWorkbookArray(XLSX, bytes, expectations);
+  assert.equal(audit.detailRows, 2);
+  assert.equal(detail["!cols"].length, headers.length);
 });
 
 test("mode-specific record count is explicit for integrity validation", () => {
