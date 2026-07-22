@@ -1,6 +1,6 @@
 import { extractExplicitLotRefs } from "./address-multilot-rules.mjs";
 
-export const MATCHER_VERSION = "iros-matcher-v7";
+export const MATCHER_VERSION = "iros-matcher-v8";
 
 export const IROS_MODULE_VERSIONS = Object.freeze({
   IROS_CANDIDATE_NORMALIZE: "2",
@@ -9,7 +9,7 @@ export const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_HO_BUILDING: "1",
   R_IROS_BUILDING_DISAMBIG: "1",
   R_IROS_RAW_UNIT: "1",
-  R_IROS_UNIT_PROFILE: "1"
+  R_IROS_UNIT_PROFILE: "2"
 });
 
 const DONG_ALIASES = Object.freeze({

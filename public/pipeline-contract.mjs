@@ -1,9 +1,9 @@
-export const PIPELINE_VERSION = "addr-pipeline-v3";
+export const PIPELINE_VERSION = "addr-pipeline-v4";
 
 export const MODULE_VERSIONS = Object.freeze({
   COMMON_NORMALIZE: "4",
-  UNIT_PARSE: "7",
-  JUSO_LOOKUP: "5",
+  UNIT_PARSE: "8",
+  JUSO_LOOKUP: "6",
   NAVER_RECOVERY: "5",
   REGION_VALIDATE: "6",
   GROUP_HINT: "3",
@@ -11,7 +11,8 @@ export const MODULE_VERSIONS = Object.freeze({
   GROUP_PROPAGATION: "5",
   OLD_ADDRESS: "4",
   MULTILOT_RECOVERY: "1",
-  OWNER_UNIT_RECOVERY: "1"
+  OWNER_UNIT_RECOVERY: "1",
+  SUB_BUILDING: "1"
 });
 
 function canonical(value) {

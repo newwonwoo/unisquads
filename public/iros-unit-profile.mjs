@@ -6,8 +6,13 @@ import {
   dongAliasKey,
   unitKey
 } from "./unit-match.mjs";
+import {
+  candidateSupportsSubBuilding,
+  extractSubBuildingIntent,
+  floorIntentFromText
+} from "./address-subbuilding-rules.mjs";
 
-export const UNIT_PROFILE_VERSION = "iros-unit-profile-v1";
+export const UNIT_PROFILE_VERSION = "iros-unit-profile-v2";
 
 function lastMatch(text, pattern) {
   const matches = [...String(text || "").matchAll(pattern)];
@@ -21,17 +26,28 @@ export function extractUnitIntent(rawAddress, currentUnit = {}) {
   const intent = {
     dong,
     ho,
-    floor: "",
+    floor: currentUnit?.floor || floorIntentFromText(raw) || "",
     room: "",
     recoveredDong: "",
+    subBuilding: extractSubBuildingIntent(raw),
     evidence: []
   };
 
-  const floorRoom = lastMatch(raw, /(?:^|\s)(\d{1,2})\s*층\s*(\d{1,3})\s*호(?=\s|$)/g);
-  if (floorRoom && (!ho || unitKey(floorRoom[2], "ho") === ho)) {
-    intent.floor = String(Number(floorRoom[1]));
-    intent.room = String(Number(floorRoom[2]));
-    intent.evidence.push("RAW_FLOOR_ROOM");
+  const basementRoom = lastMatch(
+    raw,
+    /(?:^|\s)(?:지하\s*(\d{1,2})|B\s*(\d{1,2}))\s*층\s*(\d{1,3})\s*호(?=\s|$)/gi
+  );
+  if (basementRoom && (!ho || unitKey(basementRoom[3], "ho") === ho)) {
+    intent.floor = `B${Number(basementRoom[1] || basementRoom[2])}`;
+    intent.room = String(Number(basementRoom[3]));
+    intent.evidence.push("RAW_BASEMENT_ROOM");
+  } else {
+    const floorRoom = lastMatch(raw, /(?:^|\s)(\d{1,2})\s*층\s*(\d{1,3})\s*호(?=\s|$)/g);
+    if (floorRoom && (!ho || unitKey(floorRoom[2], "ho") === ho)) {
+      intent.floor = String(Number(floorRoom[1]));
+      intent.room = String(Number(floorRoom[2]));
+      intent.evidence.push("RAW_FLOOR_ROOM");
+    }
   }
 
   // 왼쪽 한 자리 N-M호는 층·지하표기와 충돌할 수 있어 동 복원 근거로 쓰지 않는다.
@@ -41,6 +57,7 @@ export function extractUnitIntent(rawAddress, currentUnit = {}) {
     intent.evidence.push("RAW_DONG_ROOM");
   }
 
+  if (intent.subBuilding) intent.evidence.push(`RAW_SUB_BUILDING_${intent.subBuilding.kind}`);
   return intent;
 }
 
@@ -53,16 +70,23 @@ export function unitIntentSignature(rawAddress, currentUnit = {}) {
     intent.floor || "-",
     intent.room || "-",
     intent.recoveredDong || "-",
+    intent.subBuilding?.kind || "-",
     intent.evidence.join(",") || "none"
   ].join(":");
 }
 
+function normalizedHoText(value) {
+  return String(value || "").trim().replace(/\s+/g, "").replace(/호$/, "").toUpperCase();
+}
+
 function classifyHo(value) {
-  const raw = String(value || "").trim().replace(/\s+/g, "").replace(/호$/, "");
+  const raw = normalizedHoText(value);
   if (!raw) return "EMPTY";
   if (/^\d+$/.test(raw)) return "NUMERIC";
   if (/^\d+-\d+$/.test(raw)) return "HYPHEN_NUMERIC";
   if (/^\d+층\d+$/.test(raw)) return "FLOOR_TEXT";
+  if (/^(?:B\d+|지하\d+)-\d+$/.test(raw)) return "BASEMENT_HYPHEN";
+  if (/^(?:B\d+|지하\d+층)\d+$/.test(raw)) return "BASEMENT_COMBINED";
   if (/^[A-Za-z가-힣]+-\d+(?:-\d+)?$/.test(raw)) return "PREFIXED_ROOM";
   return "OTHER";
 }
@@ -144,7 +168,7 @@ function dongCompatible(candidate, profile, wantedDong) {
 
 function matchNumericFloorRoom(candidate, profile, intent) {
   const ho = unitKey(candidate?.ho, "ho");
-  if (!/^\d+$/.test(ho) || !intent.floor || !intent.room) return false;
+  if (!/^\d+$/.test(ho) || !intent.floor || !intent.room || /^B/.test(intent.floor)) return false;
   for (const width of profile.numericWidths) {
     if (ho.length <= width) continue;
     const floor = String(Number(ho.slice(0, -width)));
@@ -152,6 +176,22 @@ function matchNumericFloorRoom(candidate, profile, intent) {
     if (floor === intent.floor && room === intent.room) return true;
   }
   return false;
+}
+
+function matchBasementRoom(candidate, intent) {
+  if (!/^B\d+$/.test(intent.floor || "") || !intent.room) return false;
+  const level = intent.floor.slice(1);
+  const room = String(Number(intent.room));
+  const room2 = room.padStart(2, "0");
+  const raw = normalizedHoText(candidate?.ho);
+  return new Set([
+    `B${level}-${room}`,
+    `지하${level}-${room}`,
+    `B${level}층${room}`,
+    `지하${level}층${room}`,
+    `B${level}${room2}`,
+    `지하${level}${room2}`
+  ]).has(raw);
 }
 
 function profileMatches(profile, intent) {
@@ -181,14 +221,18 @@ function profileMatches(profile, intent) {
 
     if (intent.floor && intent.room && dongCompatible(candidate, profile, intent.dong)) {
       const ho = unitKey(candidate?.ho, "ho");
-      if (profile.hoFormats.has("HYPHEN_NUMERIC") && ho === `${intent.floor}-${intent.room}`) {
-        push(candidate, "PROFILE_FLOOR_ROOM_HYPHEN");
-      }
-      if (profile.hoFormats.has("FLOOR_TEXT") && ho === `${intent.floor}층${intent.room}`) {
-        push(candidate, "PROFILE_FLOOR_ROOM_TEXT");
-      }
-      if (profile.hoFormats.has("NUMERIC") && matchNumericFloorRoom(candidate, profile, intent)) {
-        push(candidate, "PROFILE_FLOOR_ROOM_NUMERIC");
+      if (/^B/.test(intent.floor)) {
+        if (matchBasementRoom(candidate, intent)) push(candidate, "PROFILE_BASEMENT_ROOM");
+      } else {
+        if (profile.hoFormats.has("HYPHEN_NUMERIC") && ho === `${intent.floor}-${intent.room}`) {
+          push(candidate, "PROFILE_FLOOR_ROOM_HYPHEN");
+        }
+        if (profile.hoFormats.has("FLOOR_TEXT") && ho === `${intent.floor}층${intent.room}`) {
+          push(candidate, "PROFILE_FLOOR_ROOM_TEXT");
+        }
+        if (profile.hoFormats.has("NUMERIC") && matchNumericFloorRoom(candidate, profile, intent)) {
+          push(candidate, "PROFILE_FLOOR_ROOM_NUMERIC");
+        }
       }
     }
   }
@@ -200,14 +244,22 @@ export function matchUnitByBuildingProfile(
   candidates,
   rawAddress,
   currentUnit = {},
-  expectedBuildingName = ""
+  expectedBuildingName = "",
+  expectedSubBuilding = null
 ) {
   const intent = extractUnitIntent(rawAddress, currentUnit);
+  if (expectedSubBuilding?.kind) intent.subBuilding = expectedSubBuilding;
   const profiles = buildBuildingUnitProfiles(candidates);
   const allMatches = profiles.flatMap((profile) => profileMatches(profile, intent));
   const expected = buildingKey(expectedBuildingName);
   let matches = allMatches;
   let exactBuildingFilterApplied = false;
+  let subBuildingFilterApplied = false;
+
+  if (intent.subBuilding?.kind) {
+    matches = matches.filter((match) => candidateSupportsSubBuilding(match.candidate, intent.subBuilding));
+    subBuildingFilterApplied = true;
+  }
 
   if (expected) {
     const exact = matches.filter((match) => match.profile.buildingKey === expected);
@@ -236,7 +288,8 @@ export function matchUnitByBuildingProfile(
     })),
     matched_candidate_count: unique.size,
     strategies: [...new Set(matches.map((match) => match.strategy))],
-    exact_building_filter_applied: exactBuildingFilterApplied
+    exact_building_filter_applied: exactBuildingFilterApplied,
+    sub_building_filter_applied: subBuildingFilterApplied
   };
 
   if (unique.size !== 1) {
