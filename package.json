@@ -1,7 +1,6 @@
 {
   "name": "unisquads",
   "private": true,
-  "type": "module",
   "scripts": {
     "build": "node scripts/generate-build-info.mjs",
     "test": "node --test tests/*.mjs"
