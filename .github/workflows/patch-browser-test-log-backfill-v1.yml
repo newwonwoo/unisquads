@@ -1,0 +1,87 @@
+name: Patch browser test log backfill v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-clean:
+    if: ${{ github.event.pull_request.head.ref == 'agent/browser-test-log-backfill-v1' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/browser-test-log-backfill-v1
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Apply browser test log backfill patch
+        run: python .github/scripts/apply_browser_test_log_backfill_v1.py
+
+      - name: Install test dependency
+        run: npm install --no-save xlsx@0.18.5
+
+      - name: Validate snapshot backfill and regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            node --check public/app.js
+            node --check public/browser-test-log.mjs
+            grep -F '기존 브라우저 저장 작업' public/app.js
+            grep -F 'imported_existing_snapshot: true' public/app.js
+            node --test \
+              tests/test_browser_test_log.mjs \
+              tests/test_browser_test_log_app_contract.mjs \
+              tests/test_browser_test_log_backfill_contract.mjs \
+              tests/test_parcel_alias_probe.mjs \
+              tests/test_parcel_alias_app_contract.mjs \
+              tests/test_address_parcel_intent.mjs \
+              tests/test_parcel_intent_app_contract.mjs \
+              tests/test_building_candidate_intent.mjs \
+              tests/test_subbuilding_app_contract.mjs \
+              tests/test_address_subbuilding_rules.mjs \
+              tests/test_iros_unit_profile.mjs \
+              tests/test_unit_match.mjs \
+              tests/test_iros_hardening.mjs \
+              tests/test_batch_workflow_state.mjs \
+              tests/test_batch_ui_stats.mjs \
+              tests/test_address_multilot_rules.mjs \
+              tests/test_address_quality_rules.mjs \
+              tests/test_admin_successor.mjs \
+              tests/test_address_recovery_integration.mjs \
+              tests/test_address_recovery_rules.mjs
+            python -m unittest discover -s tests -p 'test_*.py'
+          } 2>&1 | tee validation.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-log-backfill-v1-validation
+          path: validation.log
+          if-no-files-found: warn
+          retention-days: 2
+
+      - name: Commit validated files and remove temporary tooling
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/scripts/apply_browser_test_log_backfill_v1.py
+          rm -f .github/workflows/patch-browser-test-log-backfill-v1.yml
+          git add public/app.js tests/test_browser_test_log_backfill_contract.mjs
+          git add -u
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Backfill browser test log from saved batch"
+            git push origin HEAD:agent/browser-test-log-backfill-v1
+          fi
