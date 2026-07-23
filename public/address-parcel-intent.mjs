@@ -1,4 +1,4 @@
-export const PARCEL_INTENT_VERSION = "address-parcel-intent-v1";
+export const PARCEL_INTENT_VERSION = "address-parcel-intent-v2";
 
 function normalizeLot(value) {
   const raw = String(value || "").replace(/\s+/g, "");
@@ -51,6 +51,45 @@ function legalCompatible(refLegal, resultLegal, sourceTokens) {
   // 일반적인 리↔동 규칙으로 확대하지 않는다.
   return legalStem(refLegal) === legalStem(resultLegal) &&
     sourceTokens.includes(refLegal) && sourceTokens.includes(resultLegal);
+}
+
+function uniqueBy(items, keyOf) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items) {
+    const key = keyOf(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+// 후보에 원하는 필지가 없으면 후보축소 모듈만으로는 복구할 수 없다.
+// 원문에 평산동·평산리처럼 같은 어간의 현/구 법정동 표기가 함께 있을 때,
+// 원문에 실제로 적힌 지번을 각 표기로 조회할 명세를 만든다.
+// 원문에 없는 법정동이나 지번은 생성하지 않는다.
+export function buildExplicitParcelProbeSpecs(pre = {}) {
+  const refs = Array.isArray(pre?.lotRefs) ? pre.lotRefs : [];
+  const sourceTokens = [...new Set(legalTokens(pre?.raw))];
+  const specs = [];
+  for (const ref of refs) {
+    const lot = normalizeLot(ref?.lot);
+    const legal = String(ref?.legal || "");
+    if (!lot || !legal) continue;
+    const stem = legalStem(legal);
+    const variants = [
+      legal,
+      ...sourceTokens.filter((token) => legalStem(token) === stem)
+    ];
+    for (const variant of [...new Set(variants)]) {
+      const query = [pre?.sidoFull, pre?.sgg, pre?.eup, variant, lot]
+        .filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+      if (!query) continue;
+      specs.push({ legal: variant, lot, refLegal: legal, query });
+    }
+  }
+  return uniqueBy(specs, (spec) => `${spec.legal}|${spec.lot}|${spec.query}`);
 }
 
 export function narrowCandidatesByExplicitParcel(candidates, intent = {}) {
