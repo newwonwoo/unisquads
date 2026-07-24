@@ -17,6 +17,7 @@ import {
 } from "../public/iros-unit-profile.mjs";
 import {
   isReusableIrosResult,
+  markStaleIrosRows,
   needsCommercialRangeUnitRematch,
   withIrosVersions
 } from "../public/iros-run-contract.mjs";
@@ -179,24 +180,31 @@ test("상가 후보는 후보 소재지의 층·호로 한 건에 수렴한다",
   });
 });
 
-test("기존 실패 중 태원형 패턴만 IROS 재매칭한다", () => {
+test("기존 실패 중 원문이 태원형 패턴인 행만 IROS 재매칭한다", () => {
   const legacy = withIrosVersions({
     status: "REG_MULTI",
     match_evidence: {
-      unit_intent_signature: "iros-unit-profile-v2:-:106:1:-:-:COMMERCIAL:RAW_SUB_BUILDING_COMMERCIAL",
-      strict: "juso_multi:태원아파트:경남양산시평산동태원아파트101107상가1층6호"
+      unit_intent_signature: "iros-unit-profile-v2:-:106:1:-:-:COMMERCIAL:RAW_SUB_BUILDING_COMMERCIAL"
     }
   });
-  assert.equal(needsCommercialRangeUnitRematch(legacy), true);
-  assert.equal(isReusableIrosResult(legacy), false);
+  assert.equal(isReusableIrosResult(legacy), true);
+  assert.equal(needsCommercialRangeUnitRematch(legacy, TAEWON_ROWS[1].raw), true);
 
-  const ordinary = withIrosVersions({
-    status: "REG_MULTI",
-    match_evidence: {
-      unit_intent_signature: "iros-unit-profile-v2:103:803:-:-:-:-:none",
-      strict: "none"
-    }
-  });
-  assert.equal(needsCommercialRangeUnitRematch(ordinary), false);
-  assert.equal(isReusableIrosResult(ordinary), true);
+  const [marked] = markStaleIrosRows([{
+    raw: TAEWON_ROWS[1].raw,
+    result: { status: "CONFIRMED", unit: { dong: null, ho: "106" } },
+    reg: legacy
+  }]);
+  assert.equal(marked.reg.stale, true);
+  assert.equal(marked.reg.stale_reason, "COMMERCIAL_RANGE_UNIT_REMATCH");
+  assert.equal(isReusableIrosResult(marked.reg), false);
+
+  const [ordinary] = markStaleIrosRows([{
+    raw: "경남 양산시 평산동 태원아파트 102동1204호",
+    result: { status: "CONFIRMED", unit: { dong: "102", ho: "1204" } },
+    reg: legacy
+  }]);
+  assert.equal(needsCommercialRangeUnitRematch(legacy, ordinary.raw), false);
+  assert.equal(ordinary.reg.stale, undefined);
+  assert.equal(isReusableIrosResult(ordinary.reg), true);
 });
