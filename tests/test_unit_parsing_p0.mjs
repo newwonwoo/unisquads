@@ -12,6 +12,7 @@ import {
   extractCommercialFloorRoomIntent
 } from "../public/address-subbuilding-rules.mjs";
 import {
+  UNIT_PROFILE_VERSION,
   extractUnitIntent,
   matchUnitByBuildingProfile
 } from "../public/iros-unit-profile.mjs";
@@ -19,6 +20,7 @@ import {
   isReusableIrosResult,
   markStaleIrosRows,
   needsCommercialRangeUnitRematch,
+  needsUnitProfileVersionRematch,
   withIrosVersions
 } from "../public/iros-run-contract.mjs";
 
@@ -180,7 +182,7 @@ test("상가 후보는 후보 소재지의 층·호로 한 건에 수렴한다",
   });
 });
 
-test("기존 실패 중 원문이 태원형 패턴인 행만 IROS 재매칭한다", () => {
+test("기존 태원형 실패는 전용 사유로 IROS 재매칭한다", () => {
   const legacy = withIrosVersions({
     status: "REG_MULTI",
     match_evidence: {
@@ -198,13 +200,62 @@ test("기존 실패 중 원문이 태원형 패턴인 행만 IROS 재매칭한�
   assert.equal(marked.reg.stale, true);
   assert.equal(marked.reg.stale_reason, "COMMERCIAL_RANGE_UNIT_REMATCH");
   assert.equal(isReusableIrosResult(marked.reg), false);
+});
 
-  const [ordinary] = markStaleIrosRows([{
-    raw: "경남 양산시 평산동 태원아파트 102동1204호",
-    result: { status: "CONFIRMED", unit: { dong: "102", ho: "1204" } },
+test("프로파일 v2 세대실패만 현재 v3로 선택 재매칭한다", () => {
+  assert.equal(UNIT_PROFILE_VERSION, "iros-unit-profile-v3");
+  const legacy = withIrosVersions({
+    status: "REG_UNIT_NOT_FOUND",
+    match_evidence: {
+      unit_intent_signature: "iros-unit-profile-v2:101:301:3:-:-:-:RAW_FLOOR_ROOM"
+    }
+  });
+  assert.equal(needsUnitProfileVersionRematch(legacy), true);
+
+  const [marked] = markStaleIrosRows([{
+    raw: "경기 평택시 진흥아파트 101동 3층1호",
+    result: { status: "CONFIRMED", unit: { dong: "101", ho: "301" } },
     reg: legacy
   }]);
-  assert.equal(needsCommercialRangeUnitRematch(legacy, ordinary.raw), false);
-  assert.equal(ordinary.reg.stale, undefined);
-  assert.equal(isReusableIrosResult(ordinary.reg), true);
+  assert.equal(marked.reg.stale, true);
+  assert.equal(marked.reg.stale_reason, "UNIT_PROFILE_VERSION_REMATCH");
+  assert.deepEqual(marked.reg.stale_profile_versions, {
+    from: "iros-unit-profile-v2",
+    to: "iros-unit-profile-v3"
+  });
+  assert.equal(isReusableIrosResult(marked.reg), false);
+});
+
+test("기존 성공·현재 프로파일·비동호 검증실패는 잠근다", () => {
+  const legacySuccess = withIrosVersions({
+    status: "RESOLVED",
+    unique_no: "1146-1996-185402",
+    match_evidence: {
+      unit_intent_signature: "iros-unit-profile-v2:101:301:3:-:-:-:RAW_FLOOR_ROOM"
+    }
+  });
+  const currentFailure = withIrosVersions({
+    status: "REG_UNIT_NOT_FOUND",
+    match_evidence: {
+      unit_intent_signature: "iros-unit-profile-v3:101:301:3:1:-:-:-:RAW_FLOOR_ROOM"
+    }
+  });
+  const buildingValidationFailure = withIrosVersions({
+    status: "REG_VALIDATION_FAILED",
+    failure_stage: "STRICT_BUILDING",
+    match_evidence: {
+      unit_intent_signature: "iros-unit-profile-v2:101:301:3:-:-:-:RAW_FLOOR_ROOM"
+    }
+  });
+
+  for (const reg of [legacySuccess, currentFailure, buildingValidationFailure]) {
+    assert.equal(needsUnitProfileVersionRematch(reg), false);
+    const [row] = markStaleIrosRows([{
+      raw: "서울 강남구 역삼동 1 진흥아파트 101동301호",
+      result: { status: "CONFIRMED", unit: { dong: "101", ho: "301" } },
+      reg
+    }]);
+    assert.equal(row.reg.stale, undefined);
+    assert.equal(isReusableIrosResult(row.reg), true);
+  }
 });
