@@ -1,4 +1,5 @@
 import { extractBuildingRangeIntent } from "./address-subbuilding-rules.mjs";
+import { UNIT_PROFILE_VERSION } from "./iros-unit-profile.mjs";
 
 export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
@@ -22,6 +23,11 @@ export const IROS_RETRYABLE_STATUSES = Object.freeze([
 
 const RETRYABLE = new Set(IROS_RETRYABLE_STATUSES);
 const COMMERCIAL_RANGE_RETRY_STATUSES = new Set([
+  "REG_MULTI",
+  "MULTIPLE",
+  "REG_UNIT_NOT_FOUND"
+]);
+const UNIT_PROFILE_RETRY_STATUSES = new Set([
   "REG_MULTI",
   "MULTIPLE",
   "REG_UNIT_NOT_FOUND"
@@ -61,6 +67,28 @@ export function isRetryableIrosStatus(status) {
   return RETRYABLE.has(String(status || ""));
 }
 
+function unitProfileVersionFromSignature(value) {
+  const signature = String(value || "");
+  const match = /^(iros-unit-profile-v\d+)(?::|$)/.exec(signature);
+  return match?.[1] || "";
+}
+
+// 프로파일 버전은 matcher manifest와 별도로 발전할 수 있다. 전체 matcher 버전을
+// 올리면 정상 성공건까지 재조회되므로, 구버전 프로파일로 끝난 세대미일치·복수결과만
+// 현재 프로파일로 재매칭한다. 성공 결과와 건물명/부동산구분 검증실패는 건드리지 않는다.
+export function needsUnitProfileVersionRematch(
+  reg,
+  currentProfileVersion = UNIT_PROFILE_VERSION
+) {
+  const status = String(reg?.status || "");
+  if (!UNIT_PROFILE_RETRY_STATUSES.has(status)) return false;
+  const recordedVersion = unitProfileVersionFromSignature(
+    reg?.match_evidence?.unit_intent_signature
+  );
+  const currentVersion = String(currentProfileVersion || "");
+  return Boolean(recordedVersion && currentVersion && recordedVersion !== currentVersion);
+}
+
 // 아파트명 뒤 101-107 같은 동 범위를 적고, 그 뒤 상가 층·호가 명시된 행 중
 // 구버전 프로파일이 복수/세대없음으로 끝난 결과만 재매칭한다.
 // 행 원문을 직접 확인하므로 동일 패턴이 아닌 완료건은 건드리지 않는다.
@@ -96,6 +124,23 @@ export function markStaleIrosRows(rows, current = IROS_RUN_VERSIONS) {
           ...row.reg,
           stale: true,
           stale_reason: "COMMERCIAL_RANGE_UNIT_REMATCH"
+        }
+      };
+    }
+
+    if (needsUnitProfileVersionRematch(row.reg)) {
+      return {
+        ...row,
+        reg: {
+          ...row.reg,
+          stale: true,
+          stale_reason: "UNIT_PROFILE_VERSION_REMATCH",
+          stale_profile_versions: {
+            from: unitProfileVersionFromSignature(
+              row.reg?.match_evidence?.unit_intent_signature
+            ),
+            to: UNIT_PROFILE_VERSION
+          }
         }
       };
     }
