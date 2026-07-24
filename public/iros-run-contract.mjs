@@ -54,10 +54,32 @@ export function isRetryableIrosStatus(status) {
   return RETRYABLE.has(String(status || ""));
 }
 
+// 2026-07 태원아파트 실측 패턴:
+// 아파트명 뒤 101-107은 동 범위이고, 뒤의 상가 층·호가 실제 전유부다.
+// 이전 프로파일(v2)이 이 형식을 REG_MULTI/REG_UNIT_NOT_FOUND로 끝낸 경우만
+// 한 번 재매칭한다. 전역 matcher 버전은 올리지 않아 다른 완료건은 재조회하지 않는다.
+export function needsCommercialRangeUnitRematch(reg) {
+  const status = String(reg?.status || "");
+  if (!new Set(["REG_MULTI", "MULTIPLE", "REG_UNIT_NOT_FOUND"]).has(status)) return false;
+
+  const signature = String(reg?.match_evidence?.unit_intent_signature || "");
+  if (!signature.startsWith("iros-unit-profile-v2:")) return false;
+  if (!signature.includes(":COMMERCIAL:")) return false;
+
+  // v2에서는 1층6호를 106호로 먼저 합성해 RAW_FLOOR_ROOM 근거가
+  // 서명에 남지 않을 수 있다. 따라서 엄격한 원문 패턴은 strict에서 확인한다.
+  // strict에는 review 사유 + 정제 건물명 + 원문 정규화값이 저장된다.
+  // 하이픈이 제거된 연속 6~8자리 동 범위 뒤에 상가 층·호가 있는 경우만 연다.
+  const strict = String(reg?.match_evidence?.strict || "").toLowerCase();
+  return /\d{6,8}.*(?:상가|근린생활시설|근생|판매시설).*(?:(?:지하|b)\d+|\d+)층\d+호/.test(strict);
+}
+
 export function isReusableIrosResult(reg, current = IROS_RUN_VERSIONS) {
   if (!isCurrentIrosResult(reg, current)) return false;
   if (!reg.status || reg.stale === true || reg.recovery_pending === true) return false;
-  return !isRetryableIrosStatus(reg.status);
+  if (isRetryableIrosStatus(reg.status)) return false;
+  if (needsCommercialRangeUnitRematch(reg)) return false;
+  return true;
 }
 
 export function rowRequiresIros(row) {
