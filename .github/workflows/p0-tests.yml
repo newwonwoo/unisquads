@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - agent/p0-build-regression-unit-parsing
+      - agent/fix-test-log-recovery
 
 jobs:
   test:
@@ -18,6 +19,7 @@ jobs:
           - tests/test_unit_parsing_p0.mjs
           - tests/test_browser_test_regression_p0.mjs
           - tests/test_build_info_p0.mjs
+          - tests/test_ui_safety_p0.mjs
     name: test ${{ matrix.test_file }}
     steps:
       - uses: actions/checkout@v4
