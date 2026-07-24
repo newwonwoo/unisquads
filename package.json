@@ -1,0 +1,8 @@
+{
+  "name": "unisquads",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/generate-build-info.mjs",
+    "test": "node --test tests/*.mjs"
+  }
+}

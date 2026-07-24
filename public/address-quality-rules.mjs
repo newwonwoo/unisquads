@@ -11,9 +11,46 @@ const KOREAN_ALPHA_DONG = Object.freeze({
 // 건물명이 없는 등기부 원문에서 확인된 compact 표기만 다룬다.
 // 이동·지동·가동처럼 실제 법정동일 수 있는 한글 1음절 표기는 의도적으로 제외한다.
 const RE_COMPACT_ALPHA_UNIT = /(?:^|\s)제?(에이치|에이|비이|에프|비|씨|디|[A-Za-z])동\s*(\d{1,2})\s*-\s*(\d{2,5})(?=\s|$)/;
+const RE_DONG_FLOOR_HO = /(?:^|\s)제?(\d{1,4})\s*동\s*제?(\d{1,2})\s*층\s*제?(\d{1,4})\s*호(?=\s|$)/;
+const RE_FLOOR_HO = /(?:^|\s)제?(\d{1,2})\s*층\s*제?(\d{1,4})\s*호(?=\s|$)/;
+
+function composeFloorHo(floorValue, hoValue) {
+  const floor = String(Number(floorValue));
+  const ho = String(Number(hoValue));
+  if (!floor || floor === "0" || !ho || ho === "0") return String(hoValue);
+  // 이미 301·1103처럼 완성된 호수면 다시 층을 붙이지 않는다.
+  if (String(hoValue).length >= 3) return String(hoValue);
+  return `${floor}${ho.padStart(2, "0")}`;
+}
+
+function parseFloorHo(source) {
+  const withDong = source.match(RE_DONG_FLOOR_HO);
+  if (withDong) {
+    return {
+      dong: withDong[1],
+      floor: String(Number(withDong[2])),
+      ho: composeFloorHo(withDong[2], withDong[3]),
+      matched: withDong[0],
+      index: withDong.index ?? 0,
+      evidence: "dong_floor_ho_composed"
+    };
+  }
+  const withoutDong = source.match(RE_FLOOR_HO);
+  if (!withoutDong) return null;
+  return {
+    dong: null,
+    floor: String(Number(withoutDong[1])),
+    ho: composeFloorHo(withoutDong[1], withoutDong[2]),
+    matched: withoutDong[0],
+    index: withoutDong.index ?? 0,
+    evidence: "floor_ho_composed"
+  };
+}
 
 export function parseCompactAlphaUnit(value) {
   const source = String(value || "");
+  const floorHo = parseFloorHo(source);
+  if (floorHo) return floorHo;
   const match = source.match(RE_COMPACT_ALPHA_UNIT);
   if (!match) return null;
   const token = match[1];
@@ -23,7 +60,8 @@ export function parseCompactAlphaUnit(value) {
     floor: String(Number(match[2])),
     ho: match[3],
     matched: match[0],
-    index: match.index ?? 0
+    index: match.index ?? 0,
+    evidence: "compact_alpha_unit"
   };
 }
 

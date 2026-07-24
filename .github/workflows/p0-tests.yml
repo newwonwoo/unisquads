@@ -1,0 +1,37 @@
+name: P0 tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - agent/p0-build-regression-unit-parsing
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        test_file:
+          - tests/test_unit_parsing_p0.mjs
+          - tests/test_browser_test_regression_p0.mjs
+          - tests/test_build_info_p0.mjs
+    name: test ${{ matrix.test_file }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test "${{ matrix.test_file }}"
+
+  build-info:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/generate-build-info.mjs
