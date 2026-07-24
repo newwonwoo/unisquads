@@ -17,6 +17,10 @@ export const MODULE_VERSIONS = Object.freeze({
   EXPLICIT_PARCEL_INTENT: "2"
 });
 
+const RE_EXPLICIT_LOT = /[가-힣]{1,12}(?:동|리|읍|면|가)\s+(?:산\s*)?\d{1,4}(?:-\d{1,4})?(?=\s|$)/;
+const RE_TRAILING_BUILDING_HO = /^(.+?\S)\s+(\d{3,4})\s*$/;
+const NON_BUILDING_TAIL = /(?:외\s*\d+\s*(?:세대|호실|필지)|총\s*\d+\s*(?:세대|호실)|\d+\s*(?:세대|호실|㎡|m2|m²|평|년|년도)|(?:면적|전용|공급|대지|준공|사용승인)\s*\d*)$/i;
+
 function canonical(value) {
   if (value === null || value === undefined) return null;
   if (Array.isArray(value)) return value.map(canonical);
@@ -97,10 +101,45 @@ export function appliedModulesFor(result, upstreamEvidence = {}) {
   return [...new Set(modules)].sort();
 }
 
-export function attachPipelineMetadata(row, result, upstreamEvidence = {}) {
-  const appliedModules = appliedModulesFor(result, upstreamEvidence);
-  const enriched = {
+function confirmedTrailingBuildingHo(row, result) {
+  if (result?.status !== "CONFIRMED" || !result?.pnu || result?.unit?.ho) return null;
+  const raw = String(row?.raw || "").replace(/[()[\]{}]/g, " ").replace(/\s+/g, " ").trim();
+  const lot = raw.match(RE_EXPLICIT_LOT);
+  if (!lot) return null;
+  const tail = raw.slice((lot.index ?? 0) + lot[0].length).trim();
+  const match = tail.match(RE_TRAILING_BUILDING_HO);
+  if (!match || NON_BUILDING_TAIL.test(tail)) return null;
+  const buildingName = match[1].trim();
+  const ho = match[2];
+  if (buildingName.length < 2 || !/[가-힣A-Za-z]/.test(buildingName)) return null;
+  if (/(?:외|총|약|대지|면적|전용|공급|준공|사용승인)\s*$/i.test(buildingName)) return null;
+  return { ho, buildingName };
+}
+
+function applyConfirmedUnitRecovery(row, result) {
+  const recovered = confirmedTrailingBuildingHo(row, result);
+  if (!recovered) return result || {};
+  return {
     ...(result || {}),
+    unit: {
+      ...(result?.unit || {}),
+      ho: recovered.ho
+    },
+    unitRecovery: {
+      kind: "confirmed_pnu_building_trailing_ho",
+      buildingName: recovered.buildingName,
+      ho: recovered.ho
+    }
+  };
+}
+
+export function attachPipelineMetadata(row, result, upstreamEvidence = {}) {
+  // 건물명 뒤 단독 숫자는 주소 전처리 단계에서 확정하지 않는다.
+  // 주소가 CONFIRMED이고 PNU가 확보된 뒤에만 호수로 승격한다.
+  const recoveredResult = applyConfirmedUnitRecovery(row, result);
+  const appliedModules = appliedModulesFor(recoveredResult, upstreamEvidence);
+  const enriched = {
+    ...recoveredResult,
     pipelineVersion: PIPELINE_VERSION,
     moduleVersions: selectedModuleVersions(appliedModules),
     dependencyFingerprint: dependencyFingerprint(row, upstreamEvidence, appliedModules),
