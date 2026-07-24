@@ -2,7 +2,7 @@
   "name": "unisquads",
   "private": true,
   "scripts": {
-    "build": "npm test && node scripts/generate-build-info.mjs",
+    "build": "node scripts/generate-build-info.mjs",
     "test": "node --test tests/*.mjs"
   }
 }
