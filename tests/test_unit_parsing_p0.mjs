@@ -1,7 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseCompactAlphaUnit } from "../public/address-quality-rules.mjs";
-import { attachPipelineMetadata } from "../public/pipeline-contract.mjs";
+import {
+  attachPipelineMetadata,
+  dependencyFingerprint,
+  isReusableResult,
+  resultFingerprint
+} from "../public/pipeline-contract.mjs";
+import {
+  extractBuildingRangeIntent,
+  extractCommercialFloorRoomIntent
+} from "../public/address-subbuilding-rules.mjs";
+import {
+  extractUnitIntent,
+  matchUnitByBuildingProfile
+} from "../public/iros-unit-profile.mjs";
+import {
+  isReusableIrosResult,
+  needsCommercialRangeUnitRematch,
+  withIrosVersions
+} from "../public/iros-run-contract.mjs";
 
 test("층과 호를 실제 호수로 조합한다", () => {
   assert.deepEqual(parseCompactAlphaUnit("서울 강남구 역삼동 1 101동 3층1호"), {
@@ -50,4 +68,135 @@ test("세대수·면적·연도 표현은 PNU가 있어도 호로 보지 않는�
     assert.equal(result.unit.ho, null);
     assert.equal(result.unitRecovery, undefined);
   }
+});
+
+const TAEWON_ROWS = [
+  {
+    raw: "경남 양산시 평산동 태원아파트 101-107 평산리 564 상가 지하1층3호",
+    oldUnit: { dong: null, floor: "B1", ho: "3" },
+    floor: "B1",
+    room: "3"
+  },
+  {
+    raw: "경남 양산시 평산동 태원아파트 101-107 상가 1층6호",
+    oldUnit: { dong: null, floor: "1", ho: "106" },
+    floor: "1",
+    room: "6"
+  },
+  {
+    raw: "경남 양산시 평산동 태원아파트 101-107 상가 2층16호",
+    oldUnit: { dong: null, floor: "2", ho: "216" },
+    floor: "2",
+    room: "16"
+  }
+];
+
+test("101-107은 동 범위이고 뒤 상가 층·호가 실제 전유부다", () => {
+  for (const item of TAEWON_ROWS) {
+    const range = extractBuildingRangeIntent(item.raw);
+    const commercial = extractCommercialFloorRoomIntent(item.raw);
+    assert.deepEqual(
+      [range.start, range.end, commercial.floor, commercial.room],
+      ["101", "107", item.floor, item.room]
+    );
+
+    const intent = extractUnitIntent(item.raw, item.oldUnit);
+    assert.equal(intent.dong, "");
+    assert.equal(intent.floor, item.floor);
+    assert.equal(intent.room, item.room);
+    assert.equal(intent.subBuilding.kind, "COMMERCIAL");
+    assert.equal(intent.buildingRange.kind, "DONG_RANGE");
+  }
+});
+
+test("확정 PNU는 유지하고 상가 층·호만 구조화한다", () => {
+  for (const item of TAEWON_ROWS) {
+    const row = { raw: item.raw };
+    const result = attachPipelineMetadata(row, {
+      status: "CONFIRMED",
+      pnu: "4833011900105640000",
+      jibunAddr: "경상남도 양산시 평산동 564 태원아파트",
+      unit: item.oldUnit
+    });
+    assert.equal(result.pnu, "4833011900105640000");
+    assert.equal(result.unit.dong, null);
+    assert.equal(result.unit.floor, item.floor);
+    assert.equal(result.unit.ho, item.room);
+    assert.equal(result.commercialRangeUnitRecovery.rangeStart, "101");
+    assert.equal(result.commercialRangeUnitRecovery.rangeEnd, "107");
+    assert.ok(result.appliedModules.includes("COMMERCIAL_RANGE_UNIT"));
+  }
+});
+
+test("신규 상가 범위 규칙은 해당 행만 주소 재정제 대상으로 만든다", () => {
+  const raw = TAEWON_ROWS[1].raw;
+  const row = { raw };
+  const current = attachPipelineMetadata(row, {
+    status: "CONFIRMED",
+    pnu: "4833011900105640000",
+    unit: { dong: null, floor: "1", ho: "106" }
+  });
+  assert.equal(isReusableResult({ ...row, result: current }), true);
+
+  const legacy = { ...current };
+  delete legacy.commercialRangeUnitRecovery;
+  legacy.appliedModules = legacy.appliedModules.filter((name) => name !== "COMMERCIAL_RANGE_UNIT");
+  legacy.moduleVersions = Object.fromEntries(
+    Object.entries(legacy.moduleVersions).filter(([name]) => name !== "COMMERCIAL_RANGE_UNIT")
+  );
+  legacy.dependencyFingerprint = dependencyFingerprint(row, {}, legacy.appliedModules);
+  legacy.resultFingerprint = resultFingerprint(legacy);
+  assert.equal(isReusableResult({ ...row, result: legacy }), false);
+
+  const normalRow = { raw: "경남 양산시 평산동 태원아파트 102동1204호" };
+  const normal = attachPipelineMetadata(normalRow, {
+    status: "CONFIRMED",
+    pnu: "4833011900105640000",
+    unit: { dong: "102", ho: "1204" }
+  });
+  assert.equal(isReusableResult({ ...normalRow, result: normal }), true);
+});
+
+test("상가 후보는 후보 소재지의 층·호로 한 건에 수렴한다", () => {
+  const candidates = [
+    { unique_no: "A", dong: "", ho: "3", buldnm: "태원아파트 상가", sojae: "경상남도 양산시 평산동 564 상가 지하1층 3호" },
+    { unique_no: "B", dong: "", ho: "6", buldnm: "태원아파트 상가", sojae: "경상남도 양산시 평산동 564 상가 제1층 제6호" },
+    { unique_no: "C", dong: "", ho: "16", buldnm: "태원아파트 상가", sojae: "경상남도 양산시 평산동 564 상가 제2층 제16호" }
+  ];
+  const expected = ["A", "B", "C"];
+
+  TAEWON_ROWS.forEach((item, index) => {
+    const matched = matchUnitByBuildingProfile(
+      candidates,
+      item.raw,
+      item.oldUnit,
+      "태원아파트",
+      { kind: "COMMERCIAL", token: "상가" }
+    );
+    assert.equal(matched.status, "UNIQUE");
+    assert.equal(matched.candidate.unique_no, expected[index]);
+    assert.ok(matched.strategy.includes("CANDIDATE_TEXT"));
+  });
+});
+
+test("기존 실패 중 태원형 패턴만 IROS 재매칭한다", () => {
+  const legacy = withIrosVersions({
+    status: "REG_MULTI",
+    match_evidence: {
+      unit_intent_signature: "iros-unit-profile-v2:-:106:1:-:-:COMMERCIAL:RAW_SUB_BUILDING_COMMERCIAL",
+      strict: "juso_multi:태원아파트:경남양산시평산동태원아파트101107상가1층6호"
+    }
+  });
+  assert.equal(needsCommercialRangeUnitRematch(legacy), true);
+  assert.equal(isReusableIrosResult(legacy), false);
+
+  const ordinary = withIrosVersions({
+    status: "REG_MULTI",
+    match_evidence: {
+      unit_intent_signature: "iros-unit-profile-v2:103:803:-:-:-:-:none",
+      strict: "none"
+    }
+  });
+  assert.equal(needsCommercialRangeUnitRematch(ordinary), false);
+  assert.equal(isReusableIrosResult(ordinary), true);
 });
