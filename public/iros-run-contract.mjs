@@ -1,3 +1,5 @@
+import { extractBuildingRangeIntent } from "./address-subbuilding-rules.mjs";
+
 export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
   parser: "iros-parser-v4",
@@ -19,6 +21,11 @@ export const IROS_RETRYABLE_STATUSES = Object.freeze([
 ]);
 
 const RETRYABLE = new Set(IROS_RETRYABLE_STATUSES);
+const COMMERCIAL_RANGE_RETRY_STATUSES = new Set([
+  "REG_MULTI",
+  "MULTIPLE",
+  "REG_UNIT_NOT_FOUND"
+]);
 
 export function irosVersionManifest() {
   return { ...IROS_RUN_VERSIONS };
@@ -54,32 +61,21 @@ export function isRetryableIrosStatus(status) {
   return RETRYABLE.has(String(status || ""));
 }
 
-// 2026-07 태원아파트 실측 패턴:
-// 아파트명 뒤 101-107은 동 범위이고, 뒤의 상가 층·호가 실제 전유부다.
-// 이전 프로파일(v2)이 이 형식을 REG_MULTI/REG_UNIT_NOT_FOUND로 끝낸 경우만
-// 한 번 재매칭한다. 전역 matcher 버전은 올리지 않아 다른 완료건은 재조회하지 않는다.
-export function needsCommercialRangeUnitRematch(reg) {
+// 아파트명 뒤 101-107 같은 동 범위를 적고, 그 뒤 상가 층·호가 명시된 행 중
+// 구버전 프로파일이 복수/세대없음으로 끝난 결과만 재매칭한다.
+// 행 원문을 직접 확인하므로 동일 패턴이 아닌 완료건은 건드리지 않는다.
+export function needsCommercialRangeUnitRematch(reg, rawAddress = "") {
   const status = String(reg?.status || "");
-  if (!new Set(["REG_MULTI", "MULTIPLE", "REG_UNIT_NOT_FOUND"]).has(status)) return false;
-
+  if (!COMMERCIAL_RANGE_RETRY_STATUSES.has(status)) return false;
   const signature = String(reg?.match_evidence?.unit_intent_signature || "");
-  if (!signature.startsWith("iros-unit-profile-v2:")) return false;
-  if (!signature.includes(":COMMERCIAL:")) return false;
-
-  // v2에서는 1층6호를 106호로 먼저 합성해 RAW_FLOOR_ROOM 근거가
-  // 서명에 남지 않을 수 있다. 따라서 엄격한 원문 패턴은 strict에서 확인한다.
-  // strict에는 review 사유 + 정제 건물명 + 원문 정규화값이 저장된다.
-  // 하이픈이 제거된 연속 6~8자리 동 범위 뒤에 상가 층·호가 있는 경우만 연다.
-  const strict = String(reg?.match_evidence?.strict || "").toLowerCase();
-  return /\d{6,8}.*(?:상가|근린생활시설|근생|판매시설).*(?:(?:지하|b)\d+|\d+)층\d+호/.test(strict);
+  if (signature && !signature.startsWith("iros-unit-profile-v2:")) return false;
+  return Boolean(extractBuildingRangeIntent(rawAddress));
 }
 
 export function isReusableIrosResult(reg, current = IROS_RUN_VERSIONS) {
   if (!isCurrentIrosResult(reg, current)) return false;
   if (!reg.status || reg.stale === true || reg.recovery_pending === true) return false;
-  if (isRetryableIrosStatus(reg.status)) return false;
-  if (needsCommercialRangeUnitRematch(reg)) return false;
-  return true;
+  return !isRetryableIrosStatus(reg.status);
 }
 
 export function rowRequiresIros(row) {
@@ -91,7 +87,20 @@ export function rowRequiresIros(row) {
 
 export function markStaleIrosRows(rows, current = IROS_RUN_VERSIONS) {
   return (rows || []).map((row) => {
-    if (!row?.reg || isCurrentIrosResult(row.reg, current)) return row;
+    if (!row?.reg) return row;
+
+    if (needsCommercialRangeUnitRematch(row.reg, row.raw || "")) {
+      return {
+        ...row,
+        reg: {
+          ...row.reg,
+          stale: true,
+          stale_reason: "COMMERCIAL_RANGE_UNIT_REMATCH"
+        }
+      };
+    }
+
+    if (isCurrentIrosResult(row.reg, current)) return row;
     return {
       ...row,
       reg: {
@@ -119,7 +128,7 @@ export function irosProgressStats(rows, current = IROS_RUN_VERSIONS) {
     if (!rowRequiresIros(row)) continue;
     total += 1;
     const reg = row?.reg;
-    if (!isCurrentIrosResult(reg, current)) stale += 1;
+    if (reg?.stale === true || !isCurrentIrosResult(reg, current)) stale += 1;
     else if (reg?.recovery_pending) pendingRecovery += 1;
     else if (isRetryableIrosStatus(reg?.status)) retryable += 1;
     else if (isReusableIrosResult(reg, current)) done += 1;
@@ -163,7 +172,7 @@ export function irosOutcomeStats(rows, current = IROS_RUN_VERSIONS) {
     out.target += 1;
     const reg = row?.reg;
     if (!reg) continue;
-    if (!isCurrentIrosResult(reg, current)) {
+    if (reg.stale === true || !isCurrentIrosResult(reg, current)) {
       out.stale += 1;
       continue;
     }
