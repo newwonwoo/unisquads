@@ -8,11 +8,13 @@ import {
 } from "./unit-match.mjs";
 import {
   candidateSupportsSubBuilding,
+  extractBuildingRangeIntent,
+  extractCommercialFloorRoomIntent,
   extractSubBuildingIntent,
   floorIntentFromText
 } from "./address-subbuilding-rules.mjs";
 
-export const UNIT_PROFILE_VERSION = "iros-unit-profile-v2";
+export const UNIT_PROFILE_VERSION = "iros-unit-profile-v3";
 
 function lastMatch(text, pattern) {
   const matches = [...String(text || "").matchAll(pattern)];
@@ -23,15 +25,18 @@ export function extractUnitIntent(rawAddress, currentUnit = {}) {
   const raw = String(rawAddress || "");
   const dong = dongAliasKey(currentUnit?.dong);
   const ho = unitKey(currentUnit?.ho, "ho");
+  const commercialUnit = extractCommercialFloorRoomIntent(raw);
   const intent = {
     dong,
     ho,
-    floor: currentUnit?.floor || floorIntentFromText(raw) || "",
-    room: "",
+    floor: currentUnit?.floor || commercialUnit?.floor || floorIntentFromText(raw) || "",
+    room: commercialUnit?.room || "",
     recoveredDong: "",
     subBuilding: extractSubBuildingIntent(raw),
+    buildingRange: extractBuildingRangeIntent(raw),
     evidence: []
   };
+  if (commercialUnit) intent.evidence.push(commercialUnit.evidence);
 
   const basementRoom = lastMatch(
     raw,
@@ -43,7 +48,8 @@ export function extractUnitIntent(rawAddress, currentUnit = {}) {
     intent.evidence.push("RAW_BASEMENT_ROOM");
   } else {
     const floorRoom = lastMatch(raw, /(?:^|\s)(\d{1,2})\s*층\s*(\d{1,3})\s*호(?=\s|$)/g);
-    if (floorRoom && (!ho || unitKey(floorRoom[2], "ho") === ho)) {
+    if (floorRoom && (!ho || unitKey(floorRoom[2], "ho") === ho ||
+        unitKey(`${floorRoom[1]}${String(Number(floorRoom[2])).padStart(2, "0")}`, "ho") === ho)) {
       intent.floor = String(Number(floorRoom[1]));
       intent.room = String(Number(floorRoom[2]));
       intent.evidence.push("RAW_FLOOR_ROOM");
@@ -58,6 +64,7 @@ export function extractUnitIntent(rawAddress, currentUnit = {}) {
   }
 
   if (intent.subBuilding) intent.evidence.push(`RAW_SUB_BUILDING_${intent.subBuilding.kind}`);
+  if (intent.buildingRange) intent.evidence.push(intent.buildingRange.evidence);
   return intent;
 }
 
@@ -71,6 +78,7 @@ export function unitIntentSignature(rawAddress, currentUnit = {}) {
     intent.room || "-",
     intent.recoveredDong || "-",
     intent.subBuilding?.kind || "-",
+    intent.buildingRange ? `${intent.buildingRange.start}-${intent.buildingRange.end}` : "-",
     intent.evidence.join(",") || "none"
   ].join(":");
 }
@@ -194,6 +202,49 @@ function matchBasementRoom(candidate, intent) {
   ]).has(raw);
 }
 
+function candidateSearchText(candidate) {
+  return [
+    candidate?.floor,
+    candidate?.floor_no,
+    candidate?.floorNo,
+    candidate?.dong,
+    candidate?.ho,
+    candidate?.buldnm,
+    candidate?.add_item,
+    candidate?.sojae
+  ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
+// 일부 상가 전유부는 bridge가 호만 분리하고 층은 소재지 문자열에 남긴다.
+// 후보 원문에 층·호가 함께 명시된 경우 이를 독립적인 구조근거로 사용한다.
+function candidateExplicitFloorRoom(candidate) {
+  const text = candidateSearchText(candidate);
+  if (!text) return null;
+
+  const basement = lastMatch(
+    text,
+    /(?:^|\s)제?\s*(?:(?:지하\s*(\d{1,2})|B\s*(\d{1,2}))\s*층|지층)\s*제?\s*(\d{1,4})\s*호(?=\s|$)/gi
+  );
+  if (basement) {
+    return {
+      floor: `B${Number(basement[1] || basement[2] || 1)}`,
+      room: String(Number(basement[3])),
+      evidence: "CANDIDATE_TEXT_BASEMENT_ROOM"
+    };
+  }
+
+  const above = lastMatch(
+    text,
+    /(?:^|\s)제?\s*(\d{1,2})\s*층\s*제?\s*(\d{1,4})\s*호(?=\s|$)/g
+  );
+  if (!above) return null;
+  return {
+    floor: String(Number(above[1])),
+    room: String(Number(above[2])),
+    evidence: "CANDIDATE_TEXT_FLOOR_ROOM"
+  };
+}
+
 function profileMatches(profile, intent) {
   const matches = [];
   const push = (candidate, strategy) => matches.push({ candidate, strategy, profile });
@@ -220,6 +271,13 @@ function profileMatches(profile, intent) {
     }
 
     if (intent.floor && intent.room && dongCompatible(candidate, profile, intent.dong)) {
+      const explicit = candidateExplicitFloorRoom(candidate);
+      if (explicit && explicit.floor === intent.floor && explicit.room === intent.room) {
+        push(candidate, explicit.evidence === "CANDIDATE_TEXT_BASEMENT_ROOM"
+          ? "PROFILE_CANDIDATE_TEXT_BASEMENT_ROOM"
+          : "PROFILE_CANDIDATE_TEXT_FLOOR_ROOM");
+      }
+
       const ho = unitKey(candidate?.ho, "ho");
       if (/^B/.test(intent.floor)) {
         if (matchBasementRoom(candidate, intent)) push(candidate, "PROFILE_BASEMENT_ROOM");
