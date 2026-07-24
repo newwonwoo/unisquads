@@ -1,0 +1,20 @@
+name: P0 tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - agent/p0-build-regression-unit-parsing
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: node scripts/generate-build-info.mjs
