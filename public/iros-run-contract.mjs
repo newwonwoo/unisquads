@@ -1,3 +1,5 @@
+import { extractBuildingRangeIntent } from "./address-subbuilding-rules.mjs";
+
 export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
   parser: "iros-parser-v4",
@@ -19,6 +21,11 @@ export const IROS_RETRYABLE_STATUSES = Object.freeze([
 ]);
 
 const RETRYABLE = new Set(IROS_RETRYABLE_STATUSES);
+const COMMERCIAL_RANGE_RETRY_STATUSES = new Set([
+  "REG_MULTI",
+  "MULTIPLE",
+  "REG_UNIT_NOT_FOUND"
+]);
 
 export function irosVersionManifest() {
   return { ...IROS_RUN_VERSIONS };
@@ -54,6 +61,17 @@ export function isRetryableIrosStatus(status) {
   return RETRYABLE.has(String(status || ""));
 }
 
+// 아파트명 뒤 101-107 같은 동 범위를 적고, 그 뒤 상가 층·호가 명시된 행 중
+// 구버전 프로파일이 복수/세대없음으로 끝난 결과만 재매칭한다.
+// 행 원문을 직접 확인하므로 동일 패턴이 아닌 완료건은 건드리지 않는다.
+export function needsCommercialRangeUnitRematch(reg, rawAddress = "") {
+  const status = String(reg?.status || "");
+  if (!COMMERCIAL_RANGE_RETRY_STATUSES.has(status)) return false;
+  const signature = String(reg?.match_evidence?.unit_intent_signature || "");
+  if (signature && !signature.startsWith("iros-unit-profile-v2:")) return false;
+  return Boolean(extractBuildingRangeIntent(rawAddress));
+}
+
 export function isReusableIrosResult(reg, current = IROS_RUN_VERSIONS) {
   if (!isCurrentIrosResult(reg, current)) return false;
   if (!reg.status || reg.stale === true || reg.recovery_pending === true) return false;
@@ -69,7 +87,20 @@ export function rowRequiresIros(row) {
 
 export function markStaleIrosRows(rows, current = IROS_RUN_VERSIONS) {
   return (rows || []).map((row) => {
-    if (!row?.reg || isCurrentIrosResult(row.reg, current)) return row;
+    if (!row?.reg) return row;
+
+    if (needsCommercialRangeUnitRematch(row.reg, row.raw || "")) {
+      return {
+        ...row,
+        reg: {
+          ...row.reg,
+          stale: true,
+          stale_reason: "COMMERCIAL_RANGE_UNIT_REMATCH"
+        }
+      };
+    }
+
+    if (isCurrentIrosResult(row.reg, current)) return row;
     return {
       ...row,
       reg: {
@@ -97,7 +128,7 @@ export function irosProgressStats(rows, current = IROS_RUN_VERSIONS) {
     if (!rowRequiresIros(row)) continue;
     total += 1;
     const reg = row?.reg;
-    if (!isCurrentIrosResult(reg, current)) stale += 1;
+    if (reg?.stale === true || !isCurrentIrosResult(reg, current)) stale += 1;
     else if (reg?.recovery_pending) pendingRecovery += 1;
     else if (isRetryableIrosStatus(reg?.status)) retryable += 1;
     else if (isReusableIrosResult(reg, current)) done += 1;
@@ -141,7 +172,7 @@ export function irosOutcomeStats(rows, current = IROS_RUN_VERSIONS) {
     out.target += 1;
     const reg = row?.reg;
     if (!reg) continue;
-    if (!isCurrentIrosResult(reg, current)) {
+    if (reg.stale === true || !isCurrentIrosResult(reg, current)) {
       out.stale += 1;
       continue;
     }
