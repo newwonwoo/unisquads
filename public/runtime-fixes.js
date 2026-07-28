@@ -22,6 +22,7 @@ window.btnS = btnS;
   const EXPLICIT_ANCILLARY_INTENT = /(경로당|노인정|관리사무소|관리실|어린이집|유치원|상가|공인중개|중개사무소|주차장|커뮤니티|휘트니스|피트니스)/i;
   const ANCILLARY_TITLE = /(경로당|노인정|관리사무소|관리실|입주자대표|어린이집|유치원|상가|공인중개|중개사무소|부동산|주차장|커뮤니티|게스트하우스|독서실|휘트니스|피트니스)/i;
   const ANCILLARY_CATEGORY = /(경로당|노인정|복지시설|관리사무소|어린이집|유치원|상가|공인중개|중개사무소|주차장|커뮤니티센터|체육시설)/i;
+  const ANCILLARY_SUFFIX = /(?:경로당|노인정|관리사무소|관리실|입주자대표(?:회의)?|어린이집|유치원|제?상가동|상가|공인중개사무소|공인중개|중개사무소|부동산|주차장|커뮤니티센터|커뮤니티|게스트하우스|독서실|휘트니스|피트니스)$/i;
 
   function plainText(value) {
     return String(value || "")
@@ -35,10 +36,54 @@ window.btnS = btnS;
       .trim();
   }
 
+  function compactKey(value) {
+    return plainText(value)
+      .toLowerCase()
+      .replace(/[^0-9a-z가-힣]/g, "");
+  }
+
   function isAncillaryItem(item) {
     const title = plainText(item?.title);
     const category = plainText(item?.category);
     return ANCILLARY_TITLE.test(title) || ANCILLARY_CATEGORY.test(category);
+  }
+
+  function ancillaryParentTitle(item) {
+    let title = plainText(item?.title);
+    const original = title;
+    for (let i = 0; i < 2; i++) {
+      const stripped = title
+        .replace(ANCILLARY_SUFFIX, "")
+        .replace(/[\s\-·,/]+$/g, "")
+        .trim();
+      if (stripped === title) break;
+      title = stripped;
+    }
+    return title && title !== original ? title : "";
+  }
+
+  function recoverAncillaryParentItems(items, query) {
+    const queryKey = compactKey(query);
+    const seen = new Set();
+    const recovered = [];
+    for (const item of items) {
+      if (!isAncillaryItem(item)) continue;
+      const parentTitle = ancillaryParentTitle(item);
+      const parentKey = compactKey(parentTitle);
+      const address = plainText(item?.address || item?.roadAddress);
+      if (parentKey.length < 4 || !address) continue;
+      if (!queryKey.includes(parentKey)) continue;
+      const identity = `${parentKey}|${compactKey(item?.address)}|${compactKey(item?.roadAddress)}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      recovered.push({
+        ...item,
+        title: parentTitle,
+        category: "",
+        __ancillaryParentRecovered: true
+      });
+    }
+    return recovered;
   }
 
   function filterNaverItems(items, query) {
@@ -46,10 +91,19 @@ window.btnS = btnS;
     const normalizedQuery = plainText(query);
     if (!APARTMENT_INTENT.test(normalizedQuery)) return source;
     if (EXPLICIT_ANCILLARY_INTENT.test(normalizedQuery)) return source;
-    return source.filter((item) => !isAncillaryItem(item));
+    const primary = source.filter((item) => !isAncillaryItem(item));
+    if (primary.length) return primary;
+    return recoverAncillaryParentItems(source, normalizedQuery);
   }
 
-  const api = Object.freeze({ plainText, isAncillaryItem, filterNaverItems });
+  const api = Object.freeze({
+    plainText,
+    compactKey,
+    isAncillaryItem,
+    ancillaryParentTitle,
+    recoverAncillaryParentItems,
+    filterNaverItems
+  });
   window.__ADDR_RUNTIME_FIXES__ = api;
 
   if (typeof window.fetch !== "function" || window.__ADDR_NAVER_FETCH_FILTER__) return;
@@ -77,7 +131,10 @@ window.btnS = btnS;
     if (!data || !Array.isArray(data.items)) return response;
 
     const filteredItems = filterNaverItems(data.items, query);
-    if (filteredItems.length === data.items.length) return response;
+    if (
+      filteredItems.length === data.items.length &&
+      filteredItems.every((item, index) => item === data.items[index])
+    ) return response;
 
     const headers = new Headers(response.headers);
     headers.set("content-type", "application/json; charset=utf-8");
