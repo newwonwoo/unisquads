@@ -49,6 +49,17 @@ test("land probing excludes unit-looking secondary numbers", () => {
   assert.deepEqual(isUnitLikeLot("101-105"), { dong: "101", ho: "105" });
 });
 
+test("building-part leaves and trailing unit pairs are not parcel evidence", () => {
+  assert.deepEqual(
+    extractExplicitLotRefs("서울 광진구 자양동 767-1 101-101"),
+    [{ legal: "자양동", lot: "767-1" }]
+  );
+  assert.deepEqual(
+    extractExplicitLotRefs("인천 남동구 만수동 창대장터상가 1-110"),
+    []
+  );
+});
+
 test("aggregate buildings collapse by building management number", () => {
   const selected = selectAggregateBuildingCandidates([
     { bdMgtSn: "A", admCd: "1", mnnm: "12", slno: "1", isJip: true, detBdNmList: "101동,202동", bdNm: "삼본아파트" },

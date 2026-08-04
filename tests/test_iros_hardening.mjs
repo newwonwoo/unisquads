@@ -9,8 +9,10 @@ import {
   irosOutcomeStats,
   irosProgressStats,
   isIrosExportFinal,
+  isProtectedIrosSuccess,
   isReusableIrosResult,
   markStaleIrosRows,
+  needsUnitBearingBuildingRematch,
   withIrosVersions
 } from "../public/iros-run-contract.mjs";
 import {
@@ -31,22 +33,97 @@ const confirmedRow = (reg) => ({
   reg
 });
 
-test("old matcher/parser results are stale and not final", () => {
+test("old successful unique numbers stay locked across matcher/parser versions", () => {
   const rows = markStaleIrosRows([
     confirmedRow({
       status: "RESOLVED",
+      unique_no: "1234-5678-901234",
       collector_version: "iros-collector-v4",
       parser_version: "iros-parser-v3",
-      matcher_version: "iros-matcher-v4"
+      matcher_version: "iros-matcher-v4",
+      stale: true,
+      stale_reason: "IROS_VERSION_MISMATCH"
     })
   ]);
-  assert.equal(rows[0].reg.stale, true);
-  assert.equal(isReusableIrosResult(rows[0].reg), false);
+  assert.equal(rows[0].reg.stale, undefined);
+  assert.equal(isProtectedIrosSuccess(rows[0].reg), true);
+  assert.equal(isReusableIrosResult(rows[0].reg), true);
   const progress = irosProgressStats(rows);
   assert.equal(progress.total, 1);
-  assert.equal(progress.done, 0);
-  assert.equal(progress.stale, 1);
-  assert.equal(isIrosExportFinal(rows), false);
+  assert.equal(progress.done, 1);
+  assert.equal(progress.stale, 0);
+  assert.equal(isIrosExportFinal(rows), true);
+});
+
+test("only the explicit unit-bearing building failure is selected for targeted rematch", () => {
+  const target = confirmedRow({
+    status: "REG_VALIDATION_FAILED",
+    failure_stage: "PROPERTY_CLASS",
+    candidates: [
+      { unique_no: "LAND", real_cls_cd: "토지", ho: "101",
+        unit_source: { ho: "buld_no_inner" } },
+      { unique_no: "UNIT", real_cls_cd: "건물", dong: "101", ho: "101",
+        unit_source: { ho: "buld_no_inner" } }
+    ],
+    collector_version: "iros-collector-v4",
+    parser_version: "iros-parser-v4",
+    matcher_version: "iros-matcher-v8",
+    recovery_version: "iros-recovery-v5"
+  });
+  assert.equal(needsUnitBearingBuildingRematch(target), true);
+  const [marked] = markStaleIrosRows([target]);
+  assert.equal(marked.reg.stale, true);
+  assert.equal(marked.reg.stale_reason, "UNIT_BEARING_BUILDING_REMATCH");
+
+  const unitFailure = confirmedRow({
+    ...target.reg,
+    status: "REG_UNIT_NOT_FOUND",
+    failure_stage: "UNIT"
+  });
+  assert.equal(needsUnitBearingBuildingRematch(unitFailure), true);
+
+  const unrelated = confirmedRow({
+    ...target.reg,
+    candidates: [{ unique_no: "LAND", real_cls_cd: "토지", ho: "101",
+      unit_source: { ho: "buld_no_inner" } }]
+  });
+  assert.equal(needsUnitBearingBuildingRematch(unrelated), false);
+  const [kept] = markStaleIrosRows([unrelated]);
+  assert.equal(kept.reg.stale, undefined);
+  assert.equal(isReusableIrosResult(kept.reg), true);
+});
+
+test("raw unit failures use a new matcher cache key without unlocking successes", () => {
+  const rawFailure = confirmedRow({
+    status: "REG_UNIT_NOT_FOUND",
+    failure_stage: "UNIT",
+    complete: true,
+    candidates: [
+      { unique_no: "RAW", real_cls_cd: "집합건물", dong: "501", ho: "101" }
+    ],
+    collector_version: "iros-collector-v4",
+    parser_version: "iros-parser-v4",
+    matcher_version: "iros-matcher-v9",
+    recovery_version: "iros-recovery-v5"
+  });
+  rawFailure.raw = "경북 경주시 한동그린타운 501-101호";
+  rawFailure.result.unit = { dong: "", ho: "101" };
+  const [marked] = markStaleIrosRows([rawFailure]);
+  assert.equal(marked.reg.stale_reason, "RAW_UNIT_REMATCH");
+  assert.equal(marked.reg.stale_module, "R-IROS-RAW-UNIT@1");
+
+  const [success] = markStaleIrosRows([
+    confirmedRow({
+      status: "RESOLVED",
+      unique_no: "LOCKED",
+      matcher_version: "iros-matcher-v9",
+      stale: true,
+      stale_module: "R-IROS-RAW-UNIT@1"
+    })
+  ]);
+  assert.equal(success.reg.unique_no, "LOCKED");
+  assert.equal(success.reg.stale, undefined);
+  assert.equal(success.reg.stale_module, undefined);
 });
 
 test("current terminal results are reusable while partial results retry", () => {

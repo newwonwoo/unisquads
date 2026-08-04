@@ -1,6 +1,7 @@
 const RANGE_RE = /\d+\s*[~∼〜～]\s*\d+/g;
 const OMITTED_EXTRA_RE = /외\s*\d+\s*필지/;
 const GENERIC_BUILDING = /^(?:주공|현대|삼성|대우|롯데|한신|경남|우성|쌍용|금호|신동아|시영)?(?:아파트|맨션|빌라|연립|타운|오피스텔)$/;
+const NON_LEGAL_BUILDING_LEAF = /(상가|아파트|맨션|빌라|빌리지|타운|오피스텔|프라자|플라자|빌딩|센터)$/i;
 
 function uniqueBy(items, keyOf) {
   const seen = new Set();
@@ -47,7 +48,9 @@ export function extractExplicitLotRefs(value) {
   let match;
   while ((match = pattern.exec(source))) {
     const legal = match[1];
-    if (["상가동", "제상가동"].includes(legal)) continue;
+    // `창대장터상가 1-110`의 상가를 법정동 `...가`로 오인하지 않는다.
+    // 건물명 뒤 숫자는 세대 표기일 수 있으므로 법정동+지번 증거로 쓰면 안 된다.
+    if (["상가동", "제상가동"].includes(legal) || NON_LEGAL_BUILDING_LEAF.test(legal)) continue;
     const sequence = match[2];
     const commaSeparated = /[,，]/.test(sequence);
     const tokens = sequence.match(new RegExp(number, "g")) || [];
@@ -60,6 +63,10 @@ export function extractExplicitLotRefs(value) {
       if (i > 0 && commaSeparated && !lot.includes("-") && first.includes("-") && lot.length <= 3) {
         lot = `${mountain ? "산" : ""}${firstMain}-${lot}`;
       }
+      // 쉼표 없이 정확 지번 뒤에 붙은 101-1002류는 두 번째 필지가 아니라
+      // 동·호 표기일 가능성이 높다. 부번 3자리 이상인 후행 N-M만 제외하고,
+      // `869-1 869-4` 같은 실제 복수지번은 그대로 보존한다.
+      if (i > 0 && !commaSeparated && isUnitLikeLot(lot)) continue;
       refs.push({ legal, lot });
     }
   }

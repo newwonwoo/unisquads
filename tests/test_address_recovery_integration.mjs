@@ -33,7 +33,10 @@ test("minimal address recovery integration is wired without IROS collection chan
     "naverJibunAddr",
     "네이버도로명주소",
     "mode2 === \"fail\" && !hasIrosResults",
-    "makeSheet(detailRecords, \"all\")"
+    "makeSheet(detailRecords, \"all\")",
+    "naverPnuRecoveryQueries",
+    "R-IROS-RAW-UNIT",
+    "selectUniqueRawUnitCandidate"
   ]) assert.ok(source.includes(marker), marker);
   assert.equal(source.includes("A열에 주소를 넣어 업로드하세요"), false);
   assert.equal(source.includes('const k = r.failCode || "\uBBF8\uC2E4\uD589"'), false);

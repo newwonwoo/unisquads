@@ -87,4 +87,53 @@ test("deployed browser module links without executing the UI", async () => {
     app.preprocess("서울 서초구 서초동 967 대원아파트 101-1-101"),
     app.preprocess("서울 서초구 서초동 967 대원아파트 101-1-101")
   );
+  assert.deepEqual(
+    app.preprocess("부산 부산진구 범일로 154번길 33, 101동 404호").road,
+    "범일로154번길"
+  );
+  assert.equal(
+    app.preprocess("부산 부산진구 범일로 154번길 33, 101동 404호").buldNo,
+    "33"
+  );
+  const market = app.preprocess("인천 남동구 만수동 창대장터상가 1-110");
+  assert.equal(market.emd, "만수동");
+  assert.deepEqual(market.unit, { dong: "1", ho: "110" });
+  const exactLotUnit = app.preprocess("서울 광진구 자양동 767-1 101-101");
+  assert.equal(exactLotUnit.jibun, "767-1");
+  assert.deepEqual(exactLotUnit.unitCandidate, { dong: "101", ho: "101" });
+  assert.deepEqual(
+    app.preprocess("전북 임실군 임실읍 정월리 이도리241-1 신우apt 101-101(대지권없음)").unit,
+    { dong: "101", ho: "101" }
+  );
+  assert.deepEqual(
+    app.preprocess("충북 진천군 진천읍 469외2필지 우미대A102-101").unit,
+    { dong: "102", ho: "101" }
+  );
+  const incomplete = app.preprocess("경남 고성군 하이면 101-105");
+  assert.equal(incomplete.jibun, "101-105");
+  assert.deepEqual(incomplete.unit, { dong: null, ho: null });
+
+  const calls = [];
+  const recovered = await app.recoverJusoCandidateForNaver(
+    "전라남도 순천시 용당동 431 용당피오레아파트",
+    {
+      juso: async (query) => {
+        calls.push(query);
+        return query === "전라남도 순천시 용당동 431" ? [{
+          admCd: "4615012700",
+          mtYn: "0",
+          lnbrMnnm: "431",
+          lnbrSlno: "0",
+          jibunAddr: "전라남도 순천시 용당동 431",
+          roadAddr: "전라남도 순천시 삼산로 92-50",
+          bdMgtSn: "4615012700104310000000001",
+          bdNm: "용당피오레아파트",
+          bdKdcd: "1"
+        }] : [];
+      }
+    }
+  );
+  assert.ok(calls.includes("전라남도 순천시 용당동 431"));
+  assert.equal(recovered.candidate?.admCd, "4615012700");
+  assert.equal(recovered.recoveryVersion, "1");
 });

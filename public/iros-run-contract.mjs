@@ -1,10 +1,20 @@
-import { extractBuildingRangeIntent } from "./address-subbuilding-rules.mjs";
-import { UNIT_PROFILE_VERSION } from "./iros-unit-profile.mjs";
+import {
+  needsCommercialRangeUnitRematch,
+  needsUnitBearingBuildingRematch,
+  needsUnitProfileVersionRematch,
+  selectIrosRecoveryAction
+} from "./failure-recovery-plan.mjs";
+
+export {
+  needsCommercialRangeUnitRematch,
+  needsUnitBearingBuildingRematch,
+  needsUnitProfileVersionRematch
+} from "./failure-recovery-plan.mjs";
 
 export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
   parser: "iros-parser-v4",
-  matcher: "iros-matcher-v8",
+  matcher: "iros-matcher-v10",
   recovery: "iros-recovery-v5"
 });
 
@@ -22,16 +32,6 @@ export const IROS_RETRYABLE_STATUSES = Object.freeze([
 ]);
 
 const RETRYABLE = new Set(IROS_RETRYABLE_STATUSES);
-const COMMERCIAL_RANGE_RETRY_STATUSES = new Set([
-  "REG_MULTI",
-  "MULTIPLE",
-  "REG_UNIT_NOT_FOUND"
-]);
-const UNIT_PROFILE_RETRY_STATUSES = new Set([
-  "REG_MULTI",
-  "MULTIPLE",
-  "REG_UNIT_NOT_FOUND"
-]);
 
 export function irosVersionManifest() {
   return { ...IROS_RUN_VERSIONS };
@@ -67,42 +67,14 @@ export function isRetryableIrosStatus(status) {
   return RETRYABLE.has(String(status || ""));
 }
 
-function unitProfileVersionFromSignature(value) {
-  const signature = String(value || "");
-  const match = /^(iros-unit-profile-v\d+)(?::|$)/.exec(signature);
-  return match?.[1] || "";
-}
-
-// 프로파일 버전은 matcher manifest와 별도로 발전할 수 있다. 전체 matcher 버전을
-// 올리면 정상 성공건까지 재조회되므로, 구버전 프로파일로 끝난 세대미일치·복수결과만
-// 현재 프로파일로 재매칭한다. 성공 결과와 건물명/부동산구분 검증실패는 건드리지 않는다.
-export function needsUnitProfileVersionRematch(
-  reg,
-  currentProfileVersion = UNIT_PROFILE_VERSION
-) {
-  const status = String(reg?.status || "");
-  if (!UNIT_PROFILE_RETRY_STATUSES.has(status)) return false;
-  const recordedVersion = unitProfileVersionFromSignature(
-    reg?.match_evidence?.unit_intent_signature
-  );
-  const currentVersion = String(currentProfileVersion || "");
-  return Boolean(recordedVersion && currentVersion && recordedVersion !== currentVersion);
-}
-
-// 아파트명 뒤 101-107 같은 동 범위를 적고, 그 뒤 상가 층·호가 명시된 행 중
-// 구버전 프로파일이 복수/세대없음으로 끝난 결과만 재매칭한다.
-// 행 원문을 직접 확인하므로 동일 패턴이 아닌 완료건은 건드리지 않는다.
-export function needsCommercialRangeUnitRematch(reg, rawAddress = "") {
-  const status = String(reg?.status || "");
-  if (!COMMERCIAL_RANGE_RETRY_STATUSES.has(status)) return false;
-  const signature = String(reg?.match_evidence?.unit_intent_signature || "");
-  if (signature && !signature.startsWith("iros-unit-profile-v2:")) return false;
-  return Boolean(extractBuildingRangeIntent(rawAddress));
+export function isProtectedIrosSuccess(reg) {
+  return String(reg?.status || "") === "RESOLVED" &&
+    Boolean(String(reg?.unique_no || "").trim());
 }
 
 export function isReusableIrosResult(reg, current = IROS_RUN_VERSIONS) {
-  if (!isCurrentIrosResult(reg, current)) return false;
   if (!reg.status || reg.stale === true || reg.recovery_pending === true) return false;
+  if (isProtectedIrosSuccess(reg)) return true;
   return !isRetryableIrosStatus(reg.status);
 }
 
@@ -117,35 +89,42 @@ export function markStaleIrosRows(rows, current = IROS_RUN_VERSIONS) {
   return (rows || []).map((row) => {
     if (!row?.reg) return row;
 
-    if (needsCommercialRangeUnitRematch(row.reg, row.raw || "")) {
-      return {
-        ...row,
-        reg: {
-          ...row.reg,
-          stale: true,
-          stale_reason: "COMMERCIAL_RANGE_UNIT_REMATCH"
-        }
-      };
+    // 이미 확보한 고유번호는 버전 변경만으로 무효화하지 않는다. 이전 실행에서
+    // 붙은 일괄 stale 표식도 제거해 성공값이 새 실패로 덮이는 것을 막는다.
+    if (isProtectedIrosSuccess(row.reg)) {
+      const {
+        stale, stale_reason, stale_versions, stale_profile_versions, stale_module,
+        ...protectedReg
+      } = row.reg;
+      return { ...row, reg: protectedReg };
     }
 
-    if (needsUnitProfileVersionRematch(row.reg)) {
+    const recovery = selectIrosRecoveryAction(row);
+    // 부분응답·세션오류 등은 기존 retryable 상태 자체가 실행 큐이므로 stale로
+    // 바꾸지 않는다. 실패 모듈 집계에는 포함하되 진행률 의미는 보존한다.
+    if (recovery?.staleReason === "IROS_INCOMPLETE_RETRY") return row;
+    if (recovery) {
       return {
         ...row,
         reg: {
           ...row.reg,
           stale: true,
-          stale_reason: "UNIT_PROFILE_VERSION_REMATCH",
-          stale_profile_versions: {
-            from: unitProfileVersionFromSignature(
-              row.reg?.match_evidence?.unit_intent_signature
-            ),
-            to: UNIT_PROFILE_VERSION
-          }
+          stale_reason: recovery.staleReason,
+          stale_module: `${recovery.moduleId}@${recovery.moduleVersion}`,
+          ...(recovery.fromProfileVersion ? {
+            stale_profile_versions: {
+              from: recovery.fromProfileVersion,
+              to: recovery.toProfileVersion
+            }
+          } : {})
         }
       };
     }
 
     if (isCurrentIrosResult(row.reg, current)) return row;
+    // 버전 번호만 달라졌다는 이유로 완료 판정을 다시 조회하지 않는다. 앞으로의
+    // 개선도 위 선택 규칙처럼 영향 패턴을 명시한 경우에만 stale로 승격한다.
+    if (row.reg.status && !isRetryableIrosStatus(row.reg.status)) return row;
     return {
       ...row,
       reg: {
@@ -173,7 +152,7 @@ export function irosProgressStats(rows, current = IROS_RUN_VERSIONS) {
     if (!rowRequiresIros(row)) continue;
     total += 1;
     const reg = row?.reg;
-    if (reg?.stale === true || !isCurrentIrosResult(reg, current)) stale += 1;
+    if (reg?.stale === true) stale += 1;
     else if (reg?.recovery_pending) pendingRecovery += 1;
     else if (isRetryableIrosStatus(reg?.status)) retryable += 1;
     else if (isReusableIrosResult(reg, current)) done += 1;
@@ -217,7 +196,7 @@ export function irosOutcomeStats(rows, current = IROS_RUN_VERSIONS) {
     out.target += 1;
     const reg = row?.reg;
     if (!reg) continue;
-    if (reg.stale === true || !isCurrentIrosResult(reg, current)) {
+    if (reg.stale === true) {
       out.stale += 1;
       continue;
     }

@@ -14,25 +14,15 @@ const RE_COMPACT_ALPHA_UNIT = /(?:^|\s)제?(에이치|에이|비이|에프|비|�
 const RE_DONG_FLOOR_HO = /(?:^|\s)제?(\d{1,4})\s*동\s*제?(\d{1,2})\s*층\s*제?(\d{1,4})\s*호(?=\s|$)/;
 const RE_FLOOR_HO = /(?:^|\s)제?(\d{1,2})\s*층\s*제?(\d{1,4})\s*호(?=\s|$)/;
 
-function composeFloorHo(floorValue, hoValue) {
-  const floor = String(Number(floorValue));
-  const ho = String(Number(hoValue));
-  if (!floor || floor === "0" || !ho || ho === "0") return String(hoValue);
-  // 이미 301·1103처럼 완성된 호수면 다시 층을 붙이지 않는다.
-  if (String(hoValue).length >= 3) return String(hoValue);
-  return `${floor}${ho.padStart(2, "0")}`;
-}
-
 function parseFloorHo(source) {
   const withDong = source.match(RE_DONG_FLOOR_HO);
   if (withDong) {
     return {
       dong: withDong[1],
       floor: String(Number(withDong[2])),
-      ho: composeFloorHo(withDong[2], withDong[3]),
+      ho: String(Number(withDong[3])),
       matched: withDong[0],
-      index: withDong.index ?? 0,
-      evidence: "dong_floor_ho_composed"
+      index: withDong.index ?? 0
     };
   }
   const withoutDong = source.match(RE_FLOOR_HO);
@@ -40,10 +30,9 @@ function parseFloorHo(source) {
   return {
     dong: null,
     floor: String(Number(withoutDong[1])),
-    ho: composeFloorHo(withoutDong[1], withoutDong[2]),
+    ho: String(Number(withoutDong[2])),
     matched: withoutDong[0],
-    index: withoutDong.index ?? 0,
-    evidence: "floor_ho_composed"
+    index: withoutDong.index ?? 0
   };
 }
 
@@ -60,8 +49,7 @@ export function parseCompactAlphaUnit(value) {
     floor: String(Number(match[2])),
     ho: match[3],
     matched: match[0],
-    index: match.index ?? 0,
-    evidence: "compact_alpha_unit"
+    index: match.index ?? 0
   };
 }
 

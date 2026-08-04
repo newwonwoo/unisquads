@@ -2,11 +2,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  NAVER_PNU_RECOVERY_VERSION,
   canAcceptNaverRegionCorrection,
+  exactAddressCore,
   isBuildingPartToken,
+  naverPnuRecoveryQueries,
   sameBuildingIdentity,
   shouldEscalateJusoMultiToNaver
 } from "../public/address-recovery-rules.mjs";
+
+test("Naver PNU recovery adds exact address cores without inventing a lot", () => {
+  assert.equal(NAVER_PNU_RECOVERY_VERSION, "1");
+  assert.equal(
+    exactAddressCore("전라남도 순천시 용당동 431 용당피오레아파트"),
+    "전라남도 순천시 용당동 431"
+  );
+  assert.equal(
+    exactAddressCore("전라남도 순천시 삼산로 92-50 용당피오레아파트"),
+    "전라남도 순천시 삼산로 92-50"
+  );
+  assert.deepEqual(
+    naverPnuRecoveryQueries(
+      "전라남도 순천시 용당동 431 용당피오레아파트",
+      "전라남도 순천시 삼산로 92-50 용당피오레아파트"
+    ),
+    [
+      "전라남도 순천시 용당동 431 용당피오레아파트",
+      "전라남도 순천시 용당동 431",
+      "전라남도 순천시 삼산로 92-50 용당피오레아파트",
+      "전라남도 순천시 삼산로 92-50"
+    ]
+  );
+  assert.equal(exactAddressCore("울산 남구 삼산동 1482~1513"), "");
+});
 
 test("building parts are not treated as administrative districts", () => {
   for (const token of ["상가", "상가동", "제상가동"]) {

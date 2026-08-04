@@ -215,3 +215,58 @@ test("owner and postal-code propagation closes when two direct PNU values exist"
   assert.equal(app.propagateAddressGroup(rows, ctx.groupHints, ctx.evidenceFor), 0);
   assert.equal(rows[1].result.status, "FAILED");
 });
+
+test("multiple PNU candidates use an existing dataset PNU only through candidate intersection", () => {
+  const source = {
+    rowId: "row-u-1",
+    raw: "충북 진천군 진천읍 469외 2 우미아파트 106-504",
+    zip: "365800",
+    owner: "우미종합개발㈜"
+  };
+  const target = {
+    rowId: "row-u-2",
+    raw: "충북 진천군 진천읍 469외2필지 우미대A102-101",
+    zip: "365800",
+    owner: "우미종합개발㈜"
+  };
+  source.result = attachPipelineMetadata(source, {
+    status: "CONFIRMED",
+    pnu: "4375025022104690001",
+    jibunAddr: "충청북도 진천군 진천읍 신정리 469-1 우미아파트",
+    roadAddr: "",
+    bdMgtSn: "4375025022104690001000001",
+    bdNm: "우미아파트",
+    unit: { dong: "106", ho: "504" },
+    source: "juso",
+    validation: { status: "MATCH" }
+  });
+  target.result = attachPipelineMetadata(target, {
+    status: "AMBIGUOUS",
+    candidates: [
+      {
+        pnu: "4375025022104690001",
+        jibunAddr: "충청북도 진천군 진천읍 신정리 469-1 우미아파트",
+        bdMgtSn: "4375025022104690001000001",
+        bdNm: "우미아파트",
+        isJip: true
+      },
+      {
+        pnu: "4375025022104700000",
+        jibunAddr: "충청북도 진천군 진천읍 신정리 470 다른건물",
+        bdMgtSn: "4375025022104700000000001",
+        bdNm: "다른건물",
+        isJip: true
+      }
+    ],
+    unit: { dong: "102", ho: "101" },
+    source: "juso"
+  });
+  const rows = [source, target];
+  const ctx = evidenceContext(rows);
+  assert.equal(app.resolveDatasetMultiPnuGroups(rows, ctx.evidenceFor), 1);
+  assert.equal(rows[1].result.status, "CONFIRMED");
+  assert.equal(rows[1].result.pnu, "4375025022104690001");
+  assert.equal(rows[1].result.source, "데이터셋PNU교차검증");
+  assert.ok(rows[1].result.addressMatchEvidence.includes("DATASET_LOCATION_PNU_INTERSECTION"));
+  assert.ok(rows[1].result.appliedModules.includes("DATASET_MULTI_PNU"));
+});

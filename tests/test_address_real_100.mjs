@@ -106,3 +106,13 @@ test("numeric bare room and three-part unit notation are parsed conservatively",
     { dong: null, ho: null }
   );
 });
+
+test("numbered legal-dong tokens remain intact in the JUSO search core", () => {
+  const jeju = preprocess("제주 제주시 이도2동 438 혜성무지개타운 109동 108호");
+  assert.equal(jeju.searchText, "제주 제주시 이도2동 438");
+  assert.equal(jeju.jibun, "438");
+
+  const jeonju = preprocess("전북 전주시 완산구 효자동2가 250 101동101호");
+  assert.equal(jeonju.searchText, "전북 전주시 완산구 효자동2가 250");
+  assert.equal(jeonju.jibun, "250");
+});
