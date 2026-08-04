@@ -7,8 +7,12 @@ import {
   candidateHasNoDong,
   candidateMatchesAddressLot,
   candidateMatchesUnit,
-  filterExpectedPropertyClass,
+  filterUnitPropertyCandidates,
   matchedCandidateUnitVariant,
+  rawUnitRecoveryVariants,
+  selectUniqueRawUnitCandidate,
+  summarizeCandidatePropertyClasses,
+  targetPropertyClass,
   unitKey
 } from "./unit-match.mjs";
 import {
@@ -56,6 +60,11 @@ import {
   deriveBatchWorkflowState
 } from "./batch-workflow-state.mjs";
 import {
+  buildFailureRecoveryPlan,
+  classifyFailureModule
+} from "./failure-recovery-plan.mjs";
+import { needsConfirmedUnitRecovery } from "./confirmed-unit-recovery.mjs";
+import {
   TEST_LOG_ACTIVE_KEY,
   TEST_LOG_STORAGE_KEY,
   browserTestLogsToCsv,
@@ -64,8 +73,10 @@ import {
   upsertBrowserTestRun
 } from "./browser-test-log.mjs";
 import {
+  NAVER_PNU_RECOVERY_VERSION,
   canAcceptNaverRegionCorrection,
   isBuildingPartToken,
+  naverPnuRecoveryQueries,
   shouldEscalateJusoMultiToNaver
 } from "./address-recovery-rules.mjs";
 import {
@@ -99,9 +110,21 @@ import {
   ownerSearchKeyword,
   selectAggregateBuildingCandidates
 } from "./address-multilot-rules.mjs";
+import {
+  DATASET_PNU_EVIDENCE_VERSION,
+  candidateForDatasetPnu,
+  directDatasetPnuSource,
+  selectDatasetGroupPnu
+} from "./dataset-pnu-evidence.mjs";
+import {
+  AMBIGUOUS_PNU_RECOVERY_VERSION,
+  buildAmbiguousPnuProbePlan,
+  selectUniqueIrosPnuAttempt
+} from "./ambiguous-pnu-recovery.mjs";
+import { buildAddressRequeryEvidence } from "./address-requery-evidence.mjs";
 
 if (typeof window !== 'undefined' && !window.storage) { window.storage = { get: async (k) => { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; }, set: async (k, v) => { localStorage.setItem(k, v); return { key: k, value: v }; }, delete: async (k) => { localStorage.removeItem(k); return { key: k, deleted: true }; }, list: async (p='') => { const keys=[]; for(let i=0;i<localStorage.length;i++){const kk=localStorage.key(i); if(kk&&kk.startsWith(p))keys.push(kk);} return { keys }; }, }; }
-const { useState, useEffect, useCallback, useRef } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 function toHalfWidth(str) {
   return str.replace(/[\uFF01-\uFF5E]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 65248)).replace(/\u3000/g, " ");
 }
@@ -248,7 +271,7 @@ function splitAdminPrefix(str) {
 }
 // ─────────────────────────────────────────────────────────────
 // 시군구 교차검증 (2026-07-13 신설)
-// 카카오 폴백(L3)은 '건물명'으로 검색하므로 동명(同名) 건물이 있는 다른
+// 네이버 보조검색(L3)은 '건물명'으로 검색하므로 동명(同名) 건물이 있는 다른
 // 지역을 물어올 수 있다(영등포푸르지오 vs 당산푸르지오). 결과를 그대로
 // CONFIRMED 처리하면 '틀린 등기고유번호'가 확정된다 — 미확정보다 훨씬 나쁘다.
 // 규칙: 입력과 결과 양쪽에서 지역을 '명확히' 뽑았고 서로 어긋날 때만 강등한다.
@@ -427,7 +450,12 @@ function validateRegion(inputText, resultJibun, sidoOnly = false, relJibunText =
   return mk("NOT_AVAILABLE", a.sido || a.sgg.length || a.bjd ? "\uACB0\uACFC\uC5D0\uC11C \uC9C0\uC5ED \uCD94\uCD9C \uBD88\uAC00" : "\uC785\uB825\uC5D0\uC11C \uC9C0\uC5ED \uCD94\uCD9C \uBD88\uAC00");
 }
 const JIP_KEYWORDS = /(아파트|apt|빌라|빌리지|[가-힣]{2,}빌|연립|다세대|오피스텔|맨션|타운|팰리스|캐슬|자이|힐스|푸르지오|아이파크|e편한|이편한|더샵|롯데캐슬|래미안|센트|리버|파크|하이츠|스카이|타워|주상복합|헤리티지|포레|아이유쉘|쉐르빌|베르디움|엘크루|리슈빌|스위첸|데시앙|꿈에그린|우방|한신|현대|삼성|엘지|지에스)/i;
-const JIBUN_CONTEXT = /(동|읍|면|리|로|길|가)\s*$/;
+function endsWithAddressContext(value) {
+  const token = String(value || "").trim().split(/\s+/).pop() || "";
+  if (/^[가-힣0-9]+(?:로|길)$/.test(token)) return true;
+  if (!/^[가-힣]{1,4}\d*(?:동|읍|면|리|가)$/.test(token)) return false;
+  return !/(?:상가|아파트|맨션|빌라|타운|오피스텔)$/.test(token);
+}
 const RE_DONG_HO = /제?\s*(\d{1,4})\s*동\s*-?\s*제?\s*(\d{1,4}(?:-\d{1,4})?)\s*호/;
 const RE_DONG_BARE_HO = /(?:^|\s)제?\s*(\d{1,4})\s*동\s*(\d{2,5}(?:-\d{1,4})?)(?=\s|$)/;
 const RE_DONG_ONLY = /(?:^|\s)제?\s*(\d{1,4})\s*동(?=\s|$)(?!\s*\d*\s*호)/;
@@ -490,6 +518,20 @@ function extractUnit(str) {
 }
 function inferUnitFromNumbers(searchText, existing) {
   if (existing.dong || existing.ho) return existing;
+  // 건물명 뒤 동-호와 말미 권리표기를 함께 보존한다.
+  // `신우apt 101-101(대지권없음)`처럼 권리 노이즈가 뒤에 있어도 동·호는 명시값이다.
+  const noisyPair = searchText.match(
+    /^(.*?)\s+(\d{1,4})\s*-\s*(\d{2,5})(?:\s+(?:대지권없음|지분|공유지분|전유부분))*\s*$/i
+  );
+  if (noisyPair && (JIP_KEYWORDS.test(noisyPair[1]) || extractBuildingName(noisyPair[1]))) {
+    return { dong: noisyPair[2], ho: noisyPair[3], text: noisyPair[1].trim() };
+  }
+  // 구자료의 `우미대A102-101`은 건물명·아파트 약자·동호가 붙은 표기다.
+  // 한글 고유명 두 글자 이상 + 대A/A + 명시 동호일 때만 분리한다.
+  const shorthandApt = searchText.match(/^(.*?[가-힣]{2,}(?:대?A))\s*(\d{1,4})-(\d{2,5})\s*$/i);
+  if (shorthandApt) {
+    return { dong: shorthandApt[2], ho: shorthandApt[3], text: shorthandApt[1].trim() };
+  }
   // R11(2026-07-17): 알파벳 동 표기 [A-Z]-[층]-[호].
   //   A-1-* : 101~108   A-2-* : 201~207   A-6-* : 603~608
   //   가운데 숫자가 뒤 숫자의 앞자리와 항상 일치한다(층 중복 표기).
@@ -516,7 +558,7 @@ function inferUnitFromNumbers(searchText, existing) {
   const m = searchText.match(/^(.*?)\s+(\d{1,4})\s*-\s*(\d{1,4})\s*$/);
   if (!m) return existing;
   const head = m[1].trim();
-  if (JIBUN_CONTEXT.test(head)) return existing;
+  if (endsWithAddressContext(head)) return existing;
   if (JIP_KEYWORDS.test(head) || BUILDING_TOKEN.test(head)) {
     return { dong: m[2], ho: m[3], text: head };
   }
@@ -560,7 +602,10 @@ function extractJibunCore(str) {
     .replace(/(\d)\s*외\s*\d*\s*필?지?/g, "$1");
   // 숫자+건물명 완전붙음 분리: 와리251-7금호 → 와리 251-7 금호
   // 단 "장충동2가"의 2가(법정동)는 깨지 않도록, 숫자 뒤가 '가'면 제외
-  s = s.replace(/([가-힣])(\d)/g, "$1 $2").replace(/(\d)([가-힣])/g, (m, d, k) => k === "\uAC00" ? m : `${d} ${k}`);
+  // 이도2동·효자동2가 같은 숫자 법정동은 한 토큰으로 보존한다. 숫자 뒤가
+  // 법정동 접미가 아닌 경우에만 와리251-7금호 같은 붙은 지번 경계를 만든다.
+  s = s.replace(/([가-힣])(\d)(?![동가](?:\s|$))/g, "$1 $2")
+    .replace(/(?<![가-힣])(\d)([가-힣])/g, (m, d, k) => k === "\uAC00" ? m : `${d} ${k}`);
   s = s.replace(/\uC0B0\s+(\d)/g, "\uC0B0$1");   // '산 12-3' → '산12-3' (산 접두 재결합)
   s = s.replace(/\s+/g, " ").trim();
 
@@ -604,7 +649,8 @@ function extractJibunCore(str) {
     }
 
     // 행정구역 토큰(숫자 없는)
-    if (ADMIN_ANY.test(t) && !/\d/.test(t)) {
+    const numberedLegalDong = /^[가-힣]+\d+(?:동|가)$/.test(t);
+    if (ADMIN_ANY.test(t) && (!/\d/.test(t) || numberedLegalDong)) {
       const dr = ADMIN_DONG_RI.test(t);
       if (dr) {
         if (seenDongRi.has(t)) { prevAdmin = true; lastAdminWasDongRi = true; continue; } // R4 같은 리 중복
@@ -721,7 +767,7 @@ function preprocess(raw) {
     const { core, jibun } = extractJibunCore(text);
     // 지번을 실제로 찾았을 때만 코어로 교체(건물명·동호 절단). 지번을 못 찾으면
     // 원본 검색어를 그대로 둔다 — 건물명만 있는 주소("헬리오시티")는 그 건물명이
-    // 있어야 카카오 폴백이 동작하고, 지번 없는 주소를 억지로 자르면 오히려 실패한다.
+    // 있어야 네이버 보조검색이 동작하고, 지번 없는 주소를 억지로 자르면 오히려 실패한다.
     if (jibun && /(동|리|읍|면|가)/.test(core)) {
       text = core;
     } else if (!jibun && core && /[가-힣]+(동|리|읍|면)(\s|$)/.test(core)) {
@@ -735,7 +781,7 @@ function preprocess(raw) {
   // \uba85\uc2dc\uc801 \ub3d9\ud638(dong) \uc5c6\uc744 \ub54c\ub9cc. cascade/resolve\uac00 juso detBdNmList\ub85c \uac80\uc99d\ud574 \ud655\uc815.
   let unitCandidate = null;
   if (!dong && !ho) {
-    const uc = raw.match(/,\s*(\d{1,4})-(\d{3,4})(?!\d)/);
+    const uc = raw.match(/(?:동\d*가|동|리|가)\s*(?:산\s*)?\d{1,4}(?:-\d{1,2})?\s*,?\s*(\d{1,4})-(\d{3,5})(?!\d)/);
     if (uc) unitCandidate = { dong: uc[1], ho: uc[2] };
   }
   // 전처리 구조화(2026-07-17): 조회어를 문자열에서 빼서 만들지 않고
@@ -753,7 +799,7 @@ function preprocess(raw) {
     cleaned: compactAlpha ? text : cleaned,
     searchText: text,
     regionText: structuralRaw,
-    unit: { dong, ho, floor: floor || null }, unitCandidate, raw,
+    unit: { dong, ho, ...(floor ? { floor } : {}) }, unitCandidate, raw,
     sido: _reg.sido || "",
     sidoFull: sidoFull(structuralRaw),
     sgg: (_reg.sgg && _reg.sgg.length) ? _reg.sgg.join(" ") : (_se.sgg || ""),
@@ -813,32 +859,6 @@ function fromNaver(item, naverAddr) {
   };
 }
 
-function fromKakao(doc, regionCode = null) {
-  const jibun = doc.address ?? null;
-  let mtYn = "0", mnnm = null, slno = "0", admCd = regionCode;
-  if (jibun) {
-    mtYn = jibun.mountain_yn === "Y" ? "1" : "0";
-    mnnm = jibun.main_address_no || null;
-    slno = jibun.sub_address_no || "0";
-    admCd = jibun.b_code || regionCode;
-  }
-  return {
-    admCd,
-    mtYn,
-    mnnm,
-    slno,
-    roadAddr: doc.road_address?.address_name ?? null,
-    // 2026-07-15 수정: 예전엔 `jibun?.address_name ?? doc.address_name`이라,
-    // 카카오가 지번 없이 도로명만 준 경우 doc.address_name(장소 표시명=도로명)이
-    // jibunAddr에 들어갔다. 이게 IROS로 넘어가 "경인로 302"처럼 도로명이 지번
-    // 검색어로 쓰여 매칭이 전부 틀어졌다(실사례: 구로구 개봉동 센트레빌).
-    // → 진짜 지번(jibun.address_name)이 있을 때만 jibunAddr을 채운다.
-    jibunAddr: jibun?.address_name ?? null,
-    bdMgtSn: null,
-    bdNm: doc.place_name ?? "",
-    source: "kakao"
-  };
-}
 async function safeCall(fn, ...args) {
   if (typeof fn !== "function") return [];
   try {
@@ -852,21 +872,27 @@ async function safeCall(fn, ...args) {
 
 // 네이버가 확인한 주소에서 PNU를 복구할 때는 네이버 원문을 먼저 조회한다.
 // 행정구역 치환은 폴백일 뿐이며, 복수 PNU가 남으면 첫 건을 고르지 않는다.
-async function recoverJusoCandidateForNaver(naverAddr, clients) {
-  const original = String(naverAddr || "").replace(/\s+/g, " ").trim();
-  if (!original) return { candidate: null, query: "", evidence: [] };
-  const queries = [...new Set([
-    original,
-    modernizeKnownAdminTokens(original),
-    modernizeSgg(original)
-  ].filter(Boolean))];
-  const addressPre = preprocess(original);
+async function recoverJusoCandidateForNaver(naverAddr, clients, alternateAddresses = []) {
+  const seeds = naverPnuRecoveryQueries(naverAddr, alternateAddresses);
+  if (!seeds.length) {
+    return {
+      candidate: null,
+      query: "",
+      evidence: [],
+      recoveryVersion: NAVER_PNU_RECOVERY_VERSION
+    };
+  }
+  const queries = [...new Set(seeds.flatMap((seed) => [
+    seed,
+    modernizeKnownAdminTokens(seed),
+    modernizeSgg(seed)
+  ]).filter(Boolean))];
   for (const query of queries) {
     const items = await safeCall(clients?.juso, query);
     if (!items.length) continue;
     const narrowed = exactAddressCandidates(
       dedupe(items.map(fromJuso)).filter((candidate) => candidate.admCd),
-      addressPre
+      preprocess(query)
     );
     const candidates = narrowed.candidates;
     if (!candidates.length) continue;
@@ -875,11 +901,17 @@ async function recoverJusoCandidateForNaver(naverAddr, clients) {
       return {
         candidate: candidates.find((candidate) => candidate.isJip) || candidates[0],
         query,
-        evidence: narrowed.evidence
+        evidence: narrowed.evidence || [],
+        recoveryVersion: NAVER_PNU_RECOVERY_VERSION
       };
     }
   }
-  return { candidate: null, query: queries.join(" ▸ "), evidence: [] };
+  return {
+    candidate: null,
+    query: queries.join(" ▸ "),
+    evidence: [],
+    recoveryVersion: NAVER_PNU_RECOVERY_VERSION
+  };
 }
 // 옛 시군구 → 현재 시군구 (2026-07-15, 실측 3건 + 여유분)
 // 검색 '전에' 원본 주소를 현대화한다(교차검증 예외가 아니라 사전 변환).
@@ -1013,7 +1045,9 @@ function extractEupRi(addr) {
   }
   // 행정동(도곡1동) → 법정동(도곡동)
   const norm = (x) => { const m = x.match(/^([\uAC00-\uD7A3]+)\d+(\uB3D9)$/); return m ? m[1] + m[2] : x; };
-  const list = [...new Set(cands.map(norm))].filter((x) => !isBuildingPartToken(x));
+  const list = [...new Set(cands.map(norm))].filter((x) =>
+    !isBuildingPartToken(x) && !/(상가|아파트|맨션|빌라|빌리지|타운|오피스텔|프라자|플라자|빌딩|센터)$/i.test(x)
+  );
   return { eup, emd: list[0] || "", emdCands: list };
 }
 
@@ -1022,6 +1056,10 @@ function extractEupRi(addr) {
 function extractRoadNo(raw) {
   const s = String(raw || "").replace(/\([^)]*\)/g, " ").replace(/[,\u00b7]/g, " ")
     .replace(/\s+/g, " ").trim();
+  // `범일로 154번길 33`처럼 본 도로와 N번길 사이가 띄어진 표준외 표기.
+  // 154를 건물번호로 오인하지 않고 `범일로154번길` 전체를 도로명으로 묶는다.
+  const spacedBranch = s.match(/([가-힣]{2,}(?:로|길))\s+(\d+번?길)\s+(\d{1,5}(?:-\d{1,4})?)(?!\d)/);
+  if (spacedBranch) return { road: `${spacedBranch[1]}${spacedBranch[2]}`, buldNo: spacedBranch[3] };
   const m = s.match(/([\uac00-\ud7a3]{2,}(?:\d+)?[\ub85c\uae38](?:\d+\ubc88?\uae38)?)\s*(\d{1,5}(?:-\d{1,4})?)(?!\d)/);
   if (!m) return { road: "", buldNo: "" };
   return { road: m[1], buldNo: m[2] };
@@ -1279,7 +1317,11 @@ async function recoverOwnerUnitCandidate(pre, clients) {
         const shownAddress = item.address || item.roadAddress || "";
         if (!sameInputRegion(pre, shownAddress) && !addressMatchesZipRegions(shownAddress, zipRegions)) continue;
         const naverAddress = item.roadAddress || item.address || "";
-        const found = await recoverJusoCandidateForNaver(naverAddress, clients);
+        const found = await recoverJusoCandidateForNaver(
+          naverAddress,
+          clients,
+          [item.address || "", item.roadAddress || ""]
+        );
         const candidate = found.candidate;
         if (!candidate || !candidate.isJip) continue;
         recovered.push({ candidate, item, found, tried: [...tried] });
@@ -1512,7 +1554,11 @@ async function cascade(pre, clients) {
         let naverJusoQuery = "";
         let naverAddressMatchEvidence = [];
         if (naverAddr) {
-          const recovered = await recoverJusoCandidateForNaver(naverAddr, clients);
+          const recovered = await recoverJusoCandidateForNaver(
+            naverAddr,
+            clients,
+            [top.address || "", top.roadAddress || ""]
+          );
           naverJusoQuery = recovered.query;
           naverAddressMatchEvidence = recovered.evidence;
           if (recovered.candidate) {
@@ -1548,6 +1594,7 @@ async function cascade(pre, clients) {
             naverJibunAddr: top.address || "",
             naverRoadAddr: top.roadAddress || "",
             naverPnuOk: !!cand.pnuOk,                  // PNU 확보 여부
+            naverPnuRecoveryVersion: recovered.recoveryVersion,
             addressMatchEvidence: naverAddressMatchEvidence,
             reviewNeeded: _reviewNeeded,
             zipRegions,
@@ -1849,6 +1896,148 @@ function buildDongsoAnchors(rows) {
 function propagationRowKey(row) {
   return String(row?.rowId || `raw:${normalizeRawKey(row?.raw || "")}`);
 }
+
+function normalizedDatasetZip(value) {
+  return String(value || "")
+    .replace(/\.\d+$/, "")
+    .replace(/[^0-9]/g, "");
+}
+
+function datasetLocationKey(row) {
+  const pre = preprocess(String(row?.raw || ""));
+  const zip = normalizedDatasetZip(row?.zip);
+  const scope = zip || [pre.sidoFull, pre.sgg].filter(Boolean).join("|");
+  if (!scope) return "";
+  if (pre.road && pre.buldNo) {
+    return ["ROAD", scope, pre.sgg, pre.road, pre.buldNo]
+      .filter(Boolean).join("|");
+  }
+  if (pre.jibun) {
+    return ["LOT", scope, pre.sgg, pre.eup, pre.emd, pre.jibun]
+      .filter(Boolean).join("|");
+  }
+  if (pre.bldName && isDistinctiveBuildingName(pre.bldName)) {
+    return ["BUILDING", scope, pre.sgg, pre.eup, pre.emd, buildingKey(pre.bldName)]
+      .filter(Boolean).join("|");
+  }
+  return "";
+}
+
+function collectDatasetPnuGroups(rows) {
+  const groups = new Map();
+  const add = (kind, key, row) => {
+    if (!key) return;
+    const groupKey = `${kind}|${key}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, { kind, key: groupKey, rows: [] });
+    groups.get(groupKey).rows.push(row);
+  };
+  for (const row of rows || []) {
+    add("LOCATION", datasetLocationKey(row), row);
+    const zip = normalizedDatasetZip(row?.zip);
+    const owner = normalizeOwnerKey(ownerOfRow(row));
+    if (zip && owner) add("OWNER_ZIP", `${zip}|${owner}`, row);
+  }
+  return [...groups.values()].sort((a, b) => {
+    const priority = { LOCATION: 0, OWNER_ZIP: 1 };
+    return (priority[a.kind] - priority[b.kind]) || a.key.localeCompare(b.key);
+  });
+}
+
+function datasetPnuDependencyEvidence(group, selection) {
+  const members = group.rows.map((row) => ({
+    row: propagationRowKey(row),
+    status: row?.result?.status || "",
+    pnu: row?.result?.pnu || "",
+    candidates: (row?.result?.candidates || [])
+      .map((candidate) => candidate?.pnu || "")
+      .filter(Boolean)
+      .sort()
+  })).sort((a, b) => a.row.localeCompare(b.row));
+  const groupFingerprint = fingerprintValue({
+    version: DATASET_PNU_EVIDENCE_VERSION,
+    groupKey: group.key,
+    selectedPnu: selection.pnu,
+    selectionEvidence: selection.evidence,
+    members
+  });
+  return {
+    version: DATASET_PNU_EVIDENCE_VERSION,
+    groupKind: group.kind,
+    groupKey: group.key,
+    selectedPnu: selection.pnu,
+    selectionEvidence: selection.evidence,
+    groupFingerprint
+  };
+}
+
+// 복수 PNU를 첫 후보로 확정하지 않는다. 동일 위치 또는 동일 소유자·우편번호
+// 그룹에서 직접 확정 PNU가 하나이고 그 PNU가 해당 행 후보에 실제 존재하거나,
+// 서로 다른 후보집합들의 교집합이 PNU 하나일 때만 확정한다.
+function resolveDatasetMultiPnuGroups(rows, evidenceFor = null) {
+  let filled = 0;
+  const handled = new Set();
+  const FAILURE_STATUSES = new Set([
+    "AMBIGUOUS", "FAILED", "HUMAN_INPUT_ERROR", "VALIDATION_FAILED",
+    "NAVER_CONFIRMED_PNU_FAILED"
+  ]);
+  for (const group of collectDatasetPnuGroups(rows)) {
+    const selection = selectDatasetGroupPnu(group.rows);
+    if (selection.status !== "UNIQUE" || !selection.pnu) continue;
+    const dependencyEvidence = datasetPnuDependencyEvidence(group, selection);
+    const directSource = group.kind === "LOCATION"
+      ? directDatasetPnuSource(group.rows, selection.pnu)
+      : null;
+    for (const row of group.rows) {
+      const rowKey = propagationRowKey(row);
+      if (handled.has(rowKey) || !FAILURE_STATUSES.has(row?.result?.status)) continue;
+      const candidate = candidateForDatasetPnu(row, selection.pnu);
+      // 후보가 없는 실패행은 정확 위치키(도로명+건물번호 또는 법정동+지번)가
+      // 같은 경우에만 직접 확정행을 기준으로 복구한다. 소유자+우편번호만으로는
+      // 서로 다른 물건이 섞일 수 있으므로 반드시 후보 교집합이 있어야 한다.
+      if (!candidate && !directSource) continue;
+      const matchedResult = candidate || directSource.result;
+      const evidenceCode = candidate
+        ? (group.kind === "LOCATION"
+          ? "DATASET_LOCATION_PNU_INTERSECTION"
+          : "DATASET_OWNER_ZIP_PNU_INTERSECTION")
+        : "DATASET_EXACT_LOCATION_DIRECT_PNU";
+      const proposal = {
+        ...cloneResult(row.result),
+        status: "CONFIRMED",
+        jibunAddr: matchedResult.jibunAddr || row.result.jibunAddr || "",
+        roadAddr: matchedResult.roadAddr || row.result.roadAddr || "",
+        pnu: selection.pnu,
+        bdMgtSn: matchedResult.bdMgtSn || row.result.bdMgtSn || "",
+        bdNm: matchedResult.bdNm || row.result.bdNm || "",
+        isJip: matchedResult.isJip ?? row.result.isJip,
+        unit: row.unitOverride || row.result?.unit || preprocess(row.raw || "").unit,
+        source: candidate ? "데이터셋PNU교차검증" : "데이터셋위치교차검증",
+        reviewNeeded: null,
+        validation: {
+          status: "MATCH",
+          reason: candidate
+            ? "복수 PNU와 기존 데이터 단서의 교집합이 한 PNU로 수렴"
+            : "동일 정확 위치에서 직접 확정 PNU가 한 종류로 수렴"
+        },
+        addressMatchEvidence: [...new Set([
+          ...(row.result.addressMatchEvidence || []),
+          evidenceCode,
+          selection.evidence
+        ])],
+        datasetPnuEvidence: dependencyEvidence
+      };
+      const upstreamEvidence = {
+        ...(evidenceFor ? evidenceFor(row) : {}),
+        datasetPnuEvidence: dependencyEvidence
+      };
+      row.result = attachPipelineMetadata(row, proposal, upstreamEvidence);
+      handled.add(rowKey);
+      filled++;
+    }
+  }
+  return filled;
+}
+
 function collectAddressPropagationGroups(rows, groupHints) {
   const groups = new Map();
   for (const row of rows) {
@@ -1900,7 +2089,7 @@ function collectOwnerZipPropagationGroups(rows, groupHints) {
 function propagationSource(arr) {
   const confirmed = arr.filter((x) => x.row.result &&
     x.row.result.status === "CONFIRMED" && x.row.result.pnu &&
-    !["주소군전파", "주소군후보교집합", "소유자주소군전파", "건물주소군전파"].includes(x.row.result.source));
+    !["주소군전파", "주소군후보교집합", "소유자주소군전파", "소유자주소군후보교집합", "건물주소군전파", "데이터셋PNU교차검증"].includes(x.row.result.source));
   if (!confirmed.length || new Set(confirmed.map((x) => x.row.result.pnu)).size !== 1) return null;
   confirmed.sort((a, b) => propagationRowKey(a.row).localeCompare(propagationRowKey(b.row)));
   return confirmed[0].row;
@@ -1988,7 +2177,7 @@ function buildingAnchorPropagationSource(arr) {
   const confirmed = arr.filter((x) => {
     const r = x.row.result;
     if (!r || r.status !== "CONFIRMED" || !r.pnu) return false;
-    if (["주소군전파", "주소군후보교집합", "소유자주소군전파", "건물주소군전파"].includes(r.source)) return false;
+    if (["주소군전파", "주소군후보교집합", "소유자주소군전파", "소유자주소군후보교집합", "건물주소군전파", "데이터셋PNU교차검증"].includes(r.source)) return false;
     if (r.validation?.status !== "MATCH") return false;
     if (!isDistinctiveBuildingName(r.bdNm || x.p.bldName)) return false;
     if (!r.reviewNeeded || isPositivePropagationReview(r.reviewNeeded)) return true;
@@ -2218,7 +2407,9 @@ function pipelineEvidenceForRow(row, groupHints, dongsoAnchors) {
   return {
     groupHints: [directHint, unitHint, unitAfterMissHint].filter(Boolean).join("|"),
     dongsoAnchor,
-    oldAddressMap: findOldAdminTokens(row?.raw || "")
+    oldAddressMap: findOldAdminTokens(row?.raw || ""),
+    datasetPnuEvidence: row?.result?.datasetPnuEvidence || null,
+    pnuIrosEvidence: row?.result?.pnuIrosEvidence || null
   };
 }
 async function refineAddress(raw, clients, zipcode = "", groupHints = null, unitOverride = null, dongsoAnchors = null, owner = "") {
@@ -2290,6 +2481,7 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
   const {
     candidates, level, jusoQuery, count, humanInputError,
     naverAddr, naverJibunAddr, naverRoadAddr, naverPnuOk,
+    naverPnuRecoveryVersion,
     multiParcelCandidates, zipRegions = []
   } = cascadeResult;
 
@@ -2358,6 +2550,7 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
         naverAddr,
         naverJibunAddr: naverJibunAddr || "",
         naverRoadAddr: naverRoadAddr || "",
+        naverPnuRecoveryVersion: naverPnuRecoveryVersion || NAVER_PNU_RECOVERY_VERSION,
         message: `\uB124\uC774\uBC84 \uC8FC\uC18C \uD655\uC778(PNU \uBBF8\uD655\uBCF4): ${naverAddr || c.jibunAddr || ""}`,
         validation: { status: "NOT_AVAILABLE", reason: "네이버 확정", inputSgg: "", resultSgg: "" },
       };
@@ -2388,6 +2581,7 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
   result.naverAddr = naverAddr || "";
   result.naverJibunAddr = naverJibunAddr || "";
   result.naverRoadAddr = naverRoadAddr || "";
+  result.naverPnuRecoveryVersion = naverPnuRecoveryVersion || "";
   result.multiLotRecovery = cascadeResult.multiLotRecovery === true;
   result.ownerUnitRecovery = cascadeResult.ownerUnitRecovery === true;
   if (result.status === "CONFIRMED") {
@@ -2488,7 +2682,7 @@ const MOCK_JUSO_DB = [
   { keys: ["\uC911\uC559\uB3D9"], item: { admCd: "2611010100", mtYn: "0", lnbrMnnm: "50", lnbrSlno: "0", roadAddr: "\uBD80\uC0B0\uAD11\uC5ED\uC2DC \uC911\uAD6C \uC911\uC559\uB300\uB85C 50", jibunAddr: "\uBD80\uC0B0\uAD11\uC5ED\uC2DC \uC911\uAD6C \uC911\uC559\uB3D94\uAC00 50", bdMgtSn: null, bdNm: "" } },
   { keys: ["\uC0B0\uC131\uB3D9 \uC0B0"], item: { admCd: "4311125346", mtYn: "1", lnbrMnnm: "12", lnbrSlno: "3", roadAddr: null, jibunAddr: "\uCDA9\uCCAD\uBD81\uB3C4 \uCCAD\uC8FC\uC2DC \uC0C1\uB2F9\uAD6C \uC0B0\uC131\uB3D9 \uC0B0 12-3", bdMgtSn: null, bdNm: "" } }
 ];
-const MOCK_KAKAO_DB = [
+const MOCK_PLACE_DB = [
   { keys: ["\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC", "\uC6D0\uBCA0\uC77C\uB9AC"], doc: { place_name: "\uB798\uBBF8\uC548\uC6D0\uBCA0\uC77C\uB9AC", address_name: "\uC11C\uC6B8 \uC11C\uCD08\uAD6C \uBC18\uD3EC\uB3D9 1-1", x: "127.0016", y: "37.5125", address: { address_name: "\uC11C\uC6B8 \uC11C\uCD08\uAD6C \uBC18\uD3EC\uB3D9 1-1", b_code: "1165010700", mountain_yn: "N", main_address_no: "1", sub_address_no: "1" }, road_address: { address_name: "\uC11C\uC6B8 \uC11C\uCD08\uAD6C \uC2E0\uBC18\uD3EC\uB85C 2" } } },
   { keys: ["\uD5EC\uB9AC\uC624\uC2DC\uD2F0"], doc: { place_name: "\uD5EC\uB9AC\uC624\uC2DC\uD2F0", address_name: "\uC11C\uC6B8 \uC1A1\uD30C\uAD6C \uAC00\uB77D\uB3D9 913", x: "127.106", y: "37.497", address: { address_name: "\uC11C\uC6B8 \uC1A1\uD30C\uAD6C \uAC00\uB77D\uB3D9 913", b_code: "1171010900", mountain_yn: "N", main_address_no: "913", sub_address_no: "" }, road_address: { address_name: "\uC11C\uC6B8 \uC1A1\uD30C\uAD6C \uC1A1\uD30C\uB300\uB85C 345" } } }
 ];
@@ -2502,8 +2696,8 @@ const mockClients = {
     });
     return (narrowed.length > 0 ? narrowed : hits).map((e) => e.item);
   },
-  // 네이버 지역검색 mock(2026-07-15, 카카오 대체). 건물명으로 장소 검색.
-  naverLocal: async (query) => MOCK_KAKAO_DB
+  // 네이버 지역검색 mock. 건물명으로 장소 검색.
+  naverLocal: async (query) => MOCK_PLACE_DB
     .filter((e) => e.keys.some((k) => query.includes(k)))
     .map((e) => ({
       title: e.doc.place_name || "",
@@ -2519,7 +2713,7 @@ function transientErr(msg) {
   e.transient = true;
   return e;
 }
-function makeRealClients(jusoKey, kakaoKey) {
+function makeRealClients(jusoKey) {
   return {
     naverLocal: async (query) => {
       let res;
@@ -2556,27 +2750,6 @@ function makeRealClients(jusoKey, kakaoKey) {
       const ec = data?.common?.errorCode;
       if (ec && ec !== "0") throw transientErr(`JUSO ${ec} ${data?.common?.errorMessage || ""}`.trim());
       return data?.juso ?? [];   // errorCode 0 + 빈 배열 = 진짜 0건(영구 실패로 분류됨)
-    },
-    kakaoKeyword: async (kw) => {
-      let res;
-      try {
-        res = await fetch(`/api/kakao?type=keyword&query=${encodeURIComponent(kw)}`);
-      } catch {
-        throw transientErr("네트워크 오류(kakao)");
-      }
-      if (!res.ok) throw transientErr(`HTTP ${res.status} (kakao)`);
-      const data = await res.json().catch(() => null);
-      if (data == null) throw transientErr("응답 파싱 실패(kakao)");
-      return data?.documents ?? [];
-    },
-    kakaoCoord2Region: async (x, y) => {
-      try {
-        const res = await fetch(`/api/kakao?type=coord2region&x=${x}&y=${y}`);
-        const data = await res.json();
-        return data?.documents ?? [];
-      } catch {
-        return [];
-      }
     }
   };
 }
@@ -2841,14 +3014,12 @@ function Row({ k, v, monoV, children }) {
 }
 function EnvSettings({ open, onClose, config, onSave }) {
   const [jusoKey, setJusoKey] = useState(config.jusoKey || "");
-  const [kakaoKey, setKakaoKey] = useState(config.kakaoKey || "");
   const [bridgeUrl, setBridgeUrl] = useState(config.bridgeUrl || "");
   const [resolverKey, setResolverKey] = useState(config.resolverKey || "");
   const [saveState, setSaveState] = useState("");
   useEffect(() => {
     if (open) {
       setJusoKey(config.jusoKey || "");
-      setKakaoKey(config.kakaoKey || "");
       setBridgeUrl(config.bridgeUrl || "");
       setResolverKey(config.resolverKey || "");
       setSaveState("");
@@ -2859,7 +3030,6 @@ function EnvSettings({ open, onClose, config, onSave }) {
     setSaveState("saving");
     const ok = await onSave({
       jusoKey: jusoKey.trim(),
-      kakaoKey: kakaoKey.trim(),
       bridgeUrl: bridgeUrl.trim().replace(/\/$/, ""),
       resolverKey: resolverKey.trim()
     });
@@ -2911,7 +3081,7 @@ function EnvSettings({ open, onClose, config, onSave }) {
       style: { background: "none", border: "none", color: C.dim, fontSize: 17, cursor: "pointer", padding: 4 }
     },
     "\u2715"
-  )), envRow("JUSO_CONFM_KEY", jusoKey, setJusoKey, "\uB3C4\uB85C\uBA85\uC8FC\uC18C API \uC2B9\uC778\uD0A4"), envRow("KAKAO_REST_KEY", kakaoKey, setKakaoKey, "\uCE74\uCE74\uC624 REST API \uD0A4"), /* @__PURE__ */ React.createElement("div", { style: { margin: "12px 0 8px", fontFamily: mono, fontSize: 10.5, color: C.faint, letterSpacing: "0.1em" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.cyan } }, "#"), " \uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uBE0C\uB9AC\uC9C0 (EC2/\uB85C\uCEEC)"), envRow("BRIDGE_URL", bridgeUrl, setBridgeUrl, "https://xxx.trycloudflare.com \uB610\uB294 http://localhost:8899"), envRow("RESOLVER_KEY", resolverKey, setResolverKey, "EC2 \uBC30\uD3EC \uC2DC \uBC1C\uAE09\uB41C \uD0A4 (\uB85C\uCEEC\uC740 \uBE44\uC6C0)"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 14 } }, /* @__PURE__ */ React.createElement(
+  )), envRow("JUSO_CONFM_KEY", jusoKey, setJusoKey, "\uB3C4\uB85C\uBA85\uC8FC\uC18C API \uC2B9\uC778\uD0A4"), /* @__PURE__ */ React.createElement("div", { style: { margin: "12px 0 8px", fontFamily: mono, fontSize: 10.5, color: C.faint, letterSpacing: "0.1em" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.cyan } }, "#"), " \uB4F1\uAE30\uACE0\uC720\uBC88\uD638 \uBE0C\uB9AC\uC9C0 (EC2/\uB85C\uCEEC)"), envRow("BRIDGE_URL", bridgeUrl, setBridgeUrl, "https://xxx.trycloudflare.com \uB610\uB294 http://localhost:8899"), envRow("RESOLVER_KEY", resolverKey, setResolverKey, "EC2 \uBC30\uD3EC \uC2DC \uBC1C\uAE09\uB41C \uD0A4 (\uB85C\uCEEC\uC740 \uBE44\uC6C0)"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 14 } }, /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: save,
@@ -3014,7 +3184,7 @@ function ResultCard({ r, onRegionPick, bridgeUp, reg, regBusy, onLookup }) {
     color: C.faint,
     letterSpacing: "0.16em",
     fontWeight: 700
-  } }, "\uC0B0\uCD9C \uCF54\uB4DC"), /* @__PURE__ */ React.createElement(CodeLine, { label: "PNU", digits: 19, source: "juso/kakao", value: r.pnu, color: C.cyan }), /* @__PURE__ */ React.createElement(
+  } }, "\uC0B0\uCD9C \uCF54\uB4DC"), /* @__PURE__ */ React.createElement(CodeLine, { label: "PNU", digits: 19, source: "juso/naver", value: r.pnu, color: C.cyan }), /* @__PURE__ */ React.createElement(
     CodeLine,
     {
       label: "\uAC74\uBB3C\uAD00\uB9AC\uBC88\uD638",
@@ -3179,7 +3349,7 @@ function TestLogPanel({ logs, onClose, onDownloadJson, onDownloadCsv, onClear, b
 function AddrRefineTestGui() {
   const [tab, setTab] = useState("single");
   const [mode, setMode] = useState("real");
-  const [config, setConfig] = useState({ jusoKey: "", kakaoKey: "", bridgeUrl: "", resolverKey: "" });
+  const [config, setConfig] = useState({ jusoKey: "", bridgeUrl: "", resolverKey: "" });
   const [settingsOpen, setSettingsOpen] = useState(false);
   useEffect(() => {
     (async () => {
@@ -3502,6 +3672,7 @@ function AddrRefineTestGui() {
       progress: { iros_done: irosProgressStats(next).done, iros_total: irosProgressStats(next).total }
     });
     const targets = [];
+    const ambiguousPnuPlans = new Map();
     const pendingAlternateGroups = new Map();
     const nowText = () => new Date().toISOString().slice(0, 19).replace("T", " ");
     const addPendingAlternate = (address, member) => {
@@ -3515,6 +3686,8 @@ function AddrRefineTestGui() {
     // 현재 실행계약으로 완료된 결과는 즉시 건너뛰고, 구버전·부분응답·서비스오류만 재처리한다.
     for (let idx = 0; idx < next.length; idx++) {
       const row = next[idx];
+      const ambiguousPlan = buildAmbiguousPnuProbePlan(row);
+      if (ambiguousPlan) ambiguousPnuPlans.set(idx, ambiguousPlan);
       if (row.result?.status !== "CONFIRMED") continue;
       if (row.result.isJip && !row.result.unit?.ho) {
         next[idx] = {
@@ -3544,7 +3717,7 @@ function AddrRefineTestGui() {
     setBatchUnitDone(initialIrosProgress.done);
     setBatchTotal(initialIrosProgress.total);
     setBatchRegDone(initialIrosProgress.done);
-    if (targets.length === 0 && pendingAlternateGroups.size === 0) {
+    if (targets.length === 0 && pendingAlternateGroups.size === 0 && ambiguousPnuPlans.size === 0) {
       setRows([...next]);
       await idbSet(BATCH_KEY, buildIrosSnapshot(next, extraHeaders, {
         phase: "complete",
@@ -3601,6 +3774,34 @@ function AddrRefineTestGui() {
       const pnuKey = t.row.result.pnu || `ADDR:${t.row.result.jibunAddr || ""}`;
       if (!groups.has(pnuKey)) groups.set(pnuKey, []);
       groups.get(pnuKey).push(t);
+    }
+    const ambiguousPnuAttempts = new Map();
+    let ambiguousPnuRetryRequired = 0;
+    for (const [idx, plan] of ambiguousPnuPlans) {
+      const sourceRow = next[idx];
+      for (const probe of plan.probes) {
+        const candidate = probe.candidate || {};
+        const probeRow = {
+          ...sourceRow,
+          result: {
+            ...cloneResult(sourceRow.result),
+            status: "CONFIRMED",
+            pnu: probe.pnu,
+            jibunAddr: candidate.jibunAddr || candidate.roadAddr || probe.address,
+            roadAddr: candidate.roadAddr || "",
+            bdNm: candidate.bdNm || "",
+            bdMgtSn: candidate.bdMgtSn || "",
+            isJip: candidate.isJip !== false,
+            reviewNeeded: null,
+            validation: { status: "MATCH", reason: "복수 PNU IROS 세대검증용 임시후보" },
+            unit: cloneResult(sourceRow.result.unit || {})
+          }
+        };
+        const member = { idx, row: probeRow, pnuProbe: { plan, probe } };
+        const pnuKey = probe.pnu;
+        if (!groups.has(pnuKey)) groups.set(pnuKey, []);
+        groups.get(pnuKey).push(member);
+      }
     }
     const pnuKeys = [...groups.keys()];
     setBatchBaseTotal(pnuKeys.length);
@@ -3664,8 +3865,9 @@ function AddrRefineTestGui() {
       stageCounts.exact_lot = cands.length;
       const wantDong = unitKey(row.result.unit?.dong, "dong");
       const wantHo = unitKey(row.result.unit?.ho, "ho");
+      const rawUnitVariants = rawUnitRecoveryVariants(row.raw, row.result.unit || {});
       if ((row.result.isJip || wantDong || wantHo) && cands.length) {
-        const typed = filterExpectedPropertyClass(cands, "집합건물");
+        const typed = filterUnitPropertyCandidates(cands, wantDong, wantHo, rawUnitVariants);
         if (!typed.verified) {
           return {
             status: "REG_VALIDATION_FAILED",
@@ -3679,10 +3881,17 @@ function AddrRefineTestGui() {
           };
         }
         cands = typed.candidates;
+        if (typed.evidence === "EXPLICIT_UNIT_BUILDING") {
+          applyModule(
+            "R-IROS-UNIT-BEARING-BUILDING",
+            IROS_MODULE_VERSIONS.R_IROS_UNIT_BEARING_BUILDING
+          );
+        }
       }
       stageCounts.property_class = cands.length;
       const unitCandidatePool = cands;
       let unitProfileRecovery = null;
+      let rawUnitRecovery = null;
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
           const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
@@ -3713,8 +3922,29 @@ function AddrRefineTestGui() {
           }
         }
         cands = matched;
+
+        // R-IROS-RAW-UNIT: 정상 동·호 매칭이 단일 한 건으로 끝나지 않을 때만
+        // 원문에 명시된 `501-101호`, `6층8호` 변형을 완전후보 안에서 재매칭한다.
+        // 여러 해석이 서로 다른 고유번호로 갈리면 확정하지 않는다.
+        if (cands.length !== 1 && rawUnitVariants.length) {
+          const recovered = selectUniqueRawUnitCandidate(
+            unitCandidatePool,
+            row.raw,
+            row.result.unit || {}
+          );
+          if (recovered?.candidate) {
+            cands = [recovered.candidate];
+            rawUnitRecovery = {
+              selected_variant: recovered.variant,
+              variants_tried: recovered.variantsTried,
+              matched_candidate_count: recovered.matchedCandidateCount
+            };
+            applyModule("R-IROS-RAW-UNIT", IROS_MODULE_VERSIONS.R_IROS_RAW_UNIT);
+          }
+        }
       }
       stageCounts.unit = cands.length;
+      stageCounts.raw_unit_recovery = rawUnitRecovery ? 1 : 0;
 
       // R-IROS-UNIT-PROFILE: 주소의 동·층·호를 의도값으로 보존하고,
       // 현재 지번의 완전 후보를 건물별로 묶어 실제 동·호 표기방식을 학습한다.
@@ -3752,6 +3982,7 @@ function AddrRefineTestGui() {
           failure_stage: (wantDong || wantHo) ? "UNIT" : "CANDIDATE",
           stage_counts: stageCounts,
           applied_modules: appliedModules,
+          raw_unit_recovery: rawUnitRecovery,
           unit_profile_recovery: unitProfileRecovery,
           message: (wantDong || wantHo) ? "완전 후보에서 일치 세대 없음" : "완전 후보 없음",
           at: nowText()
@@ -3805,8 +4036,10 @@ function AddrRefineTestGui() {
           strategy: "PNU_CACHE",
           stage_counts: stageCounts,
           applied_modules: appliedModules,
+          raw_unit_recovery: rawUnitRecovery,
           unit_profile_recovery: unitProfileRecovery,
-          message: unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치",
+          message: rawUnitRecovery ? "원문 동·층·호 표기로 완전후보 한 건 수렴" :
+            (unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치"),
           at: nowText()
         };
       }
@@ -3815,6 +4048,7 @@ function AddrRefineTestGui() {
           status: "REG_MULTI", candidates: cands, complete: true,
           failure_stage: "UNIQUENESS", stage_counts: stageCounts,
           applied_modules: appliedModules,
+          raw_unit_recovery: rawUnitRecovery,
           unit_profile_recovery: unitProfileRecovery,
           message: `${cands.length}건`, at: nowText()
         };
@@ -3983,6 +4217,14 @@ function AddrRefineTestGui() {
 
       for (const member of members) {
         let reg = await matchMember(member, collection);
+        if (member.pnuProbe) {
+          if (!ambiguousPnuAttempts.has(member.idx)) ambiguousPnuAttempts.set(member.idx, []);
+          ambiguousPnuAttempts.get(member.idx).push({
+            probe: member.pnuProbe.probe,
+            reg
+          });
+          continue;
+        }
         if (reg.status === "REG_UNIT_NOT_FOUND") {
           const normalizedAddress = member.row.result.jibunAddr || member.row.result.irosQuery || "";
           const alternateAddresses = alternateRawLotAddresses(member.row.raw, normalizedAddress);
@@ -4006,6 +4248,69 @@ function AddrRefineTestGui() {
       await checkpoint({ phase: "base", baseDone: g + 1, baseTotal: pnuKeys.length });
       if (!cacheHit && g < pnuKeys.length - 1 && !batchStopRef.current)
         await new Promise((res) => setTimeout(res, 1e3));
+    }
+
+    // 주소 후보 PNU를 전부 IROS 동·호로 검증한 뒤 한 PNU만 실제 세대로
+    // 수렴할 때 주소와 고유번호를 함께 확정한다. 부분응답·복수결과가 하나라도
+    // 섞이면 자동확정하지 않는다.
+    if (!batchStopRef.current) {
+      for (const [idx, plan] of ambiguousPnuPlans) {
+        const selected = selectUniqueIrosPnuAttempt(
+          plan,
+          ambiguousPnuAttempts.get(idx) || []
+        );
+        const priorRow = next[idx];
+        const evidence = { ...selected.audit, outcome: selected.status };
+        if (selected.status === "UNIQUE") {
+          const candidate = selected.candidate || {};
+          const proposal = {
+            ...cloneResult(priorRow.result),
+            status: "CONFIRMED",
+            pnu: selected.pnu,
+            jibunAddr: candidate.jibunAddr || candidate.roadAddr || "",
+            roadAddr: candidate.roadAddr || "",
+            bdNm: candidate.bdNm || "",
+            bdMgtSn: candidate.bdMgtSn || "",
+            isJip: candidate.isJip !== false,
+            source: "IROS후보교차검증",
+            reviewNeeded: null,
+            validation: {
+              status: "MATCH",
+              reason: "복수 PNU 전체를 동일 동·호로 조회해 한 PNU만 실제 세대로 수렴"
+            },
+            addressMatchEvidence: [...new Set([
+              ...(priorRow.result.addressMatchEvidence || []),
+              "IROS_UNIT_UNIQUE_PNU"
+            ])],
+            pnuIrosEvidence: evidence
+          };
+          const appliedModules = [...(selected.reg.applied_modules || [])];
+          const moduleTag = `R-ADDR-AMBIGUOUS-PNU-IROS@${AMBIGUOUS_PNU_RECOVERY_VERSION}`;
+          if (!appliedModules.includes(moduleTag)) appliedModules.push(moduleTag);
+          next[idx] = {
+            ...priorRow,
+            result: attachPipelineMetadata(priorRow, proposal, { pnuIrosEvidence: evidence }),
+            reg: withIrosVersions({
+              ...selected.reg,
+              strategy: "PNU_CANDIDATE_IROS_PROBE",
+              applied_modules: appliedModules,
+              recovery_module: moduleTag,
+              pnu_probe_evidence: evidence,
+              message: "복수 PNU 전체 조회가 한 실제 세대·고유번호로 수렴"
+            })
+          };
+          continue;
+        }
+        const proposal = {
+          ...cloneResult(priorRow.result),
+          pnuIrosEvidence: evidence
+        };
+        if (selected.status === "RETRY_REQUIRED") ambiguousPnuRetryRequired++;
+        next[idx] = {
+          ...priorRow,
+          result: attachPipelineMetadata(priorRow, proposal, { pnuIrosEvidence: evidence })
+        };
+      }
     }
 
     const alternateEntries = [...alternateGroups.entries()];
@@ -4136,7 +4441,7 @@ function AddrRefineTestGui() {
     }
 
     const finalProgress = irosProgressStats(next);
-    const interrupted = batchStopRef.current || !finalProgress.final;
+    const interrupted = batchStopRef.current || !finalProgress.final || ambiguousPnuRetryRequired > 0;
     await checkpoint({
       phase: interrupted ? "interrupted" : "complete",
       baseDone: Math.min(pnuKeys.length, runState.baseDone),
@@ -4144,10 +4449,12 @@ function AddrRefineTestGui() {
       alternateDone: Math.min(alternateEntries.length, runState.alternateDone),
       alternateTotal: alternateEntries.length,
       interrupted,
-      reason: batchStopRef.current ? "USER_STOP" : (finalProgress.final ? "" : "RETRY_REQUIRED")
+      reason: batchStopRef.current ? "USER_STOP" :
+        ((!finalProgress.final || ambiguousPnuRetryRequired > 0) ? "RETRY_REQUIRED" : "")
     });
     await recordTestRun(interrupted ? "iros_interrupted" : "complete", next, {
-      reason: batchStopRef.current ? "USER_STOP" : (finalProgress.final ? "" : "RETRY_REQUIRED"),
+      reason: batchStopRef.current ? "USER_STOP" :
+        ((!finalProgress.final || ambiguousPnuRetryRequired > 0) ? "RETRY_REQUIRED" : ""),
       progress: { iros_done: finalProgress.done, iros_total: finalProgress.total }
     });
     setIrosRunMessage(interrupted
@@ -4170,7 +4477,7 @@ function AddrRefineTestGui() {
     batchStopRef.current = true;
     setBatchStop(true);
   }, []);
-  const clients = mode === "mock" ? mockClients : makeRealClients(config.jusoKey, config.kakaoKey);
+  const clients = mode === "mock" ? mockClients : makeRealClients(config.jusoKey);
   const [unitDong, setUnitDong] = useState("");
   const [unitHo, setUnitHo] = useState("");
   const [unitOpen, setUnitOpen] = useState(false);
@@ -4449,11 +4756,21 @@ function AddrRefineTestGui() {
       ...pipelineEvidenceForRow(row, groupHints, dongsoAnchors),
       ...(currentPropagationEvidence.get(propagationRowKey(row)) || {})
     });
+    // 이미 PNU가 확정된 행은 주소 API를 다시 호출하지 않는다. 다만 원문
+    // 말미에 명시된 동·호를 보수적으로 복원할 수 있으면 성공 PNU를 보존한
+    // 채 로컬 증거만 추가한다. 이후 IROS 단계가 해당 실패행만 재매칭한다.
+    next = next.map((row) => {
+      if (!needsConfirmedUnitRecovery(row)) return row;
+      return {
+        ...row,
+        result: attachPipelineMetadata(row, cloneResult(row.result), evidenceFor(row))
+      };
+    });
     const isReusable = (row) => isReusableResult(row, evidenceFor(row));
     let done = next.filter((row) => isReusable(row)).length;
     setBatchDone(done);
     // ── 원문주소 선(先)중복제거 (2026-07-13 추가) ─────────────────────
-    // raw 문자열이 완전히 같은 행끼리 그룹화 → 대표 1건만 juso/kakao 호출
+    // raw 문자열이 완전히 같은 행끼리 그룹화 → 대표 1건만 JUSO/네이버 호출
     // → 결과를 그룹 전원에 복사. Stage2(등기조회)가 PNU+동호로 하는 것과
     // 같은 패턴을 정제 단계에도 적용한 것. 같은 담보 부동산이 여러 채권
     // 건으로 반복 등장하는 데이터 특성상 실제 API 호출 수가 크게 줄어든다.
@@ -4502,6 +4819,11 @@ function AddrRefineTestGui() {
       for (const i of idxs) {
         const row = next[i];
         const isolated = cloneResult(r);
+        const addressRecoveryEvidence = buildAddressRequeryEvidence(
+          preprocess(row.raw || ""),
+          isolated
+        );
+        if (addressRecoveryEvidence) isolated.addressRecoveryEvidence = addressRecoveryEvidence;
         next[i] = {
           ...row,
           result: attachPipelineMetadata(row, isolated, evidenceFor(row))
@@ -4528,6 +4850,7 @@ function AddrRefineTestGui() {
     // CONFIRMED를 늘릴수록 기준행이 생기는 그룹도 늘어나므로 순서가 중요하다.
     if (!batchStopRef.current) {
       next = expandResolvedMultiParcelRows(next, evidenceFor);
+      resolveDatasetMultiPnuGroups(next, evidenceFor);
       propagateBuildingAnchorGroups(next, evidenceFor);
       propagateAddressGroup(next, groupHints, evidenceFor);
     }
@@ -4561,10 +4884,13 @@ function AddrRefineTestGui() {
       const jibun = validationRejected ? "" : candidateJibun;
       const sggM = jibun.match(/(?:특별시|광역시|특별자치시|특별자치도|도)\s+([가-힣]+(?:시|군|구)(?:\s+[가-힣]+구)?)/);
       const sigungu = sggM ? sggM[1] : "";
-      let gubun = "";
-      if (reg?.status === "RESOLVED" && reg.candidates?.[0]) gubun = reg.candidates[0].gubun || "";
-      else if (reg?.candidates?.[0]) gubun = reg.candidates[0].gubun || "";
-      if (!gubun && r.isJip) gubun = "\uC9D1\uD569\uAC74\uBB3C";
+      // 주소 단계의 대상 구분과 IROS 후보 원본 구분을 섞지 않는다.
+      // 실패 결과의 첫 후보는 대개 토지이므로 이를 행 전체 유형으로 쓰면
+      // 집합건물 실패가 토지/건물로 오분류된다.
+      let gubun = targetPropertyClass(r);
+      if (!gubun && reg?.status === "RESOLVED" && reg.candidates?.[0]) {
+        gubun = reg.candidates[0].gubun || "";
+      }
       const aptType = r.aptType || "";
       const regNo = reg?.status === "RESOLVED" ? reg.unique_no || "" : "";
       const pnu = validationRejected ? "" : candidatePnu;
@@ -4585,6 +4911,9 @@ function AddrRefineTestGui() {
         : r.source === "주소군후보교집합" ? "주소군후보교집합"
         : r.source === "소유자주소군전파" ? "소유자주소군전파"
         : r.source === "건물주소군전파" ? "건물주소군전파"
+        : r.source === "데이터셋PNU교차검증" ? "데이터셋PNU교차검증"
+        : r.source === "데이터셋위치교차검증" ? "데이터셋위치교차검증"
+        : r.source === "IROS후보교차검증" ? "IROS후보교차검증"
         : r.source === "naver" ? "\uB124\uC774\uBC84L3"
         : r.searchLevel === "L3" ? "\uB124\uC774\uBC84L3"
         : r.searchLevel === "L2" ? "JUSO\uC7AC\uAC80\uC0C9" : "JUSO\uC6D0\uBB38";
@@ -4595,6 +4924,7 @@ function AddrRefineTestGui() {
       const unitStatus = r.isJip
         ? (r.unit?.ho ? "UNIT_CONFIRMED" : "UNIT_INPUT_REQUIRED")
         : (r.unit?.dong || r.unit?.ho ? "UNIT_CONFIRMED" : "UNIT_NOT_APPLICABLE");
+      const recoveryModule = classifyFailureModule(row);
       return {
         raw: row.raw,
         status: r.status || "\uBBF8\uC2E4\uD589",
@@ -4617,6 +4947,8 @@ function AddrRefineTestGui() {
         regStatus: reg?.status || "",
         pk,
         failCode,
+        recoveryDisposition: regNo ? "RESOLVED" : recoveryModule.disposition,
+        recoveryModule: regNo ? "" : `${recoveryModule.id}@${recoveryModule.version}`,
         addrSrc,
         unitSrc,
         lookupAt: reg?.at || (reg ? (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ") : ""),
@@ -4624,6 +4956,13 @@ function AddrRefineTestGui() {
         // ── 진단 열(2026-07-13): 전처리 오염 vs 원천 무결과를 눈으로 구분하기 위함 ──
         jusoQuery: r.jusoQuery || "",
         candCount: r.candCount ?? "",
+        multiPnuCandidates: [...new Set(
+          (r.candidates || []).map((candidate) => candidate?.pnu || "").filter(Boolean)
+        )].join(","),
+        datasetPnuEvidence: r.datasetPnuEvidence?.selectionEvidence ||
+          r.pnuIrosEvidence?.evidence || r.pnuIrosEvidence?.outcome || "",
+        datasetPnuGroupKind: r.datasetPnuEvidence?.groupKind ||
+          (r.pnuIrosEvidence ? "IROS_PNU_PROBE" : ""),
         searchLevel: r.searchLevel || "",
         inputSgg: r.validation?.inputSgg || "",
         resultSgg: r.validation?.resultSgg || "",
@@ -4645,7 +4984,7 @@ function AddrRefineTestGui() {
         addressMatchEvidence: Array.isArray(r.addressMatchEvidence) ? r.addressMatchEvidence.join(",") : "",
         irosStrategy: reg?.strategy || "",
         irosScope: reg?.query_scope || "",
-        irosClass: reg?.candidates?.[0]?.real_cls_cd || reg?.candidates?.[0]?.gubun || "",
+        irosClass: summarizeCandidatePropertyClasses(reg?.candidates || []),
         irosTotal: reg?.total_count ?? "",
         irosRawCount: reg?.raw_received_count ?? reg?.received_count ?? "",
         irosParsedCount: reg?.parsed_count ?? "",
@@ -4684,7 +5023,7 @@ function AddrRefineTestGui() {
     }
     return recs;
   }, [rows]);
-  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "조회일시", "비고", "juso\uAC80\uC0C9\uC5B4", "\uD6C4\uBCF4\uAC74\uC218", "\uAC80\uC0C9\uACBD\uB85C", "\uC785\uB825\uC9C0\uC5ED", "\uACB0\uACFC\uC9C0\uC5ED", "\uAC80\uC99D\uC0C1\uD0DC", "\uAC80\uC99D\uC0AC\uC720", "\uAC80\uD1A0\uC720\uD615", "옛주소규칙", "옛주소맵버전", "옛주소입력", "옛주소현행", "주소상태", "세대상태", "파이프라인버전", "결과지문", "적용모듈", "의존성지문", "전파기준행", "전파근거해시", "주소매칭근거", "네이버지번주소", "네이버도로명주소", "검증배제후보지번주소", "검증배제후보도로명주소", "검증배제후보PNU", "최종IROS입력주소", "IROS전략", "IROS검색범위", "IROS부동산구분", "IROS총건수", "IROS원본수신수", "IROS파싱수", "IROS고유후보수", "IROS페이지수", "IROS유효PageUnit", "IROS완전여부", "IROS파서버전", "IROS매처버전", "IROS캐시해시", "IROS매칭근거"];
+  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "처리판정", "복구모듈", "조회일시", "비고", "juso\uAC80\uC0C9\uC5B4", "\uD6C4\uBCF4\uAC74\uC218", "복수PNU후보", "복수PNU판정근거", "복수PNU그룹", "\uAC80\uC0C9\uACBD\uB85C", "\uC785\uB825\uC9C0\uC5ED", "\uACB0\uACFC\uC9C0\uC5ED", "\uAC80\uC99D\uC0C1\uD0DC", "\uAC80\uC99D\uC0AC\uC720", "\uAC80\uD1A0\uC720\uD615", "옛주소규칙", "옛주소맵버전", "옛주소입력", "옛주소현행", "주소상태", "세대상태", "파이프라인버전", "결과지문", "적용모듈", "의존성지문", "전파기준행", "전파근거해시", "주소매칭근거", "네이버지번주소", "네이버도로명주소", "검증배제후보지번주소", "검증배제후보도로명주소", "검증배제후보PNU", "최종IROS입력주소", "IROS전략", "IROS검색범위", "IROS부동산구분", "IROS총건수", "IROS원본수신수", "IROS파싱수", "IROS고유후보수", "IROS페이지수", "IROS유효PageUnit", "IROS완전여부", "IROS파서버전", "IROS매처버전", "IROS캐시해시", "IROS매칭근거"];
   const recToRow = (rec) => [
     ...rec.extra,
     rec.raw,
@@ -4705,10 +5044,15 @@ function AddrRefineTestGui() {
     rec.unitSrc,
     REG_LABEL[rec.regStatus] || rec.regStatus || "",
     rec.failCode,
+    rec.recoveryDisposition,
+    rec.recoveryModule,
     rec.lookupAt,
     rec.note,
     rec.jusoQuery,
     rec.candCount,
+    rec.multiPnuCandidates,
+    rec.datasetPnuEvidence,
+    rec.datasetPnuGroupKind,
     rec.searchLevel,
     rec.inputSgg,
     rec.resultSgg,
@@ -4782,6 +5126,7 @@ function AddrRefineTestGui() {
     const failed = recs.filter((r) =>
       r.status !== "\uD655\uC815" && r.status !== "CONFIRMED" && !reviewStatuses.has(r.status));
     const iros = irosOutcomeStats(rows);
+    const recoveryPlan = buildFailureRecoveryPlan(rows);
     const uniq = new Set(ok.map((r) => r.pk).filter(Boolean)).size;
     const refineRate = recs.length ? ok.length / recs.length : 0;
     const aoa = [
@@ -4792,9 +5137,12 @@ function AddrRefineTestGui() {
       ["확인 필요", review.length],
       ["\uC815\uC81C \uC2E4\uD328", failed.length],
       ["주소 정제율", refineRate],
-      ["주소 정제율 목표", 0.95],
-      ["목표 달성", refineRate >= 0.95 ? "Y" : "N"],
-      ["목표까지 추가 확정 필요", Math.max(0, Math.ceil(recs.length * 0.95) - ok.length)],
+      ["최종 성공률(주소+등기고유번호)", recoveryPlan.finalRate],
+      ["최종 미해결", recoveryPlan.unresolved],
+      ["자동 재처리 대상", recoveryPlan.dispositions.AUTO_RETRY || 0],
+      ["원본 식별불가 실패", recoveryPlan.dispositions.FAIL_UNIDENTIFIABLE || 0],
+      ["근거충돌·복수후보 실패", recoveryPlan.dispositions.FAIL_AMBIGUOUS || 0],
+      ["입력보완 필요", recoveryPlan.dispositions.INPUT_REQUIRED || 0],
       ["\uACE0\uC720 \uBD80\uB3D9\uC0B0(\uC911\uBCF5\uC81C\uAC70 \uD6C4)", uniq],
       ["\uC911\uBCF5 \uC81C\uAC70\uB41C \uAC74\uC218", ok.length - uniq],
       [],
@@ -4809,6 +5157,16 @@ function AddrRefineTestGui() {
       ["기타 실패", iros.otherFailure],
       ["재시도 필요", iros.retryRequired],
       ["미조회", iros.unstarted],
+      [],
+      ["[실패 복구 모듈]"],
+      ["모듈", "단계", "처리판정", "자동재처리", "대상건수"],
+      ...recoveryPlan.modules.map((module) => [
+        `${module.id}@${module.version}`,
+        module.phase,
+        module.disposition,
+        module.automatic ? "Y" : "N",
+        module.rows
+      ]),
       []
     ];
     const aggBy = (field2, label) => {
@@ -4921,6 +5279,7 @@ function AddrRefineTestGui() {
     done: irosOutcome.judged
   };
   const irosProgress = irosProgressStats(rows);
+  const recoveryPlan = useMemo(() => buildFailureRecoveryPlan(rows), [rows]);
   const addressFinalReady = batchDone === rows.length;
   const irosStarted = rows.some((row) => Boolean(row.reg));
   const irosFinalReady = irosStarted && isIrosExportFinal(rows);
@@ -5103,7 +5462,7 @@ function AddrRefineTestGui() {
       }
     },
     label
-  )))), mode === "real" && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, margin: "8px 0 2px", textAlign: "center", lineHeight: 1.6 } }, config.jusoKey || config.kakaoKey ? "\uC800\uC7A5\uB41C \uD0A4\uB85C \uD638\uCD9C\uD569\uB2C8\uB2E4. " : "\uC6B0\uCE21 \uC0C1\uB2E8 \u2699 \uC124\uC815\uC5D0\uC11C API \uD0A4\uB97C \uBA3C\uC800 \uC800\uC7A5\uD574\uC8FC\uC138\uC694. ", "\uBE0C\uB77C\uC6B0\uC800 CORS \uC815\uCC45\uC73C\uB85C \uC9C1\uC811 \uD638\uCD9C\uC774 \uCC28\uB2E8\uB420 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uC6B4\uC601 \uD658\uACBD\uC740 \uC11C\uBC84 \uD504\uB85D\uC2DC \uACBD\uC720\uAC00 \uC815\uC2DD \uACBD\uB85C\uC785\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("div", { style: {
+  )))), mode === "real" && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: C.faint, margin: "8px 0 2px", textAlign: "center", lineHeight: 1.6 } }, config.jusoKey ? "\uC800\uC7A5\uB41C \uD0A4\uB85C \uD638\uCD9C\uD569\uB2C8\uB2E4. " : "\uC6B0\uCE21 \uC0C1\uB2E8 \u2699 \uC124\uC815\uC5D0\uC11C API \uD0A4\uB97C \uBA3C\uC800 \uC800\uC7A5\uD574\uC8FC\uC138\uC694. ", "\uBE0C\uB77C\uC6B0\uC800 CORS \uC815\uCC45\uC73C\uB85C \uC9C1\uC811 \uD638\uCD9C\uC774 \uCC28\uB2E8\uB420 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uC6B4\uC601 \uD658\uACBD\uC740 \uC11C\uBC84 \uD504\uB85D\uC2DC \uACBD\uC720\uAC00 \uC815\uC2DD \uACBD\uB85C\uC785\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("div", { style: {
     display: "flex",
     gap: 4,
     justifyContent: "center",
@@ -5304,7 +5663,7 @@ function AddrRefineTestGui() {
     color: batchWorkflow.tone === "success" ? C.ok : C.warn,
     fontWeight: 600,
     margin: "2px 0 0"
-  } }, batchWorkflow.statusLabel), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), irosStarted && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 고유번호 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 복수 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), irosOutcome.inputRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 입력보완 ${irosOutcome.inputRequired}`), irosOutcome.retryRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 재시도 ${irosOutcome.retryRequired}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 기타실패 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"),
+  } }, batchWorkflow.statusLabel), irosStarted && !batchRegBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontFamily: mono, fontSize: 12.5, color: recoveryPlan.unresolved === 0 ? C.ok : C.warn, margin: "1px 0 0" } }, `최종 성공률 ${(recoveryPlan.finalRate * 100).toFixed(2)}% (${recoveryPlan.finalResolved}/${recoveryPlan.total}) · 자동재처리 ${recoveryPlan.dispositions.AUTO_RETRY || 0} · 실패확정 ${(recoveryPlan.dispositions.FAIL_UNIDENTIFIABLE || 0) + (recoveryPlan.dispositions.FAIL_AMBIGUOUS || 0)}`), batchRegBusy && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("span", { style: { fontFamily: mono, fontSize: 12.5, color: C.cyan } }, `기본 PNU ${batchBaseDone}/${batchBaseTotal} · 대체지번 ${batchAltDone}/${batchAltTotal} · 세대 결과 ${batchUnitDone}/${batchUnitTotal}`), /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8")), irosRunMessage && !batchRegBusy && React.createElement("span", { style: { width: "100%", textAlign: "center", fontSize: 12, color: irosProgress.final ? C.ok : C.warn } }, irosRunMessage), irosStarted && /* @__PURE__ */ React.createElement("span", { style: { display: "inline-flex", gap: 10, alignItems: "center", fontFamily: mono, fontSize: 12.5, flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement("span", { style: { color: C.ok, fontWeight: 700 } }, `\u2713 고유번호 ${regStat.ok}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 복수 ${regStat.multi}`), regStat.unitNo > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 \uC138\uB300\uBBF8\uC77C\uCE58 ${regStat.unitNo}`), irosOutcome.inputRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 입력보완 ${irosOutcome.inputRequired}`), irosOutcome.retryRequired > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: C.warn } }, `\u25C9 재시도 ${irosOutcome.retryRequired}`), /* @__PURE__ */ React.createElement("span", { style: { color: C.err } }, `\u2715 기타실패 ${regStat.fail}`)), batchStop && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC870\uD68C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"),
   ![BATCH_PRIMARY_ACTIONS.DOWNLOAD_ALL, BATCH_PRIMARY_ACTIONS.DOWNLOAD_ADDRESS].includes(batchWorkflow.primaryAction) && /* @__PURE__ */ React.createElement(
     "button",
     {
@@ -5356,11 +5715,15 @@ export {
   buildCurrentPropagationEvidence,
   buildDongsoAnchors,
   buildGroupHints,
+  collectDatasetPnuGroups,
+  datasetLocationKey,
   pipelineEvidenceForRow,
   preprocess,
   propagateAddressGroup,
+  propagateBuildingAnchorGroups,
   propagationRowKey,
   recoverJusoCandidateForNaver,
+  resolveDatasetMultiPnuGroups,
   resolve,
   splitUnitsForBatch,
   validateRegion

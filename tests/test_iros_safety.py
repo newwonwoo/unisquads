@@ -125,6 +125,31 @@ class UnitContractTests(unittest.TestCase):
         self.assertTrue(verified)
         self.assertEqual(1, len(matched))
 
+    def test_explicit_unit_field_can_select_general_building_without_retyping_it(self):
+        candidates = [
+            {
+                "unique_no": "LAND", "real_cls_cd": "토지",
+                "dong": "106", "ho": "1101",
+                "unit_source": {"ho": "buld_no_inner"},
+            },
+            {
+                "unique_no": "DETAIL", "real_cls_cd": "건물",
+                "dong": "106", "ho": "1101",
+                "unit_source": {"ho": "detail_text"},
+            },
+            {
+                "unique_no": "UNIT", "real_cls_cd": "건물",
+                "dong": "106", "ho": "1101",
+                "unit_source": {"ho": "buld_no_inner"},
+            },
+        ]
+        matched, verified, evidence = iros._filter_unit_property_candidates(
+            candidates, "106", "1101"
+        )
+        self.assertTrue(verified)
+        self.assertEqual("EXPLICIT_UNIT_BUILDING", evidence)
+        self.assertEqual(["UNIT"], [candidate["unique_no"] for candidate in matched])
+
 
 class CollectionSafetyTests(unittest.TestCase):
     def setUp(self):
@@ -299,6 +324,49 @@ class CollectionSafetyTests(unittest.TestCase):
             session=FakeSession(),
         )
         self.assertEqual("REG_VALIDATION_FAILED", result.status)
+
+    def test_explicit_inner_room_building_resolves_only_on_exact_unit(self):
+        data = {
+            "dataList": [
+                {
+                    "pin_land": "110219961011390000",
+                    "real_cls_cd": "집합건물",
+                    "buld_no_buld": "101",
+                    "buld_no_room": "1000",
+                    "lot_no": "967",
+                },
+                {
+                    "pin_land": "110219961011400000",
+                    "real_cls_cd": "건물",
+                    "buld_no_buld": "101",
+                    "buld_no_inner": "1001",
+                    "lot_no": "967",
+                },
+                {
+                    "pin_land": "110219961011410000",
+                    "real_cls_cd": "건물",
+                    "buld_no_buld": "101",
+                    "buld_no_inner": "1002",
+                    "lot_no": "967",
+                },
+            ],
+            "paginationInfo": {"totalRecordCount": 3},
+        }
+
+        def collect(*_args, **_kwargs):
+            return data, 200, complete_meta(3), FakeSession()
+
+        iros._collect_search = collect
+        result = iros.resolve_one_api(
+            "서울특별시 서초구 서초동 967",
+            dong="101",
+            ho="1001",
+            strategy="full",
+            session=FakeSession(),
+        )
+        self.assertEqual("RESOLVED", result.status)
+        self.assertEqual("1102-1996-101140", result.unique_no)
+        self.assertEqual("건물", result.candidates[0]["real_cls_cd"])
 
     def test_incomplete_direct_result_falls_back_to_full(self):
         candidate = {

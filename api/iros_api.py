@@ -60,7 +60,7 @@ MAX_COLLECTION_PAGES = 100
 MAX_COLLECTION_SECONDS = 45.0
 COLLECTOR_VERSION = "iros-collector-v4"
 PARSER_VERSION = "iros-parser-v4"
-MATCHER_VERSION = "iros-matcher-v5"
+MATCHER_VERSION = "iros-matcher-v6"
 
 import re as _re_html
 _TAG_RE = _re_html.compile(r"<[^>]+>")
@@ -548,6 +548,33 @@ def _filter_expected_property_class(candidates, expected):
     return matched, bool(matched)
 
 
+def _filter_unit_property_candidates(candidates, dong="", ho=""):
+    """집합건물 우선, 명시적 세대필드가 정확히 맞는 일반 건물만 보조 허용."""
+    strict, verified = _filter_expected_property_class(candidates, "집합건물")
+    if not _unit_key(ho, "ho"):
+        return strict, verified, "REGISTRY_CLASS" if verified else ""
+    explicit_sources = {"buld_no_room", "buld_no_inner"}
+    explicit = [
+        c for c in candidates
+        if _property_class_key(c) == "건물"
+        and str((c.get("unit_source") or {}).get("ho") or "") in explicit_sources
+        and _match_unit(c, dong, ho)
+    ]
+    matched, seen = [], set()
+    for candidate in [*strict, *explicit]:
+        key = candidate.get("unique_no") or json.dumps(
+            candidate, ensure_ascii=False, sort_keys=True
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        matched.append(candidate)
+    evidence = "EXPLICIT_UNIT_BUILDING" if explicit else (
+        "REGISTRY_CLASS" if verified else ""
+    )
+    return matched, bool(matched), evidence
+
+
 def _total_record_count(data):
     """응답 어디에 있든 paginationInfo.totalRecordCount를 정수로 읽는다."""
     if isinstance(data, dict):
@@ -879,7 +906,9 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
         )
         _, want_beonji = _extract_dong_beonji(address)
         direct = [c for c in direct if _match_lot(c, "", want_beonji)] if want_beonji else direct
-        direct, class_verified = _filter_expected_property_class(direct, "집합건물")
+        direct, class_verified, class_evidence = _filter_unit_property_candidates(
+            direct, dong, ho
+        )
         direct = [c for c in direct if _match_unit(c, dong, ho)]
         current = [c for c in direct if "폐쇄" not in str(c.get("state", ""))]
         if current:
@@ -894,7 +923,10 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
             c = direct[0]
             result = ResolveResult(
                 address, "RESOLVED", unique_no=c["unique_no"],
-                candidates=direct, message="직접검색 정확일치"
+                candidates=direct,
+                message=("직접검색 정확일치"
+                         if class_evidence == "REGISTRY_CLASS"
+                         else "직접검색 정확일치(건물 세대필드)"),
             )
             return _attach_collection(result, direct, direct_meta, "DIRECT_SEARCH")
         if strategy == "direct" and direct_meta.get("complete") and direct:
@@ -1020,7 +1052,9 @@ def resolve_one_api(address: str, session: Optional[requests.Session] = None,
         )
 
     if (dong or ho) and cands:
-        cands, class_verified = _filter_expected_property_class(cands, "집합건물")
+        cands, class_verified, class_evidence = _filter_unit_property_candidates(
+            cands, dong, ho
+        )
         if not class_verified:
             return _attach_collection(
                 ResolveResult(

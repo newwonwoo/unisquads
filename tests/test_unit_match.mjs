@@ -10,10 +10,13 @@ import {
   candidateMatchesUnit,
   candidateUnitVariants,
   filterExpectedPropertyClass,
+  filterUnitPropertyCandidates,
   propertyClassKey,
   rawUnitRecoverySignature,
   rawUnitRecoveryVariants,
   selectUniqueRawUnitCandidate,
+  summarizeCandidatePropertyClasses,
+  targetPropertyClass,
   unitKey
 } from "../public/unit-match.mjs";
 
@@ -43,6 +46,69 @@ test("property class filtering is conservative", () => {
   const unknown = filterExpectedPropertyClass([{ gubun: "" }], "집합건물");
   assert.equal(unknown.verified, false);
   assert.deepEqual(unknown.candidates, []);
+});
+
+test("unit-bearing general building is allowed only by an explicit IROS unit field", () => {
+  const candidates = [
+    { unique_no: "STRICT", real_cls_cd: "집합건물", dong: "106", ho: "1102",
+      unit_source: { ho: "buld_no_room" } },
+    { unique_no: "LAND", real_cls_cd: "토지", ho: "1101",
+      unit_source: { ho: "buld_no_inner" } },
+    { unique_no: "DETAIL", real_cls_cd: "건물", dong: "106", ho: "1101",
+      unit_source: { ho: "detail_text" } },
+    { unique_no: "UNIT", real_cls_cd: "건물", dong: "106", ho: "1101",
+      unit_source: { ho: "buld_no_inner" } },
+    { unique_no: "OTHER", real_cls_cd: "건물", dong: "106", ho: "1102",
+      unit_source: { ho: "buld_no_inner" } }
+  ];
+  const result = filterUnitPropertyCandidates(candidates, "106", "1101");
+  assert.equal(result.verified, true);
+  assert.equal(result.evidence, "EXPLICIT_UNIT_BUILDING");
+  assert.deepEqual(result.candidates.map((candidate) => candidate.unique_no), ["STRICT", "UNIT"]);
+  assert.deepEqual(
+    result.candidates
+      .filter((candidate) => candidateMatchesUnit(candidate, "106", "1101"))
+      .map((candidate) => candidate.unique_no),
+    ["UNIT"]
+  );
+  assert.equal(
+    filterUnitPropertyCandidates(
+      candidates.filter((candidate) => candidate.unique_no !== "STRICT"),
+      "106",
+      ""
+    ).verified,
+    false
+  );
+});
+
+test("raw recovery variants may admit only an explicit unit-bearing building", () => {
+  const candidates = [
+    { unique_no: "RAW", real_cls_cd: "건물", dong: "501", ho: "101",
+      unit_source: { ho: "buld_no_inner" } },
+    { unique_no: "DETAIL", real_cls_cd: "건물", dong: "501", ho: "101",
+      unit_source: { ho: "detail_text" } },
+    { unique_no: "LAND", real_cls_cd: "토지", dong: "501", ho: "101",
+      unit_source: { ho: "buld_no_inner" } }
+  ];
+  const result = filterUnitPropertyCandidates(
+    candidates,
+    "",
+    "101",
+    [{ dong: "501", ho: "101", source: "raw_dong_room" }]
+  );
+  assert.equal(result.evidence, "EXPLICIT_UNIT_BUILDING");
+  assert.deepEqual(result.candidates.map((candidate) => candidate.unique_no), ["RAW"]);
+});
+
+test("export target class and raw IROS classes stay separate", () => {
+  assert.equal(targetPropertyClass({ isJip: false, unit: { ho: "1101" } }), "집합건물");
+  assert.equal(targetPropertyClass({ isJip: false, unit: {} }), "");
+  assert.equal(
+    summarizeCandidatePropertyClasses([
+      { real_cls_cd: "토지" }, { real_cls_cd: "건물" }, { real_cls_cd: "집합건물" }
+    ]),
+    "집합건물|건물|토지"
+  );
 });
 
 test("composite IROS dong and room prefixes are normalized safely", () => {

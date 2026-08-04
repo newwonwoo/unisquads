@@ -1,6 +1,6 @@
 import { extractExplicitLotRefs } from "./address-multilot-rules.mjs";
 
-export const MATCHER_VERSION = "iros-matcher-v8";
+export const MATCHER_VERSION = "iros-matcher-v10";
 
 export const IROS_MODULE_VERSIONS = Object.freeze({
   IROS_CANDIDATE_NORMALIZE: "2",
@@ -9,7 +9,8 @@ export const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_HO_BUILDING: "1",
   R_IROS_BUILDING_DISAMBIG: "1",
   R_IROS_RAW_UNIT: "1",
-  R_IROS_UNIT_PROFILE: "2"
+  R_IROS_UNIT_PROFILE: "2",
+  R_IROS_UNIT_BEARING_BUILDING: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -268,4 +269,59 @@ export function filterExpectedPropertyClass(candidates, expected) {
   if (!expected) return { candidates: [...source], verified: true };
   const matched = source.filter((candidate) => propertyClassKey(candidate) === expected);
   return { candidates: matched, verified: matched.length > 0 };
+}
+
+// IROS 실측상 전유부가 real_cls_cd="건물"로 오면서 호가 buld_no_inner에
+// 명시되는 경우가 있다. 원본 구분을 집합건물로 바꾸지 않고, 완전수집된 동일
+// 지번 안에서 전용 필드의 호가 입력 동·호와 정확히 맞는 후보만 보조 허용한다.
+// 토지·구분미상·상세문구 추출값은 이 경로에서 절대 허용하지 않는다.
+export function filterUnitPropertyCandidates(
+  candidates,
+  wantedDong = "",
+  wantedHo = "",
+  recoveryUnits = []
+) {
+  const source = Array.isArray(candidates) ? candidates : [];
+  const strict = filterExpectedPropertyClass(source, "집합건물");
+  const ho = unitKey(wantedHo, "ho");
+  const explicitUnits = [
+    ...(ho ? [{ dong: wantedDong, ho: wantedHo }] : []),
+    ...(Array.isArray(recoveryUnits) ? recoveryUnits : [])
+  ].filter((unit) => unitKey(unit?.ho, "ho"));
+  if (!explicitUnits.length) {
+    return { ...strict, evidence: strict.verified ? "REGISTRY_CLASS" : "" };
+  }
+  const explicitSources = new Set(["buld_no_room", "buld_no_inner"]);
+  const explicit = source.filter((candidate) =>
+    propertyClassKey(candidate) === "건물" &&
+    explicitSources.has(String(candidate?.unit_source?.ho || "")) &&
+    explicitUnits.some((unit) => candidateMatchesUnit(candidate, unit.dong, unit.ho))
+  );
+  const seen = new Set();
+  const matched = [...strict.candidates, ...explicit].filter((candidate) => {
+    const key = String(candidate?.unique_no || JSON.stringify(candidate));
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return {
+    candidates: matched,
+    verified: matched.length > 0,
+    evidence: explicit.length ? "EXPLICIT_UNIT_BUILDING" :
+      (strict.verified ? "REGISTRY_CLASS" : "")
+  };
+}
+
+export function targetPropertyClass(result) {
+  if (result?.isJip || unitKey(result?.unit?.ho, "ho")) return "집합건물";
+  return "";
+}
+
+export function summarizeCandidatePropertyClasses(candidates) {
+  const found = new Set(
+    (Array.isArray(candidates) ? candidates : [])
+      .map(propertyClassKey)
+      .filter(Boolean)
+  );
+  return ["집합건물", "건물", "토지"].filter((value) => found.has(value)).join("|");
 }

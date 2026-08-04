@@ -1,6 +1,14 @@
 import { extractBuildingRangeIntent } from "./address-subbuilding-rules.mjs";
+import { NAVER_PNU_RECOVERY_VERSION } from "./address-recovery-rules.mjs";
+import {
+  CONFIRMED_UNIT_RECOVERY_VERSION,
+  recoverConfirmedUnit
+} from "./confirmed-unit-recovery.mjs";
+import { DATASET_PNU_EVIDENCE_VERSION } from "./dataset-pnu-evidence.mjs";
+import { AMBIGUOUS_PNU_RECOVERY_VERSION } from "./ambiguous-pnu-recovery.mjs";
+import { ADDRESS_REQUERY_EVIDENCE_VERSION } from "./address-requery-evidence.mjs";
 
-export const PIPELINE_VERSION = "addr-pipeline-v7";
+export const PIPELINE_VERSION = "addr-pipeline-v8";
 
 export const MODULE_VERSIONS = Object.freeze({
   COMMON_NORMALIZE: "4",
@@ -18,7 +26,12 @@ export const MODULE_VERSIONS = Object.freeze({
   BUILDING_CANDIDATE_INTENT: "1",
   EXPLICIT_PARCEL_INTENT: "2",
   COMMERCIAL_RANGE_UNIT: "1",
-  NAVER_ANCILLARY_PARENT: "1"
+  CONFIRMED_UNIT_EVIDENCE: CONFIRMED_UNIT_RECOVERY_VERSION,
+  DATASET_MULTI_PNU: DATASET_PNU_EVIDENCE_VERSION,
+  PNU_IROS_DISAMBIG: AMBIGUOUS_PNU_RECOVERY_VERSION,
+  ADDRESS_REQUERY_EVIDENCE: ADDRESS_REQUERY_EVIDENCE_VERSION,
+  NAVER_ANCILLARY_PARENT: "1",
+  NAVER_PNU_EXACT_LOT: NAVER_PNU_RECOVERY_VERSION
 });
 
 const RE_EXPLICIT_LOT = /[가-힣]{1,12}(?:동|리|읍|면|가)\s+(?:산\s*)?\d{1,4}(?:-\d{1,4})?(?=\s|$)/;
@@ -64,9 +77,23 @@ function selectedModuleVersions(appliedModules) {
 }
 
 export function dependencyFingerprint(row, upstreamEvidence = {}, appliedModules = null) {
+  return dependencyFingerprintForContract(
+    row,
+    upstreamEvidence,
+    PIPELINE_VERSION,
+    selectedModuleVersions(appliedModules)
+  );
+}
+
+function dependencyFingerprintForContract(
+  row,
+  upstreamEvidence,
+  pipelineVersion,
+  moduleVersions
+) {
   return fingerprintValue({
-    pipelineVersion: PIPELINE_VERSION,
-    moduleVersions: selectedModuleVersions(appliedModules),
+    pipelineVersion,
+    moduleVersions,
     input: {
       raw: String(row?.raw || ""),
       zip: String(row?.zip || ""),
@@ -103,7 +130,20 @@ export function appliedModulesFor(result, upstreamEvidence = {}) {
   if (result?.multiLotRecovery || result?.source === "juso-land-multilot") modules.push("MULTILOT_RECOVERY");
   if (result?.ownerUnitRecovery || result?.source === "owner-unit-recovery") modules.push("OWNER_UNIT_RECOVERY");
   if (result?.commercialRangeUnitRecovery) modules.push("COMMERCIAL_RANGE_UNIT");
+  if (result?.unitRecovery?.version === CONFIRMED_UNIT_RECOVERY_VERSION) {
+    modules.push("CONFIRMED_UNIT_EVIDENCE");
+  }
+  if (result?.datasetPnuEvidence?.version === DATASET_PNU_EVIDENCE_VERSION) {
+    modules.push("DATASET_MULTI_PNU");
+  }
+  if (result?.pnuIrosEvidence?.version === AMBIGUOUS_PNU_RECOVERY_VERSION) {
+    modules.push("PNU_IROS_DISAMBIG");
+  }
+  if (result?.addressRecoveryEvidence?.version === ADDRESS_REQUERY_EVIDENCE_VERSION) {
+    modules.push("ADDRESS_REQUERY_EVIDENCE");
+  }
   if (result?.naverAncillaryPolicyVersion) modules.push("NAVER_ANCILLARY_PARENT");
+  if (result?.naverPnuRecoveryVersion) modules.push("NAVER_PNU_EXACT_LOT");
   return [...new Set(modules)].sort();
 }
 
@@ -123,6 +163,17 @@ function confirmedTrailingBuildingHo(row, result) {
 }
 
 function applyConfirmedUnitRecovery(row, result) {
+  const structured = recoverConfirmedUnit(row?.raw || "", result);
+  if (structured) {
+    return {
+      ...(result || {}),
+      unit: {
+        ...(result?.unit || {}),
+        ...structured.unit
+      },
+      unitRecovery: structured
+    };
+  }
   const recovered = confirmedTrailingBuildingHo(row, result);
   if (!recovered) return result || {};
   return {
@@ -189,6 +240,11 @@ function isLegacyNaverZeroResult(result) {
     /\[네이버:0건\]/.test(evidence);
 }
 
+function isLegacyNaverPnuFailure(result) {
+  return String(result?.status || "") === "NAVER_CONFIRMED_PNU_FAILED" &&
+    result?.naverPnuRecoveryVersion !== MODULE_VERSIONS.NAVER_PNU_EXACT_LOT;
+}
+
 export function attachPipelineMetadata(row, result, upstreamEvidence = {}) {
   // 아파트명 뒤 동 범위와 상가 층·호가 함께 있으면 범위는 동으로 쓰지 않고,
   // 실제 전유부 식별값을 층·호로 분리하여 보존한다.
@@ -209,6 +265,27 @@ export function attachPipelineMetadata(row, result, upstreamEvidence = {}) {
   return enriched;
 }
 
+export function isProtectedAddressSuccess(row, upstreamEvidence = {}) {
+  const result = row?.result;
+  if (!result || !["CONFIRMED", "확정"].includes(result.status) || !result.pnu) {
+    return false;
+  }
+  // 현재 포맷의 결과가 저장 후 변조된 경우에는 잠그지 않는다. 구버전 결과처럼
+  // 지문 자체가 없는 성공건은 기존 PNU를 보존한다.
+  if (result.resultFingerprint && result.resultFingerprint !== resultFingerprint(result)) {
+    return false;
+  }
+  if (result.dependencyFingerprint && result.pipelineVersion && result.moduleVersions) {
+    if (result.dependencyFingerprint !== dependencyFingerprintForContract(
+      row,
+      upstreamEvidence,
+      result.pipelineVersion,
+      result.moduleVersions
+    )) return false;
+  }
+  return true;
+}
+
 export function isReusableResult(row, upstreamEvidence = {}) {
   const result = row?.result;
   if (!result) return false;
@@ -217,8 +294,14 @@ export function isReusableResult(row, upstreamEvidence = {}) {
   // 신규 규칙이 실제로 적용되는 엄격한 패턴만 기존 주소 결과를 무효화한다.
   // 전체 NAVER_RECOVERY 버전을 올리지 않고, 기존 L3 네이버 0건만 1회 재처리한다.
   if (isLegacyNaverZeroResult(result)) return false;
+  // 네이버가 주소는 찾았지만 PNU 복구에 실패한 구결과만 정확 지번/도로명
+  // 코어 쿼리로 한 번 재시도한다. 성공 PNU와 다른 실패유형은 영향받지 않는다.
+  if (isLegacyNaverPnuFailure(result)) return false;
   // 전체 UNIT_PARSE 버전을 올리지 않아 나머지 정제 결과는 그대로 재사용한다.
   if (extractBuildingRangeIntent(row?.raw || "") && !result.commercialRangeUnitRecovery) return false;
+  // 확정 PNU는 버전 변경만으로 재조회·덮어쓰기하지 않는다. 성공값을 바꿔야 하는
+  // 규칙은 위와 같이 대상 패턴을 먼저 명시해야만 이 잠금을 통과할 수 있다.
+  if (isProtectedAddressSuccess(row, upstreamEvidence)) return true;
   if (result.pipelineVersion !== PIPELINE_VERSION) return false;
   if (!Array.isArray(result.appliedModules) || !result.appliedModules.length) return false;
   if (result.dependencyFingerprint !== dependencyFingerprint(row, upstreamEvidence, result.appliedModules)) return false;

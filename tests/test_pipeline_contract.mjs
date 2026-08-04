@@ -6,6 +6,7 @@ import {
   cloneResult,
   dependencyFingerprint,
   fingerprintValue,
+  isProtectedAddressSuccess,
   isReusableResult,
   resultFingerprint
 } from "../public/pipeline-contract.mjs";
@@ -31,6 +32,30 @@ test("same inputs create the same pipeline fingerprints", () => {
   assert.equal(a.dependencyFingerprint, b.dependencyFingerprint);
   assert.equal(a.resultFingerprint, b.resultFingerprint);
   assert.equal(isReusableResult({ ...row, result: a }, { groupHints: "UNIT" }), true);
+});
+
+test("confirmed PNU stays locked across a pipeline-only version change", () => {
+  const legacy = {
+    ...result,
+    pipelineVersion: "addr-pipeline-v6"
+  };
+  assert.equal(isProtectedAddressSuccess({ ...row, result: legacy }), true);
+  assert.equal(isReusableResult({ ...row, result: legacy }, { groupHints: "CHANGED" }), true);
+});
+
+test("a targeted commercial-range repair can bypass the confirmed PNU lock", () => {
+  const targeted = {
+    ...result,
+    pipelineVersion: "addr-pipeline-v6",
+    unit: { dong: "", ho: "3" }
+  };
+  const targetedRow = {
+    ...row,
+    raw: "경기 오산시 원동 태원아파트 101-107 상가 지하1층 3호",
+    result: targeted
+  };
+  assert.equal(isProtectedAddressSuccess(targetedRow), true);
+  assert.equal(isReusableResult(targetedRow), false);
 });
 
 test("changed input or upstream evidence invalidates only that result", () => {
@@ -70,8 +95,28 @@ test("explicit old-address evidence is recorded as an applied module", () => {
 });
 
 test("only the changed parsing contracts expose their new module versions", () => {
-  assert.equal(MODULE_VERSIONS.UNIT_PARSE, "6");
-  assert.equal(MODULE_VERSIONS.REGION_VALIDATE, "4");
-  assert.equal(MODULE_VERSIONS.JUSO_LOOKUP, "4");
-  assert.equal(MODULE_VERSIONS.NAVER_RECOVERY, "4");
+  assert.equal(MODULE_VERSIONS.UNIT_PARSE, "9");
+  assert.equal(MODULE_VERSIONS.REGION_VALIDATE, "6");
+  assert.equal(MODULE_VERSIONS.JUSO_LOOKUP, "9");
+  assert.equal(MODULE_VERSIONS.NAVER_RECOVERY, "5");
+  assert.equal(MODULE_VERSIONS.NAVER_PNU_EXACT_LOT, "1");
+});
+
+test("only legacy Naver PNU failures rerun the exact-address recovery once", () => {
+  const failedRow = {
+    ...row,
+    result: {
+      status: "NAVER_CONFIRMED_PNU_FAILED",
+      searchLevel: "L3",
+      naverAddr: "전라남도 순천시 용당동 431 용당피오레"
+    }
+  };
+  assert.equal(isReusableResult(failedRow), false);
+
+  const attempted = attachPipelineMetadata(failedRow, {
+    ...failedRow.result,
+    naverPnuRecoveryVersion: "1"
+  });
+  assert.equal(attempted.appliedModules.includes("NAVER_PNU_EXACT_LOT"), true);
+  assert.equal(isReusableResult({ ...failedRow, result: attempted }), true);
 });

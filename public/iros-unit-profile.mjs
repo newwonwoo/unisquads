@@ -26,6 +26,7 @@ export function extractUnitIntent(rawAddress, currentUnit = {}) {
   const dong = dongAliasKey(currentUnit?.dong);
   const ho = unitKey(currentUnit?.ho, "ho");
   const commercialUnit = extractCommercialFloorRoomIntent(raw);
+  const buildingRange = extractBuildingRangeIntent(raw);
   const intent = {
     dong,
     ho,
@@ -33,7 +34,7 @@ export function extractUnitIntent(rawAddress, currentUnit = {}) {
     room: commercialUnit?.room || "",
     recoveredDong: "",
     subBuilding: extractSubBuildingIntent(raw),
-    buildingRange: extractBuildingRangeIntent(raw),
+    ...(buildingRange ? { buildingRange } : {}),
     evidence: []
   };
   if (commercialUnit) intent.evidence.push(commercialUnit.evidence);

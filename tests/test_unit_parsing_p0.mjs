@@ -24,15 +24,15 @@ import {
   withIrosVersions
 } from "../public/iros-run-contract.mjs";
 
-test("층과 호를 실제 호수로 조합한다", () => {
+test("주소 파서는 층과 호의 원문 의미를 분리 보존한다", () => {
   assert.deepEqual(parseCompactAlphaUnit("서울 강남구 역삼동 1 101동 3층1호"), {
-    dong: "101", floor: "3", ho: "301", matched: " 101동 3층1호", index: 12, evidence: "dong_floor_ho_composed"
+    dong: "101", floor: "3", ho: "1", matched: " 101동 3층1호", index: 12
   });
-  assert.equal(parseCompactAlphaUnit("101동 5층12호").ho, "512");
-  assert.equal(parseCompactAlphaUnit("101동 11층3호").ho, "1103");
+  assert.equal(parseCompactAlphaUnit("101동 5층12호").ho, "12");
+  assert.equal(parseCompactAlphaUnit("101동 11층3호").ho, "3");
 });
 
-test("이미 완성된 호수는 다시 조합하지 않는다", () => {
+test("완성형 호수도 층 정보와 함께 원문 그대로 보존한다", () => {
   assert.equal(parseCompactAlphaUnit("101동 11층1103호").ho, "1103");
   assert.equal(parseCompactAlphaUnit("3층301호").ho, "301");
 });
