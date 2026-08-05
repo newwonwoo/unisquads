@@ -2,6 +2,8 @@ export const TEST_LOG_SCHEMA_VERSION = "browser-test-log-v2";
 export const TEST_LOG_STORAGE_KEY = "addr-refine:test-runs:v1";
 export const TEST_LOG_ACTIVE_KEY = "addr-refine:test-runs:active:v1";
 export const TEST_LOG_LIMIT = 30;
+export const TEST_LOG_ROW_BUDGET = 50_000;
+export const TEST_LOG_CHANGED_ROW_LIMIT = 500;
 
 const FINAL_IROS_STATUSES = new Set([
   "RESOLVED",
@@ -414,8 +416,36 @@ export function compareTestRuns(previousRun, currentRun) {
     compared_at: new Date().toISOString(),
     source_fingerprint: currentRun?.summary?.source_fingerprint || "",
     metrics,
-    changed_rows: changedRows
+    changed_row_count: changedRows.length,
+    changed_rows: changedRows.slice(0, TEST_LOG_CHANGED_ROW_LIMIT)
   };
+}
+
+export function compactBrowserTestRuns(logs, rowBudget = TEST_LOG_ROW_BUDGET) {
+  const source = Array.isArray(logs) ? logs : [];
+  let remaining = Math.max(0, number(rowBudget));
+  return source.map((run) => {
+    const outcomes = Array.isArray(run?.row_outcomes) ? run.row_outcomes : [];
+    const keep = outcomes.length <= remaining;
+    if (keep) remaining -= outcomes.length;
+    const regression = run?.regression && typeof run.regression === "object"
+      ? {
+          ...run.regression,
+          changed_row_count: number(
+            run.regression.changed_row_count ?? run.regression.changed_rows?.length
+          ),
+          changed_rows: Array.isArray(run.regression.changed_rows)
+            ? run.regression.changed_rows.slice(0, TEST_LOG_CHANGED_ROW_LIMIT)
+            : []
+        }
+      : run?.regression;
+    return {
+      ...run,
+      row_outcomes: keep ? outcomes : [],
+      row_outcomes_archived: keep ? false : outcomes.length,
+      regression
+    };
+  });
 }
 
 function attachRegression(logs, run) {
@@ -450,7 +480,9 @@ export function upsertBrowserTestRun(logs, run, limit = TEST_LOG_LIMIT) {
   const next = [enrichedRun, ...source.filter((item) => item?.id !== enrichedRun?.id)]
     .filter(Boolean)
     .sort((a, b) => text(b.updated_at).localeCompare(text(a.updated_at)));
-  return next.slice(0, Math.max(1, number(limit) || TEST_LOG_LIMIT));
+  return compactBrowserTestRuns(
+    next.slice(0, Math.max(1, number(limit) || TEST_LOG_LIMIT))
+  );
 }
 
 function csvCell(value) {

@@ -41,7 +41,11 @@ function loadSafety() {
     Promise
   };
   vm.runInNewContext(fs.readFileSync(new URL("../public/ui-safety.js", import.meta.url), "utf8"), context);
-  return { React, reloads: () => reloads };
+  return {
+    React,
+    AppErrorBoundary: context.window.__ADDR_APP_ERROR_BOUNDARY__,
+    reloads: () => reloads
+  };
 }
 
 test("malformed legacy log values are converted to render-safe primitives", () => {
@@ -103,4 +107,15 @@ test("error-boundary reset clears the latched error and reloads", async () => {
   assert.equal(instance.state.error, null);
   assert.equal(instance.state.clearing, false);
   assert.equal(reloads(), 1);
+});
+
+test("app-level render errors show a recovery screen instead of a black root", () => {
+  const { AppErrorBoundary } = loadSafety();
+  const instance = new AppErrorBoundary({ children: null });
+  instance.state = { error: new Error("render exploded") };
+  const rendered = instance.render();
+
+  assert.equal(rendered.type, "main");
+  assert.match(JSON.stringify(rendered), /화면 표시를 복구해야 합니다/);
+  assert.match(JSON.stringify(rendered), /진행상황 다시 불러오기/);
 });

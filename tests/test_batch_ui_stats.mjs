@@ -47,8 +47,9 @@ test("all result statuses belong to exactly one display bucket", () => {
 test("functional status counts stay separate from display summary", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   for (const marker of [
-    "const stat = rows.reduce",
-    "const refineSummary = summarizeRefineStatuses(rows);",
+    "const batchDerived = useMemo",
+    "const statusCounts = rows.reduce",
+    "refineSummary: summarizeRefineStatuses(rows)",
     "정제대상 원문",
     "실제 정제 호출",
     "중복 결과 재사용",

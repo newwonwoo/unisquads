@@ -60,6 +60,11 @@ import {
   deriveBatchWorkflowState
 } from "./batch-workflow-state.mjs";
 import {
+  browserTabHidden,
+  shouldFlushBatchUi,
+  shouldPersistBatchCheckpoint
+} from "./batch-runtime-guard.mjs";
+import {
   buildFailureRecoveryPlan,
   classifyFailureModule
 } from "./failure-recovery-plan.mjs";
@@ -68,6 +73,7 @@ import {
   TEST_LOG_ACTIVE_KEY,
   TEST_LOG_STORAGE_KEY,
   browserTestLogsToCsv,
+  compactBrowserTestRuns,
   createBrowserTestRun,
   updateBrowserTestRun,
   upsertBrowserTestRun
@@ -2843,7 +2849,22 @@ const REG_LABEL = {
   REG_TIMEOUT: "\uC2DC\uAC04\uCD08\uACFC",
   REG_ERROR: "\uC870\uD68C\uC624\uB958"
 };
-function CadastralBackdrop() {
+function CadastralBackdrop({ staticMode = false }) {
+  if (staticMode) {
+    return /* @__PURE__ */ React.createElement("div", {
+      "aria-hidden": "true",
+      "data-backdrop-mode": "static",
+      style: {
+        position: "fixed",
+        inset: 0,
+        overflow: "hidden",
+        pointerEvents: "none",
+        background: `radial-gradient(1000px 700px at 12% -8%, ${C.indigo}38, transparent 62%),
+          radial-gradient(900px 650px at 96% 12%, ${C.cyan}2b, transparent 58%),
+          linear-gradient(168deg, #101528 0%, #0B0E14 45%, #0D1320 100%)`
+      }
+    });
+  }
   const digitCols = [
     { left: "3%", d: "1168010100", dur: 52 },
     { left: "94%", d: "1147010300", dur: 57 }
@@ -3386,6 +3407,8 @@ function AddrRefineTestGui() {
     const savedRows = Array.isArray(saved) ? saved : saved?.rows;
     if (savedRows) {
       const resumedRows = markStaleIrosRows(savedRows);
+      setBatchVisualSafeMode(true);
+      liveBatchRowsRef.current = resumedRows;
       setRows(resumedRows);
       // extraHeaders(부동산번호 등 원본 컬럼명)도 함께 복원.
       if (!Array.isArray(saved) && Array.isArray(saved.extraHeaders)) {
@@ -3440,6 +3463,7 @@ function AddrRefineTestGui() {
   const [autoStopMsg, setAutoStopMsg] = useState("");
   const [fileErr, setFileErr] = useState("");
   const [fileParsing, setFileParsing] = useState(false);
+  const [batchVisualSafeMode, setBatchVisualSafeMode] = useState(false);
   const [uploadStats, setUploadStats] = useState(null);
   const [sourceFileMeta, setSourceFileMeta] = useState(null);
   const [extraHeaders, setExtraHeaders] = useState([]);
@@ -3459,12 +3483,53 @@ function AddrRefineTestGui() {
   const [batchUnitDone, setBatchUnitDone] = useState(0);
   const [batchUnitTotal, setBatchUnitTotal] = useState(0);
   const [irosRunMessage, setIrosRunMessage] = useState("");
+  const liveBatchRowsRef = useRef([]);
+  const addressUiProgressRef = useRef({ done: 0, groupDone: 0 });
+  const irosUiProgressRef = useRef({
+    done: 0, total: 0, baseDone: 0, baseTotal: 0, altDone: 0, altTotal: 0
+  });
+  const batchActivityRef = useRef({ address: false, iros: false });
+  const pendingBatchUiSyncRef = useRef(false);
   const [savedProgress, setSavedProgress] = useState(null);
   const [testLogs, setTestLogs] = useState([]);
   const [testLogOpen, setTestLogOpen] = useState(false);
   const testLogsRef = useRef([]);
   const activeTestRunRef = useRef(null);
   const [irosHealth, setIrosHealth] = useState({ bad: 0, total: 0, lastCode: "" });
+  useEffect(() => {
+    batchActivityRef.current = { address: batchBusy, iros: batchRegBusy };
+  }, [batchBusy, batchRegBusy]);
+  useEffect(() => {
+    const syncVisibleBatch = () => {
+      if (browserTabHidden(document)) return;
+      const activity = batchActivityRef.current;
+      const latestRows = liveBatchRowsRef.current;
+      const shouldSync = activity.address || activity.iros || pendingBatchUiSyncRef.current;
+      if (shouldSync && Array.isArray(latestRows) && latestRows.length) {
+        setRows([...latestRows]);
+      }
+      if (shouldSync) {
+        setBatchDone(addressUiProgressRef.current.done);
+        setBatchGroupDone(addressUiProgressRef.current.groupDone);
+        const progress = irosUiProgressRef.current;
+        setBatchRegDone(progress.done);
+        setBatchTotal(progress.total);
+        setBatchUnitDone(progress.done);
+        setBatchUnitTotal(progress.total);
+        setBatchBaseDone(progress.baseDone);
+        setBatchBaseTotal(progress.baseTotal);
+        setBatchAltDone(progress.altDone);
+        setBatchAltTotal(progress.altTotal);
+        pendingBatchUiSyncRef.current = false;
+      }
+    };
+    document.addEventListener("visibilitychange", syncVisibleBatch);
+    window.addEventListener("pageshow", syncVisibleBatch);
+    return () => {
+      document.removeEventListener("visibilitychange", syncVisibleBatch);
+      window.removeEventListener("pageshow", syncVisibleBatch);
+    };
+  }, []);
   const recordRegHealth = useCallback((status) => {
     const SYSTEM_BAD = [
       "REG_PARSE_ERROR", "REG_PARSE_INCOMPLETE", "REG_HTTP_ERROR",
@@ -3528,7 +3593,8 @@ function AddrRefineTestGui() {
   useEffect(() => {
     (async () => {
       const stored = await idbGet(TEST_LOG_STORAGE_KEY);
-      let logs = Array.isArray(stored) ? stored : [];
+      let logs = compactBrowserTestRuns(Array.isArray(stored) ? stored : []);
+      if (Array.isArray(stored)) await idbSet(TEST_LOG_STORAGE_KEY, logs);
       const activeId = await idbGet(TEST_LOG_ACTIVE_KEY);
       activeTestRunRef.current = logs.find((item) => item?.id === activeId) || null;
 
@@ -3668,6 +3734,8 @@ function AddrRefineTestGui() {
       result: row.result ? cloneResult(row.result) : null,
       reg: row.reg ? cloneResult(row.reg) : row.reg
     }));
+    setBatchVisualSafeMode(true);
+    liveBatchRowsRef.current = next;
     await recordTestRun("iros_running", next, {
       progress: { iros_done: irosProgressStats(next).done, iros_total: irosProgressStats(next).total }
     });
@@ -3736,6 +3804,7 @@ function AddrRefineTestGui() {
     }
 
     setBatchRegBusy(true);
+    batchActivityRef.current = { ...batchActivityRef.current, iros: true };
     setBatchStop(false);
     batchStopRef.current = false;
     setBatchBaseDone(0);
@@ -3754,17 +3823,49 @@ function AddrRefineTestGui() {
       interrupted: false,
       reason: ""
     };
-    const checkpoint = async (patch = {}) => {
+    let lastUiFlushAt = 0;
+    let lastCheckpointAt = 0;
+    const checkpoint = async (patch = {}, { force = false } = {}) => {
       Object.assign(runState, patch);
+      liveBatchRowsRef.current = next;
+      const now = Date.now();
+      const hidden = browserTabHidden(document);
+      const flushUi = shouldFlushBatchUi({ hidden, now, lastFlushAt: lastUiFlushAt, force });
+      const persist = shouldPersistBatchCheckpoint({ now, lastCheckpointAt, force });
+      if (!flushUi && !persist) {
+        if (hidden) pendingBatchUiSyncRef.current = true;
+        return;
+      }
       const progress = irosProgressStats(next);
       runState.unitDone = progress.done;
       runState.unitTotal = progress.total;
-      setBatchUnitDone(progress.done);
-      setBatchUnitTotal(progress.total);
-      setBatchRegDone(progress.done);
-      setBatchTotal(progress.total);
-      setRows([...next]);
-      await idbSet(BATCH_KEY, buildIrosSnapshot(next, extraHeaders, runState));
+      irosUiProgressRef.current = {
+        done: progress.done,
+        total: progress.total,
+        baseDone: runState.baseDone,
+        baseTotal: runState.baseTotal,
+        altDone: runState.alternateDone,
+        altTotal: runState.alternateTotal
+      };
+      if (flushUi) {
+        setBatchUnitDone(progress.done);
+        setBatchUnitTotal(progress.total);
+        setBatchRegDone(progress.done);
+        setBatchTotal(progress.total);
+        setBatchBaseDone(runState.baseDone);
+        setBatchBaseTotal(runState.baseTotal);
+        setBatchAltDone(runState.alternateDone);
+        setBatchAltTotal(runState.alternateTotal);
+        lastUiFlushAt = now;
+      } else if (hidden) {
+        pendingBatchUiSyncRef.current = true;
+      }
+      if (persist) {
+        if (!hidden) setRows([...next]);
+        else pendingBatchUiSyncRef.current = true;
+        await idbSet(BATCH_KEY, buildIrosSnapshot(next, extraHeaders, runState));
+        lastCheckpointAt = Date.now();
+      }
     };
 
     try {
@@ -4244,7 +4345,6 @@ function AddrRefineTestGui() {
         next[member.idx] = { ...next[member.idx], reg };
       }
       recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
-      setBatchBaseDone(g + 1);
       await checkpoint({ phase: "base", baseDone: g + 1, baseTotal: pnuKeys.length });
       if (!cacheHit && g < pnuKeys.length - 1 && !batchStopRef.current)
         await new Promise((res) => setTimeout(res, 1e3));
@@ -4331,7 +4431,6 @@ function AddrRefineTestGui() {
         addAlternateAttempt(member, alternateAddress, recovered);
       }
       recordRegHealth(collection.status || (collection.complete ? "RESOLVED" : "REG_PARTIAL_RESPONSE"));
-      setBatchAltDone(a + 1);
       await checkpoint({
         phase: "alternate",
         baseDone: pnuKeys.length,
@@ -4451,7 +4550,7 @@ function AddrRefineTestGui() {
       interrupted,
       reason: batchStopRef.current ? "USER_STOP" :
         ((!finalProgress.final || ambiguousPnuRetryRequired > 0) ? "RETRY_REQUIRED" : "")
-    });
+    }, { force: true });
     await recordTestRun(interrupted ? "iros_interrupted" : "complete", next, {
       reason: batchStopRef.current ? "USER_STOP" :
         ((!finalProgress.final || ambiguousPnuRetryRequired > 0) ? "RETRY_REQUIRED" : ""),
@@ -4464,12 +4563,13 @@ function AddrRefineTestGui() {
       const reason = error?.message || String(error);
       setIrosRunMessage(`중단 사유: ${reason}`);
       try {
-        await checkpoint({ phase: "interrupted", interrupted: true, reason });
+        await checkpoint({ phase: "interrupted", interrupted: true, reason }, { force: true });
       } catch {
         // 체크포인트 저장 실패는 원래 오류를 가리지 않는다.
       }
       await recordTestRun("iros_interrupted", next, { reason });
     } finally {
+      batchActivityRef.current = { ...batchActivityRef.current, iros: false };
       setBatchRegBusy(false);
     }
   }, [rows, BRIDGE, config.resolverKey, extraHeaders, recordRegHealth, recordTestRun]);
@@ -4595,6 +4695,7 @@ function AddrRefineTestGui() {
     setFileErr("");
     const file = e.target.files?.[0];
     if (!file) return;
+    setBatchVisualSafeMode(true);
     setFileParsing(true);   // 실측 결과 XLSX.read 자체가 병목(3만행 기준 약 1.3초) — 여기서부터 표시
     await new Promise((res) => setTimeout(res, 0));   // "처리 중" 문구가 실제로 화면에 그려질 시간을 줌
     // (안 그러면 곧바로 XLSX.read가 메인스레드를 막아, 상태 갱신이 화면에
@@ -4724,6 +4825,7 @@ function AddrRefineTestGui() {
       activeTestRunRef.current = testRun;
       await idbSet(TEST_LOG_ACTIVE_KEY, testRun.id);
       await persistTestRun(testRun);
+      liveBatchRowsRef.current = built;
       setRows(built);
       setBatchDone(0);
       await idbDel(BATCH_KEY);
@@ -4736,7 +4838,9 @@ function AddrRefineTestGui() {
     }
   }, [createTestRunForRows, persistTestRun]);
   const runBatch = useCallback(async () => {
+    setBatchVisualSafeMode(true);
     setBatchBusy(true);
+    batchActivityRef.current = { ...batchActivityRef.current, address: true };
     setBatchStop(false);
     setAutoStopMsg("");
     batchStopRef.current = false;
@@ -4746,6 +4850,7 @@ function AddrRefineTestGui() {
       result: row.result ? cloneResult(row.result) : null,
       reg: row.reg ? cloneResult(row.reg) : row.reg
     }));
+    liveBatchRowsRef.current = next;
     await recordTestRun("address_running", next, {
       progress: { address_done: next.filter((row) => row.result).length, address_total: next.length }
     });
@@ -4768,6 +4873,7 @@ function AddrRefineTestGui() {
     });
     const isReusable = (row) => isReusableResult(row, evidenceFor(row));
     let done = next.filter((row) => isReusable(row)).length;
+    addressUiProgressRef.current = { done, groupDone: 0 };
     setBatchDone(done);
     // ── 원문주소 선(先)중복제거 (2026-07-13 추가) ─────────────────────
     // raw 문자열이 완전히 같은 행끼리 그룹화 → 대표 1건만 JUSO/네이버 호출
@@ -4795,6 +4901,8 @@ function AddrRefineTestGui() {
     // 행 하나로는 동호인지 지번인지 모르는 것을 집단으로 확정한다.
     setBatchGroupTotal(groups.size);
     let gDone = 0;
+    let lastUiFlushAt = 0;
+    let lastCheckpointAt = Date.now();
     setBatchGroupDone(0);
     let consecTransient = 0;   // 연속 '일시 오류' 수 — 한도 소진/장애 감지용(PM-01)
     for (const [, idxs] of groups) {
@@ -4830,12 +4938,23 @@ function AddrRefineTestGui() {
         };
       }
       gDone++;
-      setBatchGroupDone(gDone);
       done += idxs.length;
-      setBatchDone(done);
-      if (done % 100 < idxs.length) {            // 100건 경계를 지날 때마다 저장
-        setRows([...next]);
+      liveBatchRowsRef.current = next;
+      addressUiProgressRef.current = { done, groupDone: gDone };
+      const now = Date.now();
+      const hidden = browserTabHidden(document);
+      if (shouldFlushBatchUi({ hidden, now, lastFlushAt: lastUiFlushAt })) {
+        setBatchGroupDone(gDone);
+        setBatchDone(done);
+        lastUiFlushAt = now;
+      } else if (hidden) {
+        pendingBatchUiSyncRef.current = true;
+      }
+      if (shouldPersistBatchCheckpoint({ now, lastCheckpointAt })) {
+        if (!hidden) setRows([...next]);
+        else pendingBatchUiSyncRef.current = true;
         await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
+        lastCheckpointAt = Date.now();
       }
       if (consecTransient >= 20) {
         // 연속 20그룹이 전부 일시오류 = 한도 소진 또는 API 장애 가능성 높음.
@@ -4854,7 +4973,15 @@ function AddrRefineTestGui() {
       propagateBuildingAnchorGroups(next, evidenceFor);
       propagateAddressGroup(next, groupHints, evidenceFor);
     }
-    setRows([...next]);
+    liveBatchRowsRef.current = next;
+    addressUiProgressRef.current = { done, groupDone: gDone };
+    if (!browserTabHidden(document)) {
+      setRows([...next]);
+      setBatchGroupDone(gDone);
+      setBatchDone(done);
+    } else {
+      pendingBatchUiSyncRef.current = true;
+    }
     await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
     // 완료 검증(중단이 아닌 자연 완료일 때만): 모든 행에 결과가 반영됐는지
     if (!batchStopRef.current) {
@@ -4871,6 +4998,7 @@ function AddrRefineTestGui() {
       reason: batchStopRef.current ? (consecTransient >= 20 ? "TRANSIENT_LIMIT" : "USER_STOP") : "",
       progress: { address_done: next.filter((row) => row.result).length, address_total: next.length }
     });
+    batchActivityRef.current = { ...batchActivityRef.current, address: false };
     setBatchBusy(false);
   }, [rows, clients, extraHeaders, recordTestRun]);
   const buildRecords = useCallback(() => {
@@ -5263,14 +5391,30 @@ function AddrRefineTestGui() {
       alert(`엑셀 무결성 검증 실패: ${error?.message || error}\n다운로드를 중단했습니다.`);
     }
   }, [rows, extraHeaders, batchBusy, batchRegBusy, batchDone, buildRecords]);
-  const stat = rows.reduce((acc, r) => {
-    if (r.result) acc[r.result.status] = (acc[r.result.status] || 0) + 1;
-    return acc;
-  }, {});
-  // 화면 합계 전용: 기능 로직용 stat은 그대로 두고 모든 종료상태를 3분류한다.
-  const refineSummary = summarizeRefineStatuses(rows);
-  // 표시·요약 전용 IROS 집계. 수집·매칭·재개 판정에는 사용하지 않는다.
-  const irosOutcome = irosOutcomeStats(rows);
+  const batchDerived = useMemo(() => {
+    const statusCounts = rows.reduce((acc, row) => {
+      if (row.result) acc[row.result.status] = (acc[row.result.status] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      stat: statusCounts,
+      refineSummary: summarizeRefineStatuses(rows),
+      irosOutcome: irosOutcomeStats(rows),
+      irosProgress: irosProgressStats(rows),
+      recoveryPlan: buildFailureRecoveryPlan(rows),
+      irosStarted: rows.some((row) => Boolean(row.reg)),
+      irosFinalReady: rows.some((row) => Boolean(row.reg)) && isIrosExportFinal(rows)
+    };
+  }, [rows]);
+  const {
+    stat,
+    refineSummary,
+    irosOutcome,
+    irosProgress,
+    recoveryPlan,
+    irosStarted,
+    irosFinalReady
+  } = batchDerived;
   const regStat = {
     ok: irosOutcome.resolved,
     multi: irosOutcome.multiple,
@@ -5278,11 +5422,7 @@ function AddrRefineTestGui() {
     fail: irosOutcome.otherFailure,
     done: irosOutcome.judged
   };
-  const irosProgress = irosProgressStats(rows);
-  const recoveryPlan = useMemo(() => buildFailureRecoveryPlan(rows), [rows]);
   const addressFinalReady = batchDone === rows.length;
-  const irosStarted = rows.some((row) => Boolean(row.reg));
-  const irosFinalReady = irosStarted && isIrosExportFinal(rows);
   const exportFinalReady = addressFinalReady && (!irosStarted || irosFinalReady);
   const batchWorkflow = deriveBatchWorkflowState({
     rowCount: rows.length,
@@ -5345,7 +5485,7 @@ function AddrRefineTestGui() {
         input:focus { border-color: ${C.cyan}88 !important; box-shadow: 0 0 0 3px ${C.cyan}22; }
         button:focus-visible, a:focus-visible, input:focus-visible, label:focus-visible { outline: 2px solid ${C.cyan}; outline-offset: 2px; }
         @media (prefers-reduced-motion: reduce) { .pnu-drift, .result-in, .aurora { animation: none !important; } .comet-layer { display: none; } }
-      `), /* @__PURE__ */ React.createElement(CadastralBackdrop, null), irosHealth.bad >= 3 && /* @__PURE__ */ React.createElement("div", { style: {
+      `), /* @__PURE__ */ React.createElement(CadastralBackdrop, { staticMode: batchVisualSafeMode }), irosHealth.bad >= 3 && /* @__PURE__ */ React.createElement("div", { style: {
     position: "fixed",
     top: 0,
     left: 0,
@@ -5730,4 +5870,9 @@ export {
 };
 
 const _root = ReactDOM.createRoot(document.getElementById("root"));
-_root.render(React.createElement(AddrRefineTestGui));
+const AppShellErrorBoundary = window.__ADDR_APP_ERROR_BOUNDARY__ || React.Fragment;
+_root.render(React.createElement(
+  AppShellErrorBoundary,
+  null,
+  React.createElement(AddrRefineTestGui)
+));
