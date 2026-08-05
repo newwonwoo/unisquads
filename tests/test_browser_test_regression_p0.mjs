@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserTestLogsToCsv,
+  compactBrowserTestRuns,
   compareTestRuns,
   createBrowserTestRun,
   updateBrowserTestRun,
@@ -76,4 +77,23 @@ test("이전 행이 사라지면 확정 및 IROS 회귀로 잡는다", () => {
   assert.equal(compared.metrics.confirmed_to_unconfirmed.count, 1);
   assert.equal(compared.metrics.iros_success_to_failure.count, 1);
   assert.equal(compared.changed_rows.some((row) => row.changes.includes("ROW_MISSING")), true);
+});
+
+test("대용량 실행 이력은 행 예산을 넘으면 오래된 상세행만 요약 보존한다", () => {
+  const makeRun = (id, count) => ({
+    id,
+    updated_at: id,
+    row_outcomes: Array.from({ length: count }, (_, index) => ({ row_id: `${id}-${index}` })),
+    regression: { changed_rows: Array.from({ length: 700 }, (_, index) => ({ row_id: index })) }
+  });
+  const [latest, previous] = compactBrowserTestRuns([
+    makeRun("2", 30_000),
+    makeRun("1", 30_000)
+  ], 50_000);
+
+  assert.equal(latest.row_outcomes.length, 30_000);
+  assert.equal(previous.row_outcomes.length, 0);
+  assert.equal(previous.row_outcomes_archived, 30_000);
+  assert.equal(latest.regression.changed_rows.length, 500);
+  assert.equal(latest.regression.changed_row_count, 700);
 });

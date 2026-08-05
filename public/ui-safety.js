@@ -289,6 +289,66 @@
     }
   }
 
+  class AppErrorBoundary extends React.Component {
+    constructor(props) {
+      super(props);
+      this.state = { error: null };
+    }
+
+    static getDerivedStateFromError(error) {
+      return { error };
+    }
+
+    componentDidCatch(error, info) {
+      console.error("[addr-refine] application render failed", error, info);
+    }
+
+    render() {
+      if (!this.state.error) return this.props.children;
+      const errorText = safeText(this.state.error?.message || this.state.error, "알 수 없는 화면 오류");
+      return originalCreateElement("main", {
+        style: {
+          minHeight: "100vh",
+          boxSizing: "border-box",
+          display: "grid",
+          placeItems: "center",
+          padding: 24,
+          background: "#0B0E14",
+          color: "#E7EAF2",
+          fontFamily: "Pretendard, -apple-system, 'Malgun Gothic', sans-serif"
+        }
+      }, originalCreateElement("section", {
+        style: {
+          width: "min(100%, 520px)",
+          padding: 22,
+          borderRadius: 14,
+          border: "1px solid rgba(248,113,113,0.55)",
+          background: "rgba(15,19,28,0.96)"
+        }
+      },
+      originalCreateElement("h1", { style: { margin: 0, fontSize: 18 } }, "화면 표시를 복구해야 합니다"),
+      originalCreateElement("p", { style: { margin: "10px 0 0", color: "#CBD5E1", lineHeight: 1.65, fontSize: 13 } },
+        "정제 진행상황은 브라우저 저장소에 보존되어 있습니다. 아래 버튼으로 다시 불러온 뒤 ‘이어서 하기’를 선택하세요."),
+      originalCreateElement("pre", {
+        style: {
+          margin: "12px 0 0", padding: 10, borderRadius: 8, overflow: "auto",
+          background: "rgba(2,6,23,0.65)", color: "#94A3B8", fontSize: 10.5,
+          whiteSpace: "pre-wrap", wordBreak: "break-word"
+        }
+      }, errorText),
+      originalCreateElement("button", {
+        onClick: () => location.reload(),
+        style: {
+          marginTop: 14, padding: "9px 14px", borderRadius: 9,
+          border: "1px solid rgba(34,211,238,0.65)", background: "rgba(34,211,238,0.1)",
+          color: "#67E8F9", cursor: "pointer", fontWeight: 700
+        }
+      }, "진행상황 다시 불러오기")));
+    }
+  }
+
+  window.__ADDR_APP_ERROR_BOUNDARY__ = AppErrorBoundary;
+
   function SafeTestLogPanel({ originalType, originalProps }) {
     const safeLogs = sanitizeLogs(originalProps?.logs);
     const safeProps = { ...(originalProps || {}), logs: safeLogs };

@@ -245,7 +245,9 @@ test("patched app contains the required hardening contracts", async () => {
     "batchWorkflow.statusLabel",
     "BATCH_PRIMARY_ACTIONS.DOWNLOAD_ALL",
     "네이버지번주소",
-    "finally {\n      setBatchRegBusy(false);"
+    "finally {",
+    "batchActivityRef.current = { ...batchActivityRef.current, iros: false };",
+    "setBatchRegBusy(false);"
   ]) {
     assert.ok(source.includes(marker), marker);
   }
