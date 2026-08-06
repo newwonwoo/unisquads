@@ -4037,7 +4037,22 @@ function AddrRefineTestGui() {
       let cands = all.filter((c) => !String(c.state || "").includes("폐쇄"));
       const stageCounts = { all: all.length, current: cands.length };
       const exactAddress = queryAddress || row.result.jibunAddr || row.result.irosQuery || "";
+      const beforeExactLot = cands;
       cands = cands.filter((c) => candidateMatchesAddressLot(c, exactAddress));
+      // R-IROS-LOT-FALLBACK: 복수지번 건물은 확정주소의 지번과 등기 소재지번이
+      // 다를 수 있다. 그 지번만 남기면 후보가 통째로 사라져, 208건을 모아 놓고도
+      // "부동산구분 불일치"로 끝난다(삼본아파트 실측 194행).
+      // 조회 자체가 원문의 지번들로 한 것이므로 후보의 지역은 이미 맞다.
+      // 건물명이 확정 건물명과 같은 후보로 되돌린다.
+      if (!cands.length && beforeExactLot.length && row.result.bdNm) {
+        const wantedBuilding = buildingKey(row.result.bdNm);
+        const sameBuilding = beforeExactLot.filter((c) =>
+          wantedBuilding && buildingKey(c.buldnm) === wantedBuilding);
+        if (sameBuilding.length) {
+          cands = sameBuilding;
+          applyModule("R-IROS-LOT-FALLBACK", IROS_MODULE_VERSIONS.R_IROS_LOT_FALLBACK);
+        }
+      }
       stageCounts.exact_lot = cands.length;
       const wantDong = unitKey(row.result.unit?.dong, "dong");
       const wantHo = unitKey(row.result.unit?.ho, "ho");
@@ -4082,6 +4097,17 @@ function AddrRefineTestGui() {
           const anyHo = cands.some((c) => unitKey(c.ho, "ho"));
           if (!anyDong && anyHo)
             matched = cands.filter((c) => candidateMatchesUnit(c, "", wantHo));
+        }
+        // R-IROS-DONG-AGNOSTIC: 원문에 "N동"이라는 표기 자체가 없으면 동은
+        // 그룹 전파로 붙은 추정값이다. 추정 동 때문에 정확한 호를 버리지 않는다.
+        //   "읍하리 442 서도아파트 102"  →  동 101(추정) 호 102  →  후보에 101동 없음
+        // 호로만 다시 보아 정확히 한 건이면 채택한다(실측 94행).
+        if (!matched.length && wantDong && wantHo && !/\d+\s*\uB3D9/.test(String(row.raw || ""))) {
+          const hoOnly = cands.filter((c) => candidateMatchesUnit(c, "", wantHo));
+          if (hoOnly.length === 1) {
+            matched = hoOnly;
+            applyModule("R-IROS-DONG-AGNOSTIC", IROS_MODULE_VERSIONS.R_IROS_DONG_AGNOSTIC);
+          }
         }
         // R-IROS-HO-BUILDING: 해당 후보의 동만 비어 있고 호·건물명이 정확히
         // 맞는 한 건을 안전하게 선택한다.

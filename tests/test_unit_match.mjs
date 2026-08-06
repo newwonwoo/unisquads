@@ -156,7 +156,7 @@ test("raw floor-room variants preserve floor evidence and cache separation", () 
   );
 });
 
-test("raw unit recovery resolves only when all variants converge to one candidate", () => {
+test("raw unit recovery takes the first variant that is unique on its own", () => {
   const candidates = [
     { unique_no: "A", dong: "501", ho: "101" },
     { unique_no: "B", dong: "502", ho: "101" }
@@ -168,10 +168,25 @@ test("raw unit recovery resolves only when all variants converge to one candidat
   );
   assert.equal(picked?.candidate.unique_no, "A");
 
-  const ambiguous = selectUniqueRawUnitCandidate(
+  // 등기부의 호 표기는 건물마다 하나로 통일돼 있다. 표준 표기(608)가 정확히
+  // 한 건이면, 다른 세대가 실제로 "6-8호"라는 이유로 버리지 않는다.
+  // 변형 전체를 한꺼번에 보던 이전 계약이 진흥아파트 136행을 통째로 막았다.
+  const standardFirst = selectUniqueRawUnitCandidate(
     [
       { unique_no: "A", dong: "101", ho: "608" },
       { unique_no: "B", dong: "101", ho: "6-8" }
+    ],
+    "진흥아파트 101동 6층8호",
+    { dong: "101", ho: "8" }
+  );
+  assert.equal(standardFirst?.candidate.unique_no, "A");
+  assert.equal(standardFirst?.variant.ho, "608");
+
+  // 같은 변형 안에서 여러 건이면 여전히 확정하지 않는다.
+  const ambiguous = selectUniqueRawUnitCandidate(
+    [
+      { unique_no: "A", dong: "101", ho: "608" },
+      { unique_no: "B", dong: "101", ho: "608" }
     ],
     "진흥아파트 101동 6층8호",
     { dong: "101", ho: "8" }

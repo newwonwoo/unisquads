@@ -1,6 +1,6 @@
 import { extractExplicitLotRefs } from "./address-multilot-rules.mjs";
 
-export const MATCHER_VERSION = "iros-matcher-v10";
+export const MATCHER_VERSION = "iros-matcher-v11";
 
 export const IROS_MODULE_VERSIONS = Object.freeze({
   IROS_CANDIDATE_NORMALIZE: "2",
@@ -8,9 +8,11 @@ export const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_BUILDING_EVIDENCE: "1",
   R_IROS_HO_BUILDING: "1",
   R_IROS_BUILDING_DISAMBIG: "1",
-  R_IROS_RAW_UNIT: "1",
+  R_IROS_RAW_UNIT: "2",
   R_IROS_UNIT_PROFILE: "2",
-  R_IROS_UNIT_BEARING_BUILDING: "1"
+  R_IROS_UNIT_BEARING_BUILDING: "1",
+  R_IROS_DONG_AGNOSTIC: "1",
+  R_IROS_LOT_FALLBACK: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -93,8 +95,9 @@ export function candidateHasNoDong(candidate) {
 }
 
 function uniqueUnitVariants(variants) {
+  // 동이 없는 건물(단일동 아파트·빌라)도 층 복구 대상이다. 호만 있으면 유효하다.
   return variants.filter((variant, index, source) =>
-    variant.dong && variant.ho &&
+    variant.ho &&
     source.findIndex((other) =>
       other.dong === variant.dong && other.ho === variant.ho && other.source === variant.source
     ) === index
@@ -126,19 +129,45 @@ export function rawUnitRecoveryVariants(rawAddress, currentUnit = {}) {
   // 101동 6층8호처럼 층이 전처리에서 사라진 형식. 등기부 호 표기는
   // 608, 6-8, 6층8 세 가지가 존재할 수 있으므로 모두 조회하되, 전체가
   // 동일한 고유번호 한 건으로 수렴할 때만 자동확정한다.
-  if (currentDong && currentHo) {
-    const matches = [...raw.matchAll(/(?:^|\s)(\d{1,2})\s*층\s*(\d{1,3})\s*호(?=\s|$)/g)];
+  //
+  // 동이 없어도 같은 문제가 난다. "11층 3호"를 호 "3"으로만 읽으면 그 건물의
+  // 모든 층 3호가 걸려 복수결과가 된다(진흥아파트 101동 3층1호 실측 136행).
+  // 지하는 등기부가 "지1", "B1", "지하1" 중 하나로 적고 호도 "비01"·"B01"로
+  // 적으므로 표기 변형을 함께 만든다.
+  if (currentHo || currentDong) {
+    const matches = [...raw.matchAll(
+      /(?:^|\s)(지하|지|B|b)?\s*(\d{1,2})\s*층\s*(?:제?\s*)?(?:비|B|b)?\s*(\d{1,3})\s*호?(?=\s|$)/g
+    )];
     const match = matches.at(-1);
-    if (match && unitKey(match[2], "ho") === currentHo) {
-      const floor = String(Number(match[1]));
-      const room = String(Number(match[2]));
-      const combined = `${floor}${room.padStart(2, "0")}`;
-      for (const ho of [combined, `${floor}-${room}`, `${floor}층${room}`]) {
-        variants.push({
-          dong: currentDong,
-          ho: unitKey(ho, "ho"),
-          source: "raw_floor_room"
-        });
+    if (match && (!currentHo || unitKey(match[3], "ho") === currentHo)) {
+      const basement = Boolean(match[1]);
+      const floor = String(Number(match[2]));
+      const room = String(Number(match[3]));
+      const padded = room.padStart(2, "0");
+      const floors = basement ? [`B${floor}`, `\uC9C0${floor}`, `\uC9C0\uD558${floor}`] : [floor];
+      for (const f of floors) {
+        for (const ho of [`${f}${padded}`, `${f}-${room}`, `${f}\uCE35${room}`]) {
+          variants.push({
+            dong: currentDong,
+            ho: unitKey(ho, "ho"),
+            source: basement ? "raw_basement_floor_room" : "raw_floor_room"
+          });
+        }
+      }
+    }
+  }
+
+  // 지하1-비02호처럼 층·호가 하이픈으로 붙은 지하 표기.
+  if (currentHo || currentDong) {
+    const matched = raw.match(/(?:^|\s)(?:\uC9C0\uD558|\uC9C0|B|b)\s*(\d{1,2})\s*-\s*(?:\uBE44|B|b)\s*(\d{1,3})\s*\uD638?(?=\s|$)/);
+    if (matched) {
+      const floor = String(Number(matched[1]));
+      const room = String(Number(matched[2]));
+      const padded = room.padStart(2, "0");
+      for (const f of [`B${floor}`, `\uC9C0${floor}`, `\uC9C0\uD558${floor}`]) {
+        for (const ho of [`${f}${padded}`, `${f}-${room}`, `B${padded}`]) {
+          variants.push({ dong: currentDong, ho: unitKey(ho, "ho"), source: "raw_basement_room" });
+        }
       }
     }
   }
@@ -163,27 +192,27 @@ function candidateIdentity(candidate) {
 export function selectUniqueRawUnitCandidate(candidates, rawAddress, currentUnit = {}) {
   const variants = rawUnitRecoveryVariants(rawAddress, currentUnit);
   if (!variants.length) return null;
-  const matches = [];
+  // 변형은 표준 표기(608)가 앞이고 드문 표기(6-8, 6층8)가 뒤다. 전부 합쳐서
+  // 유일성을 보면, 대단지에서 실제로 "3-1호"인 다른 세대가 있다는 이유만으로
+  // 표준 표기의 정확한 한 건까지 버려진다(진흥아파트 450세대 실측 136행).
+  // 등기부의 호 표기는 건물마다 하나로 통일돼 있으므로, 앞선 변형부터 차례로
+  // 보고 그 변형 안에서 후보가 정확히 한 건일 때 채택한다.
   for (const variant of variants) {
+    const unique = new Map();
     for (const candidate of candidates || []) {
-      if (candidateMatchesUnit(candidate, variant.dong, variant.ho)) {
-        matches.push({ candidate, variant });
-      }
+      if (!candidateMatchesUnit(candidate, variant.dong, variant.ho)) continue;
+      const key = candidateIdentity(candidate);
+      if (key && !unique.has(key)) unique.set(key, candidate);
     }
+    if (unique.size !== 1) continue;
+    return {
+      candidate: [...unique.values()][0],
+      variant,
+      variantsTried: variants,
+      matchedCandidateCount: 1
+    };
   }
-  const unique = new Map();
-  for (const match of matches) {
-    const key = candidateIdentity(match.candidate);
-    if (key && !unique.has(key)) unique.set(key, match);
-  }
-  if (unique.size !== 1) return null;
-  const selected = [...unique.values()][0];
-  return {
-    candidate: selected.candidate,
-    variant: selected.variant,
-    variantsTried: variants,
-    matchedCandidateCount: 1
-  };
+  return null;
 }
 
 export function buildingKey(value) {

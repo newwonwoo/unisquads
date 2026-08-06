@@ -1,5 +1,7 @@
 import {
   needsCommercialRangeUnitRematch,
+  needsDongAgnosticRematch,
+  needsLotFallbackRematch,
   needsUnitBearingBuildingRematch,
   needsUnitProfileVersionRematch,
   selectIrosRecoveryAction
@@ -7,6 +9,8 @@ import {
 
 export {
   needsCommercialRangeUnitRematch,
+  needsDongAgnosticRematch,
+  needsLotFallbackRematch,
   needsUnitBearingBuildingRematch,
   needsUnitProfileVersionRematch
 } from "./failure-recovery-plan.mjs";
@@ -14,7 +18,7 @@ export {
 export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
   parser: "iros-parser-v4",
-  matcher: "iros-matcher-v10",
+  matcher: "iros-matcher-v11",
   recovery: "iros-recovery-v5"
 });
 
