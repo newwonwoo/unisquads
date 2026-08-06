@@ -22,6 +22,7 @@ jobs:
           - tests/test_region_validation_recovery.mjs
           - tests/test_lot_building_correction.mjs
           - tests/test_implausible_floor_ho.mjs
+          - tests/test_building_name_hygiene.mjs
           - tests/test_unit_parsing_p0.mjs
           - tests/test_browser_test_regression_p0.mjs
           - tests/test_build_info_p0.mjs

@@ -238,3 +238,18 @@ export function canAcceptLotBuildingCorrection({
   const input = buildingKey(inputBuildingName);
   return Boolean(input) && input.length >= 4 && !GENERIC_BUILDING.test(input) && result.includes(input);
 }
+
+// 동소(同所)는 등기부에서 "위와 같은 장소"라는 뜻이다. 앞 행의 건물명으로 치환해
+// 찾은 결과라면 원문 법정동이 아니라 앵커 쪽 법정동이 맞다. 앵커 행 자신도 원문에
+// 같은 오기를 달고 있기 때문이다.
+//   기준행 "석정리 대심리78-1외4필지 장미마을 아파트" → 대심리 78-1 장미마을아파트
+//   동소행 "석정리 동소제102동제602호"                → 같은 곳인데 석정리≠대심리로 차단
+// 앵커 이름이 결과 건물명에 실제로 들어 있을 때만 받는다.
+export function canAcceptDongsoAnchorCorrection({ validation, anchorName, resultBuildingName }) {
+  if (validation?.status !== "MISMATCH") return false;
+  if (!/^(법정동|읍면) 불일치/.test(String(validation?.reason || ""))) return false;
+  const anchor = buildingKey(anchorName);
+  if (!anchor || anchor.length < 3 || GENERIC_BUILDING.test(anchor)) return false;
+  const result = buildingKey(resultBuildingName);
+  return Boolean(result) && result.includes(anchor);
+}
