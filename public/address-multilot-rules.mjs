@@ -198,3 +198,43 @@ export function canAcceptZipBuildingCorrection({
   if (!(input === result || (Math.min(input.length, result.length) >= 4 && (input.includes(result) || result.includes(input))))) return false;
   return addressMatchesZipRegions(resultAddress, zipRegions);
 }
+
+// 결과 지번주소에서 지번 하나를 뽑는다. "… 서부리 277-5 태광아파트" → "277-5"
+// 산번지는 "산 12-3"처럼 띄어 오므로 붙여서 돌려준다(원문 대조도 공백을 지우고 한다).
+const RESULT_LOT = /(?:동|리|가)\s+(산\s?)?(\d{1,5}(?:-\d{1,4})?)(?=\s|$)/;
+
+export function resultLotOf(address) {
+  const matched = String(address || "").match(RESULT_LOT);
+  return matched ? (matched[1] ? "산" : "") + matched[2] : "";
+}
+
+// 법정동만 다르고 지번과 건물명이 모두 원문과 같으면, 틀린 쪽은 원문의 법정동이다.
+// 지번은 법정동 안에서 부여되므로 "수진리 277-5"와 "서부리 277-5"는 다른 땅이고,
+// 그 위에 같은 이름의 건물이 둘 다 있을 일은 없다. 결과는 원천이 실제로 찾아준
+// 실존 주소이므로, 원문 세 요소(법정동·지번·건물명) 중 둘이 맞으면 나머지 하나가
+// 오기다.
+//   충북 괴산군 괴산읍 수진리 277-5 태광아파트  →  괴산읍 서부리 277-5 태광아파트
+//   경남 고성군 거류면 화당리 174 새평지아파트  →  거류면 당동리 174 새평지아파트
+//   울산 남구 부곡동 679-8 선암시장형 상가      →  남구 선암동 679-8 선암시장형종합상가
+// 시도·시군구 불일치는 대상이 아니다(그건 진짜 오확정이다).
+export function canAcceptLotBuildingCorrection({
+  validation,
+  rawText,
+  resultAddress,
+  inputBuildingName,
+  resultBuildingName
+}) {
+  if (validation?.status !== "MISMATCH") return false;
+  if (!/^(법정동|읍면) 불일치/.test(String(validation?.reason || ""))) return false;
+  const lot = resultLotOf(resultAddress);
+  if (!lot) return false;
+  // 원문에 결과 지번이 그대로 있어야 한다(붙어 있어도 되므로 공백을 지우고 본다).
+  if (!String(rawText || "").replace(/\s+/g, "").includes(lot)) return false;
+  const result = buildingKey(resultBuildingName);
+  if (!result || result.length < 3 || GENERIC_BUILDING.test(result)) return false;
+  // 원문 어디에든 결과 건물명이 그대로 있으면 충분하다.
+  if (buildingKey(rawText).includes(result)) return true;
+  // "선암시장형 상가"처럼 원문이 결과의 줄임말인 경우도 같은 건물로 본다.
+  const input = buildingKey(inputBuildingName);
+  return Boolean(input) && input.length >= 4 && !GENERIC_BUILDING.test(input) && result.includes(input);
+}
