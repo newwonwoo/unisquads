@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   DEFAULT_CONCURRENCY,
+  JUSO_OFFICIAL_RATE,
   NAVER_QPS_LIMIT,
   UPSTREAM_DEFAULTS,
   createAdaptiveLimit,
@@ -206,4 +207,37 @@ test("배치가 행 분류가 아니라 호출 지점에서 제한한다", async
   // 지번 유무로 행을 나누던 방식은 네이버 승격을 잡지 못해 폐기했다.
   assert.equal(source.includes('preprocess(next[idxs[0]].raw || "").jibun ? "juso" : "naver"'), false);
   assert.equal(source.includes("byUpstream"), false);
+});
+
+test("JUSO 한도는 공식 제한 수치를 근거로만 바꾼다", () => {
+  // 공식: 5초에 10건(2 QPS). 지금 값은 그 총량 계산과 맞지 않지만, 운영
+  // 이력상 그 이상으로 오래 돌려도 차단된 적이 없다. 관측만 보고 올리면
+  // 과거 한 번 48배까지 올리려 한 적이 있으므로 상한을 못박아 둔다.
+  assert.equal(JUSO_OFFICIAL_RATE.requests, 10);
+  assert.equal(JUSO_OFFICIAL_RATE.perSeconds, 5);
+  const juso = UPSTREAM_DEFAULTS.juso;
+  assert.equal(juso.max <= 6, true, "실측 근거 없이 상한을 올리지 않는다");
+  assert.equal(juso.start <= juso.max, true);
+  assert.equal(juso.min >= 1, true);
+});
+
+test("네이버 간격은 성능 사유로 낮출 수 없다", () => {
+  // 공식 제한이라 튜닝 대상이 아니다.
+  assert.equal(UPSTREAM_DEFAULTS.naver.minIntervalMs >= 1000 / NAVER_QPS_LIMIT, true);
+});
+
+test("실행 중 한도를 밖에서 확인할 수 있다", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.ok(source.includes("window.__ADDR_GATE_STATS__"));
+  assert.ok(source.includes("juso: gates.juso.stats()"));
+  assert.ok(source.includes("naver: gates.naver.stats()"));
+
+  // stats가 한도와 대기열을 실제로 담아야 진단에 쓸 수 있다.
+  const gate = createUpstreamGate({ start: 3, min: 1, max: 5 });
+  const stats = gate.stats();
+  assert.equal(stats.limit, 3);
+  assert.equal(stats.active, 0);
+  assert.equal(stats.waiting, 0);
+  assert.equal(typeof stats.raised, "number");
+  assert.equal(typeof stats.lowered, "number");
 });
