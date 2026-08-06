@@ -94,13 +94,14 @@ test("빈 목록과 기본값은 그대로 통과한다", async () => {
 
 test("주소 배치가 그룹을 동시 처리하도록 연결됐다", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.ok(source.includes("runAdaptivePool([...groups.values()]"));
+  assert.ok(source.includes("runAdaptivePool("));
   assert.ok(source.includes("shouldStop: () => batchStopRef.current"));
   assert.ok(source.includes("concurrency.onSuccess()"));
   assert.ok(source.includes("concurrency.onTransient()"));
   // 전파는 모든 조회가 끝난 뒤에 돌아야 한다(순서 의존).
-  const pool = source.indexOf("runAdaptivePool([...groups.values()]");
+  const pool = source.indexOf("const processGroup = async (idxs, concurrency)");
   const propagate = source.indexOf("propagateAddressGroup(next, groupHints, evidenceFor)");
+  assert.notEqual(pool, -1);
   assert.equal(pool < propagate, true);
   // 체크포인트 시각은 저장 전에 올려야 중복 저장이 겹치지 않는다.
   assert.ok(source.includes("lastCheckpointAt = now;\n        if (!hidden) setRows([...next]);"));
@@ -135,7 +136,59 @@ test("감속과 연속실패 집계가 한 곳에서 결정된다", async () => 
   assert.ok(source.includes("consecTransient += 1;\n        concurrency.onTransient();"));
   assert.ok(source.includes("consecTransient = 0;\n        concurrency.onSuccess();"));
   // 성공/실패 신호가 try/catch 안에 흩어져 있으면 장애를 성공으로 센다.
-  const body = source.slice(source.indexOf("runAdaptivePool([...groups.values()]"));
+  const body = source.slice(source.indexOf("const processGroup = async (idxs, concurrency)"));
   assert.equal((body.match(/concurrency\.onSuccess\(\)/g) || []).length, 1);
   assert.equal((body.match(/concurrency\.onTransient\(\)/g) || []).length, 1);
+});
+
+test("원천별 한도가 서로를 끌어내리지 않는다", () => {
+  // 한 한도를 공유하면 소수 원천의 실패가 다수 원천까지 감속시킨다.
+  // 실측: 네이버 15%가 429를 낼 때 공유 한도는 4에 묶여 처리량이 8배 떨어졌다.
+  const juso = createAdaptiveLimit({ start: 4, min: 1, max: 12, raiseAfter: 2 });
+  const naver = createAdaptiveLimit({ start: 4, min: 1, max: 12, raiseAfter: 2 });
+
+  // 네이버만 계속 실패, JUSO는 계속 성공
+  for (let i = 0; i < 8; i++) {
+    naver.onTransient();
+    juso.onSuccess();
+  }
+  assert.equal(naver.value(), 1, "실패한 원천만 최소까지 내려간다");
+  assert.equal(juso.value() > 4, true, "정상 원천은 영향을 받지 않고 오른다");
+});
+
+test("두 원천 풀이 동시에 돌고 한쪽이 비어도 끝난다", async () => {
+  const limits = { juso: createAdaptiveLimit({ start: 4, min: 1, max: 4 }),
+                   naver: createAdaptiveLimit({ start: 4, min: 1, max: 4 }) };
+  const order = [];
+  await Promise.all(["juso", "naver"].map((upstream) =>
+    runAdaptivePool(upstream === "juso" ? [1, 2, 3] : [], async (item) => {
+      await tick(1);
+      order.push(`${upstream}:${item}`);
+    }, { limit: limits[upstream] })
+  ));
+  assert.equal(order.length, 3, "비어 있는 풀이 전체를 막지 않는다");
+
+  // 양쪽 모두 항목이 있으면 순차가 아니라 겹쳐서 돈다.
+  let active = 0;
+  let peakBoth = 0;
+  await Promise.all(["juso", "naver"].map((upstream) =>
+    runAdaptivePool([1, 2, 3, 4], async () => {
+      active += 1; peakBoth = Math.max(peakBoth, active);
+      await tick(5);
+      active -= 1;
+    }, { limit: limits[upstream] })
+  ));
+  assert.equal(peakBoth > 4, true, "두 풀의 동시 실행이 합쳐진다");
+});
+
+test("배치가 원천별로 분류해 두 풀을 함께 돌린다", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  // 분류 기준은 지번 파싱 여부(cascade의 진입 조건과 같다).
+  assert.ok(source.includes('preprocess(next[idxs[0]].raw || "").jibun ? "juso" : "naver"'));
+  assert.ok(source.includes('await Promise.all(["juso", "naver"].map((upstream) =>'));
+  assert.ok(source.includes("limit: upstreamLimits[upstream]"));
+  // 순차로 돌리면 분리한 의미가 없다.
+  assert.equal(source.includes("await runAdaptivePool(byUpstream.juso"), false);
+  // 자동중단은 원천과 무관하게 전역이어야 한다.
+  assert.ok(source.includes("shouldStop: () => batchStopRef.current"));
 });
