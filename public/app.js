@@ -4925,8 +4925,21 @@ function AddrRefineTestGui() {
     // 루프 전에 원문만으로 계산되고, 주소군 전파는 루프 뒤에 돈다. 각 그룹은
     // 자기 행 인덱스에만 쓴다). 한도는 낮게 시작해 성공이 쌓이면 올리고
     // 일시 오류가 나오면 즉시 반으로 줄인다.
-    const concurrency = createAdaptiveLimit();
-    await runAdaptivePool([...groups.values()], async (idxs) => {
+    // 원천별로 한도를 나눈다. 한 한도를 공유하면 소수 원천이 한도에 걸릴 때
+    // 다수 원천까지 같이 느려진다(실측: 네이버 15%가 429를 내면 전체 처리량이
+    // 8배 떨어져 동시화 이전 수준으로 돌아간다).
+    // 지번이 파싱되면 JUSO로 가고, 없으면 네이버로 간다(cascade의 진입 조건).
+    // 분류가 틀려도 잘못된 한도에 묶일 뿐 결과는 달라지지 않는다.
+    const upstreamLimits = {
+      juso: createAdaptiveLimit(),
+      naver: createAdaptiveLimit()
+    };
+    const byUpstream = { juso: [], naver: [] };
+    for (const idxs of groups.values()) {
+      const upstream = preprocess(next[idxs[0]].raw || "").jibun ? "juso" : "naver";
+      byUpstream[upstream].push(idxs);
+    }
+    const processGroup = async (idxs, concurrency) => {
       if (batchStopRef.current) return;
       let r;
       try {
@@ -4994,7 +5007,15 @@ function AddrRefineTestGui() {
         batchStopRef.current = true;
         setAutoStopMsg(`연속 오류 ${consecTransient}회 감지 — API 한도 소진 또는 장애 가능성이 있어 자동 중단했습니다. 잠시 후(또는 내일) '일괄 정제'를 다시 누르면 실패분부터 이어서 진행합니다.`);
       }
-    }, { limit: concurrency, shouldStop: () => batchStopRef.current });
+    };
+    // 두 원천을 동시에 돌린다. 순차로 돌리면 분리한 의미가 없다.
+    await Promise.all(["juso", "naver"].map((upstream) =>
+      runAdaptivePool(
+        byUpstream[upstream],
+        (idxs) => processGroup(idxs, upstreamLimits[upstream]),
+        { limit: upstreamLimits[upstream], shouldStop: () => batchStopRef.current }
+      )
+    ));
     // R8'(2026-07-17): 모든 조회가 끝난 뒤 마지막에 전파한다. 앞 단계가
     // CONFIRMED를 늘릴수록 기준행이 생기는 그룹도 늘어나므로 순서가 중요하다.
     if (!batchStopRef.current) {

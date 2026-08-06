@@ -9,12 +9,17 @@
 //                              — Vercel이 실제로 빌드·배포한 시점 (배포 때 생성)
 // "고쳤다"와 "배포됐다"는 다른 사실이므로 한쪽만 보고 판단하지 않는다.
 
-export const APP_VERSION = "1.2.0";
+export const APP_VERSION = "1.2.1";
 
 // ISO 8601. 표시할 때만 KST로 바꾼다.
-export const RELEASED_AT = "2026-08-06T10:27:35+09:00";
+export const RELEASED_AT = "2026-08-06T11:22:27+09:00";
 
 export const CHANGELOG = Object.freeze([
+  Object.freeze({
+    version: "1.2.1",
+    released_at: "2026-08-06T11:22:27+09:00",
+    summary: "JUSO와 네이버의 동시 실행 한도를 분리해 한 원천의 한도초과가 다른 원천을 끌어내리지 않게 한다"
+  }),
   Object.freeze({
     version: "1.2.0",
     released_at: "2026-08-06T10:27:35+09:00",
