@@ -1569,6 +1569,10 @@ async function cascade(pre, clients) {
         let cand = null;
         let naverJusoQuery = "";
         let naverAddressMatchEvidence = [];
+        // 아래 return이 이 값을 읽는다. recovered는 if 블록 안에서만 살아 있으므로
+        // 필요한 값을 블록 밖 변수로 받아 두어야 한다. 블록 안 이름을 직접
+        // 참조하면 네이버 경로를 타는 모든 행이 ReferenceError로 죽는다.
+        let naverPnuRecoveryVersion = "";
         if (naverAddr) {
           const recovered = await recoverJusoCandidateForNaver(
             naverAddr,
@@ -1577,6 +1581,7 @@ async function cascade(pre, clients) {
           );
           naverJusoQuery = recovered.query;
           naverAddressMatchEvidence = recovered.evidence;
+          naverPnuRecoveryVersion = recovered.recoveryVersion;
           if (recovered.candidate) {
             cand = recovered.candidate;             // 단일 PNU가 검증된 경우에만 확보
           } else {
@@ -1610,7 +1615,7 @@ async function cascade(pre, clients) {
             naverJibunAddr: top.address || "",
             naverRoadAddr: top.roadAddress || "",
             naverPnuOk: !!cand.pnuOk,                  // PNU 확보 여부
-            naverPnuRecoveryVersion: recovered.recoveryVersion,
+            naverPnuRecoveryVersion,
             addressMatchEvidence: naverAddressMatchEvidence,
             reviewNeeded: _reviewNeeded,
             zipRegions,

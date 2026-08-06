@@ -18,6 +18,7 @@ jobs:
       matrix:
         test_file:
           - tests/test_iros_run_contract_p0.mjs
+          - tests/test_naver_recovery_scope_p0.mjs
           - tests/test_unit_parsing_p0.mjs
           - tests/test_browser_test_regression_p0.mjs
           - tests/test_build_info_p0.mjs
