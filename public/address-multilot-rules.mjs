@@ -39,7 +39,10 @@ export function hasOmittedExtraLots(value) {
 // 12-1,2,5는 12-1·12-2·12-5로 확장하고, 101동·501호 숫자는 제외한다.
 export function extractExplicitLotRefs(value) {
   const source = String(value || "").replace(RANGE_RE, " ");
-  const number = String.raw`산?\s*\d+(?:-\d+)?(?![\d-])(?!(?:\s*)[동호층])`;
+  // 숫자 뒤 동·호·층은 세대 표기이므로 지번으로 보지 않는다. 다만 뒤에 한글이
+  // 이어지면 건물명이다 — "414-2 동산apt"의 동산을 동 표기로 읽으면 414-2가
+  // 지번 후보에서 통째로 빠진다(광주 동산아파트 실측 134행).
+  const number = String.raw`산?\s*\d+(?:-\d+)?(?![\d-])(?!\s*[동호층](?![가-힣]))`;
   const pattern = new RegExp(
     String.raw`([가-힣]{1,10}(?:동\d*가|동|리|가))\s*((${number})(?:(?:\s*[,，]\s*|\s+)(${number}))*)`,
     "g"
