@@ -60,6 +60,7 @@ import {
   deriveBatchWorkflowState
 } from "./batch-workflow-state.mjs";
 import { APP_VERSION, RELEASED_AT, buildStamp } from "./version.mjs";
+import { carryOverResults } from "./result-carryover.mjs";
 import {
   browserTabHidden,
   shouldFlushBatchUi,
@@ -4826,11 +4827,24 @@ function AddrRefineTestGui() {
       activeTestRunRef.current = testRun;
       await idbSet(TEST_LOG_ACTIVE_KEY, testRun.id);
       await persistTestRun(testRun);
-      liveBatchRowsRef.current = built;
-      setRows(built);
+      // 같은 원문을 다시 올렸을 때 이전 결과를 넘겨받는다. 재사용 여부는
+      // runBatch의 isReusableResult가 지문으로 다시 판정하므로, 여기서 얹은
+      // 결과가 조건에 안 맞으면 그 행만 정상적으로 재조회된다.
+      const prior = await idbGet(BATCH_KEY);
+      const priorRows = Array.isArray(prior) ? prior : prior?.rows;
+      const carried = carryOverResults(built, priorRows);
+      liveBatchRowsRef.current = carried.rows;
+      setRows(carried.rows);
       setBatchDone(0);
-      await idbDel(BATCH_KEY);
+      await idbSet(BATCH_KEY, { v: 2, rows: carried.rows, extraHeaders: extraHeaders2 });
       setSavedProgress(null);
+      if (carried.restored) {
+        setAutoStopMsg(
+          `이전 결과 ${carried.restored.toLocaleString()}행을 불러왔습니다` +
+          `${carried.restoredIros ? ` (등기조회 ${carried.restoredIros.toLocaleString()}행 포함)` : ""}` +
+          ` — '일괄 정제'를 누르면 나머지만 조회합니다.`
+        );
+      }
     } catch {
       setFileErr("파일을 읽지 못했습니다. xlsx 또는 csv 형식인지 확인해주세요.");
     } finally {
