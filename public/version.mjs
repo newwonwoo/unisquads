@@ -9,12 +9,17 @@
 //                              — Vercel이 실제로 빌드·배포한 시점 (배포 때 생성)
 // "고쳤다"와 "배포됐다"는 다른 사실이므로 한쪽만 보고 판단하지 않는다.
 
-export const APP_VERSION = "1.7.2";
+export const APP_VERSION = "1.7.3";
 
 // ISO 8601. 표시할 때만 KST로 바꾼다.
-export const RELEASED_AT = "2026-08-07T08:17:06+09:00";
+export const RELEASED_AT = "2026-08-07T08:45:33+09:00";
 
 export const CHANGELOG = Object.freeze([
+  Object.freeze({
+    version: "1.7.3",
+    released_at: "2026-08-07T08:45:33+09:00",
+    summary: "세션 인수인계 문서 추가 — 측정된 사실과 남은 과제, 다음 단계 절차"
+  }),
   Object.freeze({
     version: "1.7.2",
     released_at: "2026-08-07T08:17:06+09:00",
