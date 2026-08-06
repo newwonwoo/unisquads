@@ -4947,6 +4947,14 @@ function AddrRefineTestGui() {
       naver: createUpstreamGate(UPSTREAM_DEFAULTS.naver)
     };
     const gatedClients = gateClients(clients, gates);
+    // 한도가 실제로 몇까지 올라갔는지 밖에서 볼 수 없으면 병목을 산술로만
+    // 추측하게 된다. 실행 중 콘솔에서 __ADDR_GATE_STATS__()로 확인한다.
+    window.__ADDR_GATE_STATS__ = () => ({
+      juso: gates.juso.stats(),
+      naver: gates.naver.stats(),
+      groups: groups.size,
+      done: gDone
+    });
     const processGroup = async (idxs) => {
       if (batchStopRef.current) return;
       let r;

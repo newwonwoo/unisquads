@@ -31,11 +31,24 @@ export const DEFAULT_CONCURRENCY = Object.freeze({
 export const NAVER_QPS_LIMIT = 10;
 export const NAVER_DAILY_LIMIT = 25000;
 
+// JUSO 도로명주소 검색API 공식 제한: 일일 제한 없음, 5초에 10건(= 2 QPS).
+//   https://business.juso.go.kr/jst/jstRoadNmAddrApiSearch
+// 차단되면 국가정보자원관리원에 전화해 외부 IP 차단 여부를 확인해야 한다.
+//
+// 여기 값은 그 총량 계산과 맞지 않는다. 운영 이력상 직렬(약 9.5 QPS 상당)로
+// 오래 돌려도 차단된 적이 없다. 서버리스는 요청마다 outbound IP가 달라질 수
+// 있어 IP당 실제 호출률이 총량보다 낮은 것으로 보이나 확인된 바는 아니다.
+//
+// 그래서 이 값은 관측만 보고 올리지 않는다. 실행 중 __ADDR_GATE_STATS__()로
+// 실제 한도와 하락 횟수를 확인한 뒤에 근거를 갖고 바꾼다.
 export const UPSTREAM_DEFAULTS = Object.freeze({
   juso: Object.freeze({ start: 2, min: 1, max: 6, raiseAfter: 30, minIntervalMs: 0 }),
-  // 1000/120 ≈ 8.3 QPS < 10 QPS
+  // 1000/120 ≈ 8.3 QPS < 10 QPS(네이버 공식)
   naver: Object.freeze({ start: 2, min: 1, max: 4, raiseAfter: 40, minIntervalMs: 120 })
 });
+
+// 공식 제한 수치. 값을 바꿀 때 근거로 삼는다.
+export const JUSO_OFFICIAL_RATE = Object.freeze({ requests: 10, perSeconds: 5 });
 
 // refineAddress는 API 장애를 예외로 올리지 않고 SYSTEM_ERROR 결과로 돌려준다
 // (app.js의 refineAddress 내부 catch). 그래서 예외만 보고 감속하면 장애가
