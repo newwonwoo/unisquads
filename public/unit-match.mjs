@@ -291,7 +291,7 @@ export function buildingEvidenceKind(candidateName, normalizedName, rawInput) {
   return "";
 }
 
-function extractLegalLot(value) {
+export function extractLegalLot(value) {
   const text = String(value || "");
   const match = /([0-9A-Za-z가-힣]+(?:동\d*가|동|가|리))\s*(산\s*)?(\d+(?:-\d+)?)/.exec(text);
   if (!match) return null;

@@ -1,0 +1,182 @@
+{
+  "v": 3,
+  "note": "측정 하네스 검증용 합성 스냅샷. 원문주소는 tests/test_address_real_100.mjs의 실데이터 유래 표기를 사용하고, IROS 후보는 각 모듈의 통과·거절 경로를 하나씩 덮도록 구성했다. 소유자 등 개인정보는 포함하지 않는다.",
+  "rows": [
+    {
+      "rowId": "base-1",
+      "raw": "세종 누리로 59, 502동 506호 (한솔동,첫마을아파트)",
+      "result": {
+        "status": "CONFIRMED", "pnu": "3611010600100590000", "isJip": true,
+        "jibunAddr": "세종특별자치시 한솔동 59", "bdNm": "첫마을아파트",
+        "unit": { "dong": "502", "ho": "506" }
+      },
+      "reg": {
+        "status": "RESOLVED", "unique_no": "1601-2011-000001", "complete": true,
+        "candidates": [{ "unique_no": "1601-2011-000001", "real_cls_cd": "집합건물", "dong": "502", "ho": "506", "sojae": "세종특별자치시 한솔동 59 첫마을아파트 제502동 제506호" }]
+      }
+    },
+    {
+      "rowId": "base-2",
+      "raw": "경기 화성시 동탄공원로 21-11, 941동 105호 (능동,푸른마을모아미래도아파트)",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4159012400109410000", "isJip": true,
+        "jibunAddr": "경기도 화성시 능동 941", "bdNm": "푸른마을모아미래도아파트",
+        "unit": { "dong": "941", "ho": "105" }
+      },
+      "reg": {
+        "status": "RESOLVED", "unique_no": "1345-2007-000002", "complete": true,
+        "candidates": [{ "unique_no": "1345-2007-000002", "real_cls_cd": "집합건물", "dong": "941", "ho": "105" }]
+      }
+    },
+
+    {
+      "rowId": "dup-hit",
+      "raw": "전북 전주시 완산구 효자동1가 799 효자동한신휴플러스아파트 106동 1동 105호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4511110100107990000", "isJip": true,
+        "jibunAddr": "전라북도 전주시 완산구 효자동1가 799", "bdNm": "효자동한신휴플러스아파트",
+        "unit": { "dong": "1", "ho": "105" }
+      },
+      "reg": {
+        "status": "REG_UNIT_NOT_FOUND", "complete": true,
+        "candidates": [
+          { "unique_no": "2145-2005-000010", "real_cls_cd": "집합건물", "dong": "106", "ho": "105" },
+          { "unique_no": "2145-2005-000011", "real_cls_cd": "집합건물", "dong": "107", "ho": "205" }
+        ]
+      }
+    },
+    {
+      "rowId": "dup-miss",
+      "raw": "충북 괴산군 괴산읍 수진리 277-5 태광아파트 203동 1동 106호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4376025300102770000", "isJip": true,
+        "jibunAddr": "충청북도 괴산군 괴산읍 수진리 277-5", "bdNm": "태광아파트",
+        "unit": { "dong": "1", "ho": "106" }
+      },
+      "reg": {
+        "status": "REG_UNIT_NOT_FOUND", "complete": true,
+        "candidates": [
+          { "unique_no": "1502-1998-000020", "real_cls_cd": "집합건물", "dong": "203", "ho": "106" },
+          { "unique_no": "1502-1998-000021", "real_cls_cd": "집합건물", "dong": "203", "ho": "106" }
+        ]
+      }
+    },
+
+    {
+      "rowId": "agnostic-hit",
+      "raw": "경남 고성군 거류면 174번지새평지아파트 101동 302호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4882033024001740000", "isJip": true,
+        "jibunAddr": "경상남도 고성군 거류면 174", "bdNm": "새평지아파트",
+        "unit": { "dong": "101", "ho": "302" }
+      },
+      "reg": {
+        "status": "REG_UNIT_NOT_FOUND", "complete": true,
+        "candidates": [
+          { "unique_no": "1911-1994-000030", "real_cls_cd": "집합건물", "dong": "가", "ho": "302" },
+          { "unique_no": "1911-1994-000031", "real_cls_cd": "집합건물", "dong": "나", "ho": "401" }
+        ]
+      }
+    },
+    {
+      "rowId": "agnostic-dong-exists",
+      "raw": "경북 경주시 황성동 청우아파트 276-6 청우타운 101동 302호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4713010700102760000", "isJip": true,
+        "jibunAddr": "경상북도 경주시 황성동 276-6", "bdNm": "청우타운",
+        "unit": { "dong": "101", "ho": "302" }
+      },
+      "reg": {
+        "status": "REG_UNIT_NOT_FOUND", "complete": true,
+        "candidates": [
+          { "unique_no": "1741-1996-000040", "real_cls_cd": "집합건물", "dong": "101", "ho": "201" },
+          { "unique_no": "1741-1996-000041", "real_cls_cd": "집합건물", "dong": "102", "ho": "302" }
+        ]
+      }
+    },
+    {
+      "rowId": "agnostic-ho-not-unique",
+      "raw": "강원 동해시 이도동 302-6 강변아파트 101동 513호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4217010400103020000", "isJip": true,
+        "jibunAddr": "강원특별자치도 동해시 이도동 302-6", "bdNm": "강변아파트",
+        "unit": { "dong": "101", "ho": "513" }
+      },
+      "reg": {
+        "status": "REG_UNIT_NOT_FOUND", "complete": true,
+        "candidates": [
+          { "unique_no": "1633-1992-000050", "real_cls_cd": "집합건물", "dong": "가", "ho": "513" },
+          { "unique_no": "1633-1992-000051", "real_cls_cd": "집합건물", "dong": "나", "ho": "513" }
+        ]
+      }
+    },
+
+    {
+      "rowId": "prop-source",
+      "raw": "경기 가평군 가평읍 대곡리 402-1 101동 204호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4182025021004020000", "isJip": true,
+        "jibunAddr": "경기도 가평군 가평읍 대곡리 402-1", "bdNm": "대곡아파트",
+        "unit": { "dong": "101", "ho": "204" }
+      },
+      "reg": {
+        "status": "RESOLVED", "unique_no": "1355-2003-000060", "complete": true,
+        "candidates": [{ "unique_no": "1355-2003-000060", "real_cls_cd": "집합건물", "dong": "101", "ho": "204" }]
+      }
+    },
+    {
+      "rowId": "prop-hit",
+      "raw": "경기 가평군 가평읍 대곡리 대곡리 402-1 대곡맨션 101동 204호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4182025021004020000", "isJip": true,
+        "jibunAddr": "경기도 가평군 가평읍 대곡리 402-1", "bdNm": "대곡맨션",
+        "reviewNeeded": "juso_multi",
+        "unit": { "dong": "101", "ho": "204" }
+      },
+      "reg": {
+        "status": "REG_MULTI", "complete": true,
+        "candidates": [
+          { "unique_no": "1355-2003-000060", "real_cls_cd": "집합건물", "dong": "101", "ho": "204" },
+          { "unique_no": "1355-2003-000061", "real_cls_cd": "집합건물", "dong": "101", "ho": "204" }
+        ]
+      }
+    },
+    {
+      "rowId": "prop-miss",
+      "raw": "경기 가평군 가평읍 대곡리 402-1 101동 999호",
+      "result": {
+        "status": "CONFIRMED", "pnu": "4182025021004020000", "isJip": true,
+        "jibunAddr": "경기도 가평군 가평읍 대곡리 402-1", "bdNm": "대곡아파트",
+        "unit": { "dong": "101", "ho": "999" }
+      },
+      "reg": {
+        "status": "REG_UNIT_NOT_FOUND", "complete": true,
+        "candidates": [{ "unique_no": "1355-2003-000099", "real_cls_cd": "집합건물", "dong": "101", "ho": "888" }]
+      }
+    },
+
+    {
+      "rowId": "pnuless-replayable",
+      "raw": "세종 누리로 59, 502동 1201호 (한솔동,첫마을아파트)",
+      "result": {
+        "status": "NAVER_CONFIRMED_PNU_FAILED", "pnu": null,
+        "jibunAddr": "세종특별자치시 한솔동 59 첫마을아파트",
+        "naverJibunAddr": "세종특별자치시 한솔동 59",
+        "bdNm": "첫마을아파트", "naverPnuRecoveryVersion": "1",
+        "unit": { "dong": "502", "ho": "506" }
+      }
+    },
+    {
+      "rowId": "pnuless-unmeasured",
+      "raw": "전북 군산시 신풍동 882-5번지 신풍동부향하나로아파트 904호",
+      "result": {
+        "status": "NAVER_CONFIRMED_PNU_FAILED", "pnu": null,
+        "jibunAddr": "전라북도 군산시 신풍동 882-5",
+        "bdNm": "신풍동부향하나로아파트", "naverPnuRecoveryVersion": "1",
+        "unit": { "dong": null, "ho": "904" }
+      }
+    }
+  ],
+  "extraHeaders": [],
+  "irosRun": { "phase": "complete", "interrupted": false }
+}

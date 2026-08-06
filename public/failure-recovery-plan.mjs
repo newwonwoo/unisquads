@@ -8,6 +8,7 @@ import {
   selectDongAgnosticHoCandidate,
   selectUniqueRawUnitCandidate
 } from "./unit-match.mjs";
+import { PNULESS_IROS_VERSION, buildPnulessIrosPlan } from "./pnuless-iros.mjs";
 import {
   AMBIGUOUS_PNU_RECOVERY_VERSION,
   buildAmbiguousPnuProbePlan,
@@ -120,6 +121,20 @@ export const FAILURE_RECOVERY_MODULES = Object.freeze({
     id: "R-IROS-EXPLICIT-ALTERNATE-LOT",
     phase: "IROS",
     version: "2",
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_PNULESS_ADDRESS: Object.freeze({
+    id: "R-IROS-PNULESS-ADDRESS",
+    phase: "IROS",
+    version: PNULESS_IROS_VERSION,
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_PNU_REVERSE: Object.freeze({
+    id: "R-ADDR-IROS-SOJAE-REVERSE-PNU",
+    phase: "ADDRESS",
+    version: PNULESS_IROS_VERSION,
     automatic: true,
     disposition: "AUTO_RETRY"
   }),
@@ -411,6 +426,14 @@ export function classifyFailureModule(row) {
   if (!result || !["CONFIRMED", "확정"].includes(result.status)) {
     if (needsNaverPnuExactRecovery(row)) return FAILURE_RECOVERY_MODULES.A_NAVER_PNU_EXACT;
     if (buildAmbiguousPnuProbePlan(row)) return FAILURE_RECOVERY_MODULES.A_AMBIGUOUS_PNU_IROS;
+    if (buildPnulessIrosPlan(row)) {
+      // 고유번호까지 확정된 뒤 남은 일은 소재지 역확정뿐이다.
+      const resolved = String(row?.reg?.status || "") === "RESOLVED" &&
+        Boolean(String(row?.reg?.unique_no || "").trim());
+      const reversed = row?.result?.pnulessRecovery?.version === PNULESS_IROS_VERSION;
+      if (resolved && !reversed) return FAILURE_RECOVERY_MODULES.I_PNU_REVERSE;
+      if (!resolved) return FAILURE_RECOVERY_MODULES.I_PNULESS_ADDRESS;
+    }
     if (result?.status === "SYSTEM_ERROR" ||
         (result?.status === "FAILED" && result?.failKind === "TRANSIENT")) {
       return FAILURE_RECOVERY_MODULES.A_TRANSIENT;

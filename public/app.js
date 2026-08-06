@@ -17,6 +17,22 @@ import {
   unitKey
 } from "./unit-match.mjs";
 import {
+  PNULESS_IROS_VERSION,
+  acceptReversePnu,
+  applyReversePnu,
+  buildConfirmedLotPnuIndex,
+  buildPnulessIrosPlan,
+  irosSojaeQuery,
+  lotIndexJusoCandidate,
+  markReversePnuRejected,
+  planReversePnuRecovery,
+  pnulessProbeResult
+} from "./pnuless-iros.mjs";
+import {
+  applyVerifiedUnitPropagation,
+  planVerifiedUnitPropagation
+} from "./verified-unit-propagation.mjs";
+import {
   matchUnitByBuildingProfile,
   unitIntentSignature
 } from "./iros-unit-profile.mjs";
@@ -3804,6 +3820,8 @@ function AddrRefineTestGui() {
   }, [result, BRIDGE, config.resolverKey, recordRegHealth]);
   const [batchStop, setBatchStop] = useState(false);
   const batchStopRef = useRef(false);
+  // IROS 소재지 역확정이 JUSO를 직접 호출하므로 IROS 배치보다 먼저 만든다.
+  const clients = mode === "mock" ? mockClients : makeRealClients(config.jusoKey);
   const lookupBatchUniqueNo = useCallback(async () => {
     const next = markStaleIrosRows(rows).map((row) => ({
       ...row,
@@ -3832,7 +3850,15 @@ function AddrRefineTestGui() {
       const row = next[idx];
       const ambiguousPlan = buildAmbiguousPnuProbePlan(row);
       if (ambiguousPlan) ambiguousPnuPlans.set(idx, ambiguousPlan);
-      if (row.result?.status !== "CONFIRMED") continue;
+      if (row.result?.status !== "CONFIRMED") {
+        // PNU가 없어도 주소·동·호가 확정적이면 IROS는 조회할 수 있다.
+        // 조회는 지번주소로 하고 PNU는 캐시 그룹 키로만 쓰이기 때문이다.
+        const pnulessPlan = buildPnulessIrosPlan(row);
+        if (!pnulessPlan) continue;
+        if (isReusableIrosResult(row.reg)) continue;
+        targets.push({ idx, row, pnulessPlan });
+        continue;
+      }
       if (row.result.isJip && !row.result.unit?.ho) {
         next[idx] = {
           ...row,
@@ -3861,7 +3887,13 @@ function AddrRefineTestGui() {
     setBatchUnitDone(initialIrosProgress.done);
     setBatchTotal(initialIrosProgress.total);
     setBatchRegDone(initialIrosProgress.done);
-    if (targets.length === 0 && pendingAlternateGroups.size === 0 && ambiguousPnuPlans.size === 0) {
+    // 조회할 것이 없어도 이번 실행에서 회수할 수 있는 후처리가 남아 있으면
+    // 조기 종료하지 않는다. 둘 다 네트워크 조회 없이(역확정은 JUSO만) 끝난다.
+    const pendingPropagation = planVerifiedUnitPropagation(next);
+    const pendingReversePnu = planReversePnuRecovery(next);
+    if (targets.length === 0 && pendingAlternateGroups.size === 0 &&
+        ambiguousPnuPlans.size === 0 && pendingPropagation.length === 0 &&
+        pendingReversePnu.length === 0) {
       setRows([...next]);
       await idbSet(BATCH_KEY, buildIrosSnapshot(next, extraHeaders, {
         phase: "complete",
@@ -3948,6 +3980,17 @@ function AddrRefineTestGui() {
     // 배치는 세대가 아니라 PNU 단위. PNU가 없을 때만 정규화 지번주소를 임시 키로 쓴다.
     const groups = /* @__PURE__ */ new Map();
     for (const t of targets) {
+      if (t.pnulessPlan) {
+        // 지번주소가 곧 그룹 키다. 같은 지번의 PNU 없는 행들이 완전후보를
+        // 한 번만 수집해 공유한다.
+        const member = {
+          ...t,
+          row: { ...t.row, result: pnulessProbeResult(t.row.result, t.pnulessPlan) }
+        };
+        if (!groups.has(t.pnulessPlan.groupKey)) groups.set(t.pnulessPlan.groupKey, []);
+        groups.get(t.pnulessPlan.groupKey).push(member);
+        continue;
+      }
       const pnuKey = t.row.result.pnu || `ADDR:${t.row.result.jibunAddr || ""}`;
       if (!groups.has(pnuKey)) groups.set(pnuKey, []);
       groups.get(pnuKey).push(t);
@@ -4084,6 +4127,7 @@ function AddrRefineTestGui() {
       const unitCandidatePool = cands;
       let unitProfileRecovery = null;
       let rawUnitRecovery = null;
+      let dongAgnosticRecovery = null;
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
           const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
@@ -4146,21 +4190,6 @@ function AddrRefineTestGui() {
           }
         }
       }
-      // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 원문 동 표기가 등기부 동 체계에
-      // 아예 존재하지 않고(101동 ↔ A동·가동·공란), 요청한 호를 가진 세대가 이
-      // 지번 전체에서 정확히 한 건일 때만 동을 무시하고 그 한 건을 채택한다.
-      // 요청 동이 후보에 실제로 있으면 "그 동에 그 호가 없다"가 근거 있는
-      // 사실이므로 모듈이 스스로 닫힌다.
-      let dongAgnosticRecovery = null;
-      if (!cands.length && wantDong && wantHo) {
-        const relaxed = selectDongAgnosticHoCandidate(unitCandidatePool, wantDong, wantHo);
-        if (relaxed?.candidate) {
-          cands = [relaxed.candidate];
-          dongAgnosticRecovery = relaxed;
-          applyModule("R-IROS-DONG-AGNOSTIC-HO", IROS_MODULE_VERSIONS.R_IROS_DONG_AGNOSTIC_HO);
-        }
-      }
-      stageCounts.dong_agnostic_ho = dongAgnosticRecovery ? 1 : 0;
       stageCounts.unit = cands.length;
       stageCounts.raw_unit_recovery = rawUnitRecovery ? 1 : 0;
 
@@ -4191,6 +4220,21 @@ function AddrRefineTestGui() {
           stageCounts.unit_profile_recovery = 0;
         }
       }
+
+      // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 원문 동 표기가 등기부 동 체계에
+      // 아예 존재하지 않고(101동 ↔ A동·가동·공란), 요청한 호를 가진 세대가 이
+      // 지번 전체에서 정확히 한 건일 때만 동을 무시하고 그 한 건을 채택한다.
+      // 요청 동이 후보에 실제로 있으면 "그 동에 그 호가 없다"가 근거 있는
+      // 사실이므로 모듈이 스스로 닫힌다.
+      if (!cands.length && wantDong && wantHo) {
+        const relaxed = selectDongAgnosticHoCandidate(unitCandidatePool, wantDong, wantHo);
+        if (relaxed?.candidate) {
+          cands = [relaxed.candidate];
+          dongAgnosticRecovery = relaxed;
+          applyModule("R-IROS-DONG-AGNOSTIC-HO", IROS_MODULE_VERSIONS.R_IROS_DONG_AGNOSTIC_HO);
+        }
+      }
+      stageCounts.dong_agnostic_ho = dongAgnosticRecovery ? 1 : 0;
 
       if (!cands.length) {
         return {
@@ -4256,8 +4300,10 @@ function AddrRefineTestGui() {
           applied_modules: appliedModules,
           raw_unit_recovery: rawUnitRecovery,
           unit_profile_recovery: unitProfileRecovery,
+          dong_agnostic_recovery: dongAgnosticRecovery,
           message: rawUnitRecovery ? "원문 동·층·호 표기로 완전후보 한 건 수렴" :
-            (unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치"),
+            (dongAgnosticRecovery ? "등기부에 없는 동 표기 — 지번 전체에서 호가 한 건으로 수렴" :
+            (unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치")),
           at: nowText()
         };
       }
@@ -4431,10 +4477,26 @@ function AddrRefineTestGui() {
       if (batchStopRef.current) break;
       const pnuKey = pnuKeys[g];
       const members = groups.get(pnuKey);
-      const { collection, cacheHit } = await loadCollection(pnuKey, members[0].row);
+      const groupAddress = members[0].pnulessPlan?.address || "";
+      const { collection, cacheHit } = await loadCollection(pnuKey, members[0].row, groupAddress);
 
       for (const member of members) {
-        let reg = await matchMember(member, collection);
+        let reg = await matchMember(member, collection, groupAddress);
+        if (member.pnulessPlan) {
+          next[member.idx] = {
+            ...next[member.idx],
+            reg: withIrosVersions({
+              ...reg,
+              pnuless_lookup: {
+                version: PNULESS_IROS_VERSION,
+                query_address: member.pnulessPlan.address,
+                address_source: member.pnulessPlan.addressSource,
+                strict_building: member.pnulessPlan.strictBuilding
+              }
+            })
+          };
+          continue;
+        }
         if (member.pnuProbe) {
           if (!ambiguousPnuAttempts.has(member.idx)) ambiguousPnuAttempts.set(member.idx, []);
           ambiguousPnuAttempts.get(member.idx).push({
@@ -4656,6 +4718,73 @@ function AddrRefineTestGui() {
       }
     }
 
+    // ── 동일 PNU·동·호 검증 고유번호 전파 ───────────────────────────
+    // 같은 전유부인데 원문 표기 차이로 한쪽만 확정된 행을 회수한다. 조회는
+    // 없고, 대상행이 이미 본 완전후보 안에 그 고유번호가 있을 때만 적용한다.
+    if (!batchStopRef.current) {
+      let propagated = 0;
+      for (const propagation of planVerifiedUnitPropagation(next)) {
+        const row = next[propagation.index];
+        next[propagation.index] = {
+          ...row,
+          reg: withIrosVersions(applyVerifiedUnitPropagation(row.reg, propagation))
+        };
+        propagated += 1;
+      }
+      if (propagated) await checkpoint({ phase: "propagation" }, { force: true });
+    }
+
+    // ── IROS 소재지 → JUSO 역확정으로 PNU 복구 ──────────────────────
+    // 고유번호가 한 건으로 확정된 PNU 없는 행만 대상이다. 질의어는 등기부
+    // 소재지에서 뽑은 `시도 시군구 법정동 지번`뿐이며 소유자명은 쓰지 않는다.
+    // 역확정에 실패해도 이미 확보한 고유번호는 유지한다.
+    if (!batchStopRef.current) {
+      const reverseTargets = planReversePnuRecovery(next);
+      // 같은 배치에서 이미 그 지번의 PNU를 확정한 행이 있으면 JUSO를 부르지
+      // 않는다. 검증은 네트워크 경로와 동일한 acceptReversePnu를 통과한다.
+      const confirmedLotIndex = buildConfirmedLotPnuIndex(next);
+      let reverseDone = 0;
+      for (const target of reverseTargets) {
+        if (batchStopRef.current) break;
+        const row = next[target.index];
+        let recovered = lotIndexJusoCandidate(target.irosCandidate, confirmedLotIndex);
+        if (!recovered) {
+          try {
+            recovered = await recoverJusoCandidateForNaver(target.query, clients);
+          } catch {
+            // 일시 오류는 판정으로 굳히지 않는다. 다음 실행에서 다시 시도한다.
+            continue;
+          }
+        }
+        const accepted = acceptReversePnu({
+          irosCandidate: target.irosCandidate,
+          jusoCandidate: recovered?.candidate,
+          queryAddress: target.plan.address
+        });
+        const applied = accepted.ok
+          ? applyReversePnu(row.result, {
+              accepted,
+              jusoCandidate: recovered.candidate,
+              uniqueNo: target.uniqueNo,
+              jusoQuery: recovered.query || target.query
+            })
+          : markReversePnuRejected(row.result, accepted.reason, {
+              iros_sojae: irosSojaeQuery(target.irosCandidate),
+              juso_query: recovered?.query || target.query
+            });
+        next[target.index] = { ...row, result: applied };
+        reverseDone += 1;
+        if (reverseDone % 10 === 0) {
+          await checkpoint({ phase: "pnu_reverse" });
+        }
+        // 색인 적중은 네트워크 호출이 아니므로 간격을 두지 않는다.
+        if (recovered.source !== "confirmed_lot_index") {
+          await new Promise((res) => setTimeout(res, 200));
+        }
+      }
+      if (reverseDone) await checkpoint({ phase: "pnu_reverse" }, { force: true });
+    }
+
     const finalProgress = irosProgressStats(next);
     const interrupted = batchStopRef.current || !finalProgress.final || ambiguousPnuRetryRequired > 0;
     await checkpoint({
@@ -4689,12 +4818,11 @@ function AddrRefineTestGui() {
       batchActivityRef.current = { ...batchActivityRef.current, iros: false };
       setBatchRegBusy(false);
     }
-  }, [rows, BRIDGE, config.resolverKey, extraHeaders, recordRegHealth, recordTestRun]);
+  }, [rows, BRIDGE, clients, config.resolverKey, extraHeaders, recordRegHealth, recordTestRun]);
   const stopBatch = useCallback(() => {
     batchStopRef.current = true;
     setBatchStop(true);
   }, []);
-  const clients = mode === "mock" ? mockClients : makeRealClients(config.jusoKey);
   const [unitDong, setUnitDong] = useState("");
   const [unitHo, setUnitHo] = useState("");
   const [unitOpen, setUnitOpen] = useState(false);
