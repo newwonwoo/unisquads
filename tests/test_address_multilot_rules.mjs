@@ -91,3 +91,33 @@ test("cross-region building correction needs zip evidence", () => {
   assert.equal(canAcceptZipBuildingCorrection({ ...base, zipRegions: ["충청남도|예산군"] }), false);
   assert.equal(canAcceptZipBuildingCorrection({ ...base, inputBuildingName: "현대아파트", resultBuildingName: "현대아파트" }), false);
 });
+
+test("건물명이 동으로 시작해도 앞 지번을 잃지 않는다", () => {
+  // "414-2 동산apt"의 동산을 동 표기로 읽어 414-2가 통째로 빠지던 문제.
+  // 광주 동산아파트는 414와 414-2 두 지번에 걸쳐 있는데 414로만 조회돼
+  // 101동이 후보에 아예 없었다(실측 134행).
+  assert.deepEqual(
+    extractExplicitLotRefs("광주 서구 농성동 414,414-2 동산apt 제 101동 101"),
+    [{ legal: "농성동", lot: "414" }, { legal: "농성동", lot: "414-2" }]
+  );
+  assert.deepEqual(
+    extractExplicitLotRefs("서울 강서구 등촌동 691-1 동성아파트 101-402"),
+    [{ legal: "등촌동", lot: "691-1" }]
+  );
+});
+
+test("숫자에 붙은 동·호·층은 여전히 지번이 아니다", () => {
+  // 완화는 뒤에 한글이 이어질 때만이다. 101동·608호는 그대로 세대 표기다.
+  assert.deepEqual(
+    extractExplicitLotRefs("서울 강남구 역삼동 736-25 101동 608호"),
+    [{ legal: "역삼동", lot: "736-25" }]
+  );
+  assert.deepEqual(
+    extractExplicitLotRefs("경기 이천시 부발읍 응암리 97-3외 이화아파트 201동 101호"),
+    [{ legal: "응암리", lot: "97-3" }]
+  );
+  assert.deepEqual(
+    extractExplicitLotRefs("충남 천안시 북면 상동리 91-6, 441-1 중앙아파트 101-405"),
+    [{ legal: "상동리", lot: "91-6" }, { legal: "상동리", lot: "441-1" }]
+  );
+});
