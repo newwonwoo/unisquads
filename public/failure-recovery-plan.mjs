@@ -5,6 +5,7 @@ import {
   candidateMatchesUnit,
   filterUnitPropertyCandidates,
   rawUnitRecoveryVariants,
+  selectDongAgnosticHoCandidate,
   selectUniqueRawUnitCandidate
 } from "./unit-match.mjs";
 import {
@@ -119,6 +120,13 @@ export const FAILURE_RECOVERY_MODULES = Object.freeze({
     id: "R-IROS-EXPLICIT-ALTERNATE-LOT",
     phase: "IROS",
     version: "2",
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_DONG_AGNOSTIC_HO: Object.freeze({
+    id: "R-IROS-DONG-AGNOSTIC-HO",
+    phase: "IROS",
+    version: "1",
     automatic: true,
     disposition: "AUTO_RETRY"
   }),
@@ -309,6 +317,18 @@ export function needsLotFallbackRematch(row) {
   return (reg?.candidates || []).some((candidate) => buildingKey(candidate?.buldnm) === wanted);
 }
 
+// 원문 동이 등기부 동 체계에 아예 없고 요청한 호가 지번 전체에서 한 건일 때만
+// 재매칭한다. 완전수집이 끝난 세대 실패에만 적용한다.
+export function needsDongAgnosticHoRematch(row) {
+  const reg = row?.reg;
+  if (String(reg?.status || "") !== "REG_UNIT_NOT_FOUND" || reg?.complete !== true) return false;
+  const unit = row?.result?.unit || {};
+  if (!unit.dong || !unit.ho) return false;
+  const typed = filterUnitPropertyCandidates(reg?.candidates || [], unit.dong, unit.ho);
+  if (!typed.verified) return false;
+  return Boolean(selectDongAgnosticHoCandidate(typed.candidates, unit.dong, unit.ho));
+}
+
 export function selectIrosRecoveryAction(row) {
   const reg = row?.reg;
   if (!reg || (reg.status === "RESOLVED" && String(reg.unique_no || "").trim())) return null;
@@ -356,6 +376,12 @@ export function selectIrosRecoveryAction(row) {
     return moduleDecision(
       FAILURE_RECOVERY_MODULES.I_LOT_FALLBACK,
       "IROS_LOT_FALLBACK_REMATCH"
+    );
+  }
+  if (needsDongAgnosticHoRematch(row)) {
+    return moduleDecision(
+      FAILURE_RECOVERY_MODULES.I_DONG_AGNOSTIC_HO,
+      "IROS_DONG_AGNOSTIC_HO_REMATCH"
     );
   }
   if (needsDongAgnosticRematch(row)) {
