@@ -100,11 +100,13 @@ import {
 import {
   buildingAnchorMatches,
   isDistinctiveBuildingName,
+  isBuildingNameNoise,
   isPositivePropagationReview,
   normalizeAttachedAdminSpacing,
   normalizeOwnerKey,
   parseCompactAlphaUnit,
-  splitImplausibleFloorHo
+  splitImplausibleFloorHo,
+  stripRegistryTail
 } from "./address-quality-rules.mjs";
 import {
   extractSubBuildingIntent,
@@ -120,6 +122,7 @@ import {
 import {
   addressMatchesZipRegions,
   aggregateCandidateKey,
+  canAcceptDongsoAnchorCorrection,
   canAcceptLotBuildingCorrection,
   canAcceptZipBuildingCorrection,
   candidateSupportsDong,
@@ -1020,10 +1023,11 @@ function extractBuildingName(raw) {
     // 동소(同所)는 등기부에서 "위와 같은 장소"를 뜻하는 참조어다. 지명도 건물명도 아니다.
     .replace(/상가|지하|대지권없음|번지|호실|필지|동소/g, " ")
     .replace(/\s+/g, " ").trim();
-  // 한글이 없는 잔재(A-, B- 등)는 건물명이 아니다
-  const toks = s.split(" ").filter((t) => t.length >= 2 && /[가-힣]/.test(t));
+  // 한글이 없는 잔재(A-, B- 등)와 등기부·택지 조각은 건물명이 아니다
+  const toks = s.split(" ").filter((t) =>
+    t.length >= 2 && /[가-힣]/.test(t) && !isBuildingNameNoise(t));
   if (!toks.length) return "";
-  return toks.sort((a, b) => b.length - a.length)[0];
+  return stripRegistryTail(toks.sort((a, b) => b.length - a.length)[0]);
 }
 
 // 시군구·읍면동 추출(현대화 후): 캐시키·검색어 조합용
@@ -1824,10 +1828,12 @@ function resolve(candidates, pre) {
   }
   // R7(2026-07-17): 복수 후보 중 원문 건물명과 bdNm이 일치하는 것을 채택한다.
   //   EXACT   정규화(공백·숫자 제거) 후 완전일치       → 채택
-  //   PARTIAL 포함관계, 짧은 쪽이 3자 이상 고유명       → 채택
+  //   PARTIAL 포함관계, 짧은 쪽이 2자 이상 고유명       → 채택
   //   RISKY   포함관계지만 짧은 쪽이 일반명            → 미채택
   //           "주공아파트"↔"개포주공아파트"는 전국의 주공 중 아무거나 걸린다
   //           "신현대아파트"↔"현대아파트"는 다른 단지다
+  //   2자 고유명("동원")도 받는다. 여러 후보에 걸리면 hits가 2개 이상이 되어
+  //   어차피 채택되지 않으므로, 유일할 때만 통과한다(부암동 319 동원, 실측 31행).
   if (deduped.length >= 2 && pre?.bldName) {
     const norm = (x) => String(x || "").replace(/\s/g, "").replace(/\d/g, "");
     const GENERIC = /^(주공|현대|삼성|대우|롯데|한신|경남|우성|쌍용|금호|신동아|시영)?(아파트|맨션|빌라|연립|타운)$/;
@@ -1838,7 +1844,7 @@ function resolve(candidates, pre) {
       if (o === b) return true;
       if (!(b.includes(o) || o.includes(b))) return false;
       const shorter = o.length <= b.length ? o : b;
-      return shorter.length >= 3 && !GENERIC.test(shorter);
+      return shorter.length >= 2 && !GENERIC.test(shorter);
     });
     if (hits.length === 1) {
       const cand = hits[0];
@@ -1912,9 +1918,25 @@ function buildDongsoAnchors(rows) {
     const raw = String(row && row.raw || "");
     if (!raw) continue;
     const p = preprocess(raw);
-    const key = [p.sgg, p.eup, p.emd].filter(Boolean).join("|");
-    if (!key) continue;
-    if (!first.has(key) && p.bldName) first.set(key, p.bldName);
+    // 앵커 이름과 법정동은 원문에서 직접 읽는다. preprocess는 구조화 과정에서
+    // 앞쪽 리와 건물명을 떨어뜨려서
+    //   "석정리 대심리78-1외4필지 장미마을 아파트 제101동제601호"
+    //     → emd "대심리", bldName ""
+    // 가 되고, 그 결과로 앵커를 만들면 "석정리 동소제102동제602호"가 같은
+    // 건물인데도 앵커를 못 찾는다(실측 10행).
+    const name = p.bldName || extractBuildingName(raw);
+    if (!name) continue;
+    const region = extractRegion(modernizeSgg(raw));
+    const leaves = [...new Set([
+      ...region.leafCandidates,
+      ...region.eupMyeonCandidates,
+      ...(p.emdCands || []),
+      p.emd
+    ].filter(Boolean))];
+    for (const leaf of (leaves.length ? leaves : [""])) {
+      const key = [p.sgg, p.eup, leaf].filter(Boolean).join("|");
+      if (key && !first.has(key)) first.set(key, name);
+    }
   }
   return first;
 }
@@ -2446,12 +2468,14 @@ function pipelineEvidenceForRow(row, groupHints, dongsoAnchors) {
 async function refineAddress(raw, clients, zipcode = "", groupHints = null, unitOverride = null, dongsoAnchors = null, owner = "") {
   // R9: 동소를 기준행 건물명으로 치환한 뒤 전처리한다(치환 후 파싱해야 동·호가 잡힌다)
   let _raw = raw;
+  let _dongsoAnchorName = "";
   if (dongsoAnchors && /동소/.test(String(raw))) {
     const p0 = preprocess(raw);
     const bld = dongsoAnchors.get([p0.sgg, p0.eup, p0.emd].filter(Boolean).join("|"));
-    if (bld) _raw = String(raw).replace(/동소\s*/, bld);
+    if (bld) { _raw = String(raw).replace(/동소\s*/, bld); _dongsoAnchorName = bld; }
   }
   const pre = preprocess(_raw);
+  pre.dongsoAnchorName = _dongsoAnchorName;
   // 복수세대 분리행: 배치가 지정한 세대를 그대로 쓴다(원문에는 여러 세대가 있다)
   if (unitOverride) pre.unit = { dong: unitOverride.dong || null, ho: unitOverride.ho || null };
   pre.ownerKeyword = ownerSearchKeyword(owner);
@@ -2664,6 +2688,18 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
       result.addressMatchEvidence = [...new Set([
         ...(result.addressMatchEvidence || []),
         "LOT_BUILDING_REGION_CORRECTION"
+      ])];
+    } else if (canAcceptDongsoAnchorCorrection({
+      validation: v,
+      anchorName: pre.dongsoAnchorName,
+      resultBuildingName: result.bdNm
+    })) {
+      v.status = "MATCH";
+      v.reason = "동소(同所) 기준행과 같은 장소로 판단";
+      result.reviewNeeded = result.reviewNeeded || "dongso_anchor_region_correction";
+      result.addressMatchEvidence = [...new Set([
+        ...(result.addressMatchEvidence || []),
+        "DONGSO_ANCHOR_REGION_CORRECTION"
       ])];
     }
     result.validation = v;

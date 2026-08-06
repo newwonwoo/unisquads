@@ -49,6 +49,8 @@ test("층 상한은 국내 공동주택 최고층보다 넉넉히 잡는다", ()
 
 test("extractUnit이 동·호를 뽑기 전에 절단을 바로잡는다", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.equal(/splitImplausibleFloorHo\n\} from "\.\/address-quality-rules\.mjs"/.test(source), true);
+  const importBlock = source.slice(source.indexOf('from "./address-quality-rules.mjs"') - 800,
+                                   source.indexOf('from "./address-quality-rules.mjs"'));
+  assert.equal(importBlock.includes("splitImplausibleFloorHo"), true);
   assert.equal(source.includes("let text = splitImplausibleFloorHo(str)"), true);
 });

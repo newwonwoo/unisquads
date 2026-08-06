@@ -113,3 +113,25 @@ export function splitImplausibleFloorHo(value) {
       ? `${prev}${ho[0]} ${ho.slice(1)}${suffix}`
       : matched);
 }
+
+// 숫자를 지우고 남은 등기부 조각과 택지개발 표기는 건물명이 아니다.
+//   ...동소제102동제602호   → 잔재 "동제"가 건물명이 되어 R9 동소 치환을 오염시킨다
+//                            (예천 석정리 24행: 네이버 질의가 "동제제"가 되어 0건)
+//   ...현진에버빌아파트제105동7층702호 → 꼬리 "제"가 붙어 네이버 0건 (3행)
+//   창원 도계동 144블록 5노트 → "블록"으로 검색해 엉뚱한 건물을 잡는다 (2행)
+const REGISTRY_FRAGMENT = /^[제동호층]+$/;
+const LAND_PLAN_TOKEN = /^(블록|블럭|로트|롯트|노트|지구|구역)$/;
+
+export function isBuildingNameNoise(token) {
+  const value = String(token || "").trim();
+  if (!value) return true;
+  return REGISTRY_FRAGMENT.test(value) || LAND_PLAN_TOKEN.test(value);
+}
+
+// 꼬리에 남은 "제"만 떼어낸다. 동·호·층은 건물명 일부일 수 있어 건드리지 않는다.
+// 떼고 나서 두 글자가 안 남으면 그 "제"는 이름의 일부다("거제" → "거"가 되면 안 된다).
+export function stripRegistryTail(name) {
+  const value = String(name || "").trim();
+  const stripped = value.replace(/제+$/, "");
+  return stripped.length >= 2 ? stripped : value;
+}
