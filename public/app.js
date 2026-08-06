@@ -103,7 +103,8 @@ import {
   isPositivePropagationReview,
   normalizeAttachedAdminSpacing,
   normalizeOwnerKey,
-  parseCompactAlphaUnit
+  parseCompactAlphaUnit,
+  splitImplausibleFloorHo
 } from "./address-quality-rules.mjs";
 import {
   extractSubBuildingIntent,
@@ -119,6 +120,7 @@ import {
 import {
   addressMatchesZipRegions,
   aggregateCandidateKey,
+  canAcceptLotBuildingCorrection,
   canAcceptZipBuildingCorrection,
   candidateSupportsDong,
   extractExplicitLotRefs,
@@ -492,7 +494,8 @@ const RE_ALPHA_DONG_BARE_HO = /(?:^|\s)제?(에이치|에이|비이|에프|비|�
 const normalizeAlphaDong = (value) => KOREAN_ALPHA_DONG[value] ||
   (/^[A-Za-z]$/.test(value) ? value.toUpperCase() : value);
 function extractUnit(str) {
-  let text = str, dong = null, ho = null, floor = null, compactAlpha = false;
+  // 지번에 호수가 붙어 온 경우 절단 위치부터 바로잡는다(있을 수 없는 층 → 한 자리 되돌림).
+  let text = splitImplausibleFloorHo(str), dong = null, ho = null, floor = null, compactAlpha = false;
   // Q1: 비동4-501 같은 등기부 compact 표기를 행정구역·지번보다 먼저 분리한다.
   // 이동·지동처럼 실제 법정동일 수 있는 표기는 helper 단계에서 제외한다.
   const compact = parseCompactAlphaUnit(text);
@@ -2647,6 +2650,20 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
       result.addressMatchEvidence = [...new Set([
         ...(result.addressMatchEvidence || []),
         "ZIP_BUILDING_REGION_CORRECTION"
+      ])];
+    } else if (canAcceptLotBuildingCorrection({
+      validation: v,
+      rawText: pre.raw,
+      resultAddress: result.jibunAddr,
+      inputBuildingName: pre.bldName,
+      resultBuildingName: result.bdNm
+    })) {
+      v.status = "MATCH";
+      v.reason = "지번·건물명이 원문과 일치해 원문 법정동 오기로 판단";
+      result.reviewNeeded = result.reviewNeeded || "lot_building_region_correction";
+      result.addressMatchEvidence = [...new Set([
+        ...(result.addressMatchEvidence || []),
+        "LOT_BUILDING_REGION_CORRECTION"
       ])];
     }
     result.validation = v;

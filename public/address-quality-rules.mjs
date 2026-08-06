@@ -98,3 +98,18 @@ export function isDistinctiveBuildingName(value) {
 export function isPositivePropagationReview(value) {
   return new Set(["bldname_matched", "juso_multi"]).has(String(value || ""));
 }
+
+// 네 자리 호수는 앞 두 자리가 층이다. 지번에 바로 붙어 온 숫자를 통째로 호로 읽으면
+// 있을 수 없는 층이 나오는데, 그건 호수가 큰 게 아니라 절단 위치가 틀렸다는 뜻이다.
+//   중랑구 중화동 274-76701호  →  274-7 + 6701호(67층) ✗   274-76 + 701호(7층) ✓
+//   경남 창원시 내동 456-19301호 → 456-1 + 9301호(93층) ✗  456-19 + 301호(3층) ✓
+// 앞자리를 하나 지번 쪽으로 돌려주면 지번 파싱도 함께 맞는다. 숫자에 붙어 온
+// 경우에만 적용한다 — 상가·오피스텔은 층과 무관한 네 자리 호수를 쓰기도 한다.
+export const MAX_PLAUSIBLE_FLOOR = 60;
+
+export function splitImplausibleFloorHo(value) {
+  return String(value || "").replace(/(\d)(\d{4})(\s*호)/g, (matched, prev, ho, suffix) =>
+    Number(ho.slice(0, 2)) > MAX_PLAUSIBLE_FLOOR
+      ? `${prev}${ho[0]} ${ho.slice(1)}${suffix}`
+      : matched);
+}
