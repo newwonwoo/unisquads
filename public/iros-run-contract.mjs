@@ -73,7 +73,9 @@ export function isProtectedIrosSuccess(reg) {
 }
 
 export function isReusableIrosResult(reg, current = IROS_RUN_VERSIONS) {
-  if (!reg.status || reg.stale === true || reg.recovery_pending === true) return false;
+  // 조회를 한 번도 하지 않은 행은 reg 자체가 없다. 이 경로는 저장된 배치를
+  // 다시 열 때 가장 먼저 지나가므로, 여기서 던지면 앱이 마운트 중에 죽는다.
+  if (!reg || !reg.status || reg.stale === true || reg.recovery_pending === true) return false;
   if (isProtectedIrosSuccess(reg)) return true;
   return !isRetryableIrosStatus(reg.status);
 }
