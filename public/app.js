@@ -61,6 +61,7 @@ import {
 } from "./batch-workflow-state.mjs";
 import { APP_VERSION, RELEASED_AT, buildStamp } from "./version.mjs";
 import { carryOverResults } from "./result-carryover.mjs";
+import { createAdaptiveLimit, isTransientOutcome, runAdaptivePool } from "./batch-concurrency.mjs";
 import {
   browserTabHidden,
   shouldFlushBatchUi,
@@ -4920,24 +4921,36 @@ function AddrRefineTestGui() {
     let lastCheckpointAt = Date.now();
     setBatchGroupDone(0);
     let consecTransient = 0;   // 연속 '일시 오류' 수 — 한도 소진/장애 감지용(PM-01)
-    for (const [, idxs] of groups) {
-      if (batchStopRef.current) break;
+    // 그룹끼리 의존하지 않으므로 동시에 처리한다(근거: groupHints·dongsoAnchors는
+    // 루프 전에 원문만으로 계산되고, 주소군 전파는 루프 뒤에 돈다. 각 그룹은
+    // 자기 행 인덱스에만 쓴다). 한도는 낮게 시작해 성공이 쌓이면 올리고
+    // 일시 오류가 나오면 즉시 반으로 줄인다.
+    const concurrency = createAdaptiveLimit();
+    await runAdaptivePool([...groups.values()], async (idxs) => {
+      if (batchStopRef.current) return;
       let r;
       try {
         r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));  // 대표는 그룹 첫 행의 원본 raw + 우편번호
-        consecTransient = 0;
       } catch (e) {
         // W4(2026-07-17): transient(API 순간한도 429 등)면 800ms 대기 후 1회 자동 재시도.
         // 순간한도는 잠깐 기다리면 풀림. 1회만(2회+는 배치 지연). 실패 시 기존 TRANSIENT 기록.
         try {
           await new Promise((res) => setTimeout(res, 800));
           r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));
-          consecTransient = 0;
         } catch (e2) {
           r = { status: "FAILED", failKind: "TRANSIENT",
                 message: `일시 오류(재시도 후): ${e2 && e2.message ? e2.message : e2}` };
-          consecTransient++;
         }
+      }
+      // refineAddress는 API 장애를 예외로 올리지 않고 SYSTEM_ERROR 결과로
+      // 돌려주므로 예외만 보면 장애 중에도 성공으로 센다. 결과 상태로 판정해
+      // 동시 실행을 줄이고 연속 실패도 여기서 센다.
+      if (isTransientOutcome(r)) {
+        consecTransient += 1;
+        concurrency.onTransient();
+      } else {
+        consecTransient = 0;
+        concurrency.onSuccess();
       }
       for (const i of idxs) {
         const row = next[i];
@@ -4966,20 +4979,22 @@ function AddrRefineTestGui() {
         pendingBatchUiSyncRef.current = true;
       }
       if (shouldPersistBatchCheckpoint({ now, lastCheckpointAt })) {
+        // 여러 작업이 동시에 이 지점을 통과해 전체 배열을 중복 저장하지 않도록
+        // 저장 전에 시각을 먼저 올린다.
+        lastCheckpointAt = now;
         if (!hidden) setRows([...next]);
         else pendingBatchUiSyncRef.current = true;
         await idbSet(BATCH_KEY, { v: 2, rows: next, extraHeaders });
-        lastCheckpointAt = Date.now();
       }
       if (consecTransient >= 20) {
         // 연속 20그룹이 전부 일시오류 = 한도 소진 또는 API 장애 가능성 높음.
         // 계속 헛호출하지 않고 자동 중단(진행분은 저장돼 있고, 실패분은
         // TRANSIENT라 '일괄 정제' 재클릭 시 그 지점부터 재시도됨).
+        // 성공이 하나라도 나오면 0으로 돌아가므로 동시 실행에서도 뜻이 같다.
         batchStopRef.current = true;
         setAutoStopMsg(`연속 오류 ${consecTransient}회 감지 — API 한도 소진 또는 장애 가능성이 있어 자동 중단했습니다. 잠시 후(또는 내일) '일괄 정제'를 다시 누르면 실패분부터 이어서 진행합니다.`);
-        break;
       }
-    }
+    }, { limit: concurrency, shouldStop: () => batchStopRef.current });
     // R8'(2026-07-17): 모든 조회가 끝난 뒤 마지막에 전파한다. 앞 단계가
     // CONFIRMED를 늘릴수록 기준행이 생기는 그룹도 늘어나므로 순서가 중요하다.
     if (!batchStopRef.current) {
