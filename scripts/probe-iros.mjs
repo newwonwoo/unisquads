@@ -62,9 +62,12 @@ async function loadTargets() {
   return [{ addr: inlineAddr, dong: flag("dong"), ho: flag("ho"), bdnm: flag("bdnm") }];
 }
 
-// "주소 | 동 | 호 | 건물명" — 뒤 세 개는 생략 가능
+// "주소 | 동 | 호 | 건물명" — 뒤 세 개는 생략 가능. 줄 끝 # 주석은 버린다.
 function parseLine(line) {
-  const [addr, dong = "", ho = "", bdnm = ""] = line.split("|").map((x) => x.trim());
+  const [addr, dong = "", ho = "", bdnm = ""] = line
+    .replace(/\s+#.*$/, "")
+    .split("|")
+    .map((x) => x.trim());
   return { addr, dong, ho, bdnm };
 }
 
