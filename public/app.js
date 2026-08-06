@@ -10,6 +10,7 @@ import {
   filterUnitPropertyCandidates,
   matchedCandidateUnitVariant,
   rawUnitRecoveryVariants,
+  selectDongAgnosticHoCandidate,
   selectUniqueRawUnitCandidate,
   summarizeCandidatePropertyClasses,
   targetPropertyClass,
@@ -4145,6 +4146,21 @@ function AddrRefineTestGui() {
           }
         }
       }
+      // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 원문 동 표기가 등기부 동 체계에
+      // 아예 존재하지 않고(101동 ↔ A동·가동·공란), 요청한 호를 가진 세대가 이
+      // 지번 전체에서 정확히 한 건일 때만 동을 무시하고 그 한 건을 채택한다.
+      // 요청 동이 후보에 실제로 있으면 "그 동에 그 호가 없다"가 근거 있는
+      // 사실이므로 모듈이 스스로 닫힌다.
+      let dongAgnosticRecovery = null;
+      if (!cands.length && wantDong && wantHo) {
+        const relaxed = selectDongAgnosticHoCandidate(unitCandidatePool, wantDong, wantHo);
+        if (relaxed?.candidate) {
+          cands = [relaxed.candidate];
+          dongAgnosticRecovery = relaxed;
+          applyModule("R-IROS-DONG-AGNOSTIC-HO", IROS_MODULE_VERSIONS.R_IROS_DONG_AGNOSTIC_HO);
+        }
+      }
+      stageCounts.dong_agnostic_ho = dongAgnosticRecovery ? 1 : 0;
       stageCounts.unit = cands.length;
       stageCounts.raw_unit_recovery = rawUnitRecovery ? 1 : 0;
 

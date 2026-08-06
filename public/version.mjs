@@ -9,12 +9,17 @@
 //                              — Vercel이 실제로 빌드·배포한 시점 (배포 때 생성)
 // "고쳤다"와 "배포됐다"는 다른 사실이므로 한쪽만 보고 판단하지 않는다.
 
-export const APP_VERSION = "1.6.0";
+export const APP_VERSION = "1.6.1";
 
 // ISO 8601. 표시할 때만 KST로 바꾼다.
-export const RELEASED_AT = "2026-08-06T16:15:56+09:00";
+export const RELEASED_AT = "2026-08-06T16:22:58+09:00";
 
 export const CHANGELOG = Object.freeze([
+  Object.freeze({
+    version: "1.6.1",
+    released_at: "2026-08-06T16:22:58+09:00",
+    summary: "IROS 중복 동 표기 복구 + 등기부 동 체계가 다른 건물의 동 무시 매칭"
+  }),
   Object.freeze({
     version: "1.6.0",
     released_at: "2026-08-06T16:15:56+09:00",

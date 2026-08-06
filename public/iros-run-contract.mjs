@@ -1,5 +1,6 @@
 import {
   needsCommercialRangeUnitRematch,
+  needsDongAgnosticHoRematch,
   needsDongAgnosticRematch,
   needsLotFallbackRematch,
   needsUnitBearingBuildingRematch,
@@ -9,6 +10,7 @@ import {
 
 export {
   needsCommercialRangeUnitRematch,
+  needsDongAgnosticHoRematch,
   needsDongAgnosticRematch,
   needsLotFallbackRematch,
   needsUnitBearingBuildingRematch,

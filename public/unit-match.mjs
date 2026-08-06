@@ -12,7 +12,8 @@ export const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_UNIT_PROFILE: "2",
   R_IROS_UNIT_BEARING_BUILDING: "1",
   R_IROS_DONG_AGNOSTIC: "1",
-  R_IROS_LOT_FALLBACK: "1"
+  R_IROS_LOT_FALLBACK: "1",
+  R_IROS_DONG_AGNOSTIC_HO: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -94,6 +95,11 @@ export function candidateHasNoDong(candidate) {
   return candidateUnitVariants(candidate).every((variant) => !variant.dong);
 }
 
+// `106동 1동 102호` — 숫자 동 두 개가 연속으로 붙고 그 뒤에 호가 오는 표기만
+// 잡는다. `101동 상가 102호`처럼 사이에 다른 토큰이 끼면 중복 표기가 아니다.
+const RE_DUPLICATE_DONG_HO =
+  /(?:^|\s)제?\s*(\d{1,4})\s*동\s*제?\s*(\d{1,4})\s*동\s*제?\s*(\d{1,5}(?:-\d{1,4})?)\s*호(?=\s|$)/g;
+
 function uniqueUnitVariants(variants) {
   // 동이 없는 건물(단일동 아파트·빌라)도 층 복구 대상이다. 호만 있으면 유효하다.
   return variants.filter((variant, index, source) =>
@@ -157,6 +163,23 @@ export function rawUnitRecoveryVariants(rawAddress, currentUnit = {}) {
     }
   }
 
+  // 106동 1동 102호처럼 동 표기가 연달아 두 번 나오는 원문. 전처리는 호에 가장
+  // 가까운 동만 채택하므로 앞쪽 동 표기가 통째로 유실된다. 어느 쪽이 진짜 동인지
+  // 원문만으로는 결정할 수 없으므로 두 해석을 모두 후보로 만들고, 완전 후보에서
+  // 하나의 고유번호로 수렴할 때만 자동확정한다(수렴 판정은 호출측 계약).
+  if (currentHo) {
+    const matches = [...raw.matchAll(RE_DUPLICATE_DONG_HO)];
+    const match = matches.at(-1);
+    if (match && unitKey(match[3], "ho") === currentHo) {
+      for (const token of [match[1], match[2]]) {
+        const dong = dongAliasKey(token);
+        if (dong && dong !== currentDong) {
+          variants.push({ dong, ho: currentHo, source: "raw_duplicate_dong" });
+        }
+      }
+    }
+  }
+
   // 지하1-비02호처럼 층·호가 하이픈으로 붙은 지하 표기.
   if (currentHo || currentDong) {
     const matched = raw.match(/(?:^|\s)(?:\uC9C0\uD558|\uC9C0|B|b)\s*(\d{1,2})\s*-\s*(?:\uBE44|B|b)\s*(\d{1,3})\s*\uD638?(?=\s|$)/);
@@ -213,6 +236,41 @@ export function selectUniqueRawUnitCandidate(candidates, rawAddress, currentUnit
     };
   }
   return null;
+}
+
+// R-IROS-DONG-AGNOSTIC-HO: 원문 동 표기가 등기부 동 체계와 아예 다른 건물이
+// 있다(원문 `101동`, 등기부 `A동`·`가동`·공란). 요청한 동이 완전 후보 어디에도
+// 존재하지 않고, 요청한 호를 가진 세대가 지번 전체에서 정확히 한 건일 때만
+// 동을 무시하고 그 한 건을 채택한다.
+//
+// 요청 동이 후보에 실제로 존재하면 이 경로는 닫는다. 그 경우 "그 동에는 해당
+// 호가 없다"는 것이 근거 있는 사실이므로, 다른 동의 같은 호로 대체하면 오확정이다.
+export function selectDongAgnosticHoCandidate(candidates, wantedDong, wantedHo) {
+  const dong = dongAliasKey(wantedDong);
+  const ho = unitKey(wantedHo, "ho");
+  if (!dong || !ho) return null;
+  const source = Array.isArray(candidates) ? candidates : [];
+  const dongExists = source.some((candidate) =>
+    candidateUnitVariants(candidate).some((variant) => variant.dong === dong)
+  );
+  if (dongExists) return null;
+  const matched = source.filter((candidate) => candidateMatchesUnit(candidate, "", ho));
+  const unique = new Map();
+  for (const candidate of matched) {
+    const key = candidateIdentity(candidate);
+    if (key && !unique.has(key)) unique.set(key, candidate);
+  }
+  if (unique.size !== 1) return null;
+  return {
+    candidate: [...unique.values()][0],
+    requested_dong: dong,
+    matched_ho: ho,
+    matched_candidate_count: matched.length,
+    candidate_dongs: [...new Set(
+      source.flatMap((candidate) =>
+        candidateUnitVariants(candidate).map((variant) => variant.dong).filter(Boolean))
+    )].sort()
+  };
 }
 
 export function buildingKey(value) {

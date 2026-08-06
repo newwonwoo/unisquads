@@ -91,6 +91,16 @@ test("원문에 N동이 적혀 있으면 동을 무시하지 않는다", () => {
   assert.equal(needsDongAgnosticRematch(row), false);
 });
 
+test("복수결과일 때는 원문 N동 부재 규칙이 맡는다", () => {
+  // DONG-AGNOSTIC-HO는 REG_UNIT_NOT_FOUND만 본다. REG_MULTI는 이 규칙이 받는다.
+  const row = {
+    raw: "강원 횡성군 횡성읍 읍하리 442 서도아파트 102",
+    result: { status: "CONFIRMED", unit: { dong: "101", ho: "102" }, bdNm: "서도1차아파트" },
+    reg: reg({ status: "REG_MULTI", candidates: [cand("A", "", "102")] })
+  };
+  assert.equal(needsDongAgnosticRematch(row), true);
+});
+
 test("호로만 봐도 여러 건이면 재매칭 대상이 아니다", () => {
   const row = {
     raw: "강원 횡성군 횡성읍 읍하리 442 서도아파트 102",
@@ -139,7 +149,8 @@ test("이미 고유번호를 얻은 행은 재조회하지 않는다", () => {
   const marked = markStaleIrosRows(rows);
   assert.equal(marked[0].reg.stale, undefined);
   assert.equal(marked[1].reg.stale, true);
-  assert.equal(marked[1].reg.stale_reason, "IROS_DONG_AGNOSTIC_REMATCH");
+  // 요청 동이 후보에 아예 없다는 더 강한 근거가 먼저 걸린다.
+  assert.equal(marked[1].reg.stale_reason, "IROS_DONG_AGNOSTIC_HO_REMATCH");
 });
 
 test("매처 버전을 올려 새 매칭 규칙이 실행 계약에 반영된다", async () => {
@@ -156,4 +167,77 @@ test("app.js가 두 폴백을 매칭 경로에 연결한다", async () => {
   const fallback = source.indexOf('applyModule("R-IROS-LOT-FALLBACK"');
   const propertyClass = source.indexOf("filterUnitPropertyCandidates(cands");
   assert.equal(fallback < propertyClass, true);
+});
+
+test("동 표기가 연달아 두 번 나오면 두 해석을 모두 후보로 만든다", async () => {
+  const { rawUnitRecoveryVariants: variants } = await import("../public/unit-match.mjs");
+  // 전북 전주시 완산구 효자동1가 799 …한신휴플러스아파트 106동 1동 102호 (실측 40행)
+  // 전처리는 호에 가장 가까운 "1동"만 채택해 진짜 동인 106동이 유실된다.
+  assert.deepEqual(
+    variants("전북 전주시 완산구 효자동1가 799 효자동한신휴플러스아파트 106동 1동 102호",
+      { dong: "1", ho: "102" }).map((v) => `${v.dong}/${v.ho}`),
+    ["106/102"]
+  );
+  // 사이에 다른 토큰이 끼면 중복 표기가 아니다.
+  assert.deepEqual(
+    variants("서울 강남구 역삼동 101동 상가 102호", { dong: "101", ho: "102" }), []
+  );
+});
+
+test("요청 동이 등기부에 아예 없고 호가 유일하면 동을 무시한다", async () => {
+  const { selectDongAgnosticHoCandidate } = await import("../public/unit-match.mjs");
+  // 원문 101동 ↔ 등기부 A동·가동·공란
+  const picked = selectDongAgnosticHoCandidate(
+    [{ unique_no: "A", dong: "A", ho: "102" }, { unique_no: "B", dong: "A", ho: "103" }],
+    "101", "102"
+  );
+  assert.equal(picked?.candidate.unique_no, "A");
+  assert.equal(picked?.requested_dong, "101");
+});
+
+test("요청 동이 등기부에 존재하면 동을 무시하지 않는다", async () => {
+  const { selectDongAgnosticHoCandidate } = await import("../public/unit-match.mjs");
+  // "그 동에 그 호가 없다"는 근거 있는 사실이므로 다른 동으로 대체하면 오확정이다.
+  assert.equal(selectDongAgnosticHoCandidate(
+    [{ unique_no: "A", dong: "101", ho: "999" }, { unique_no: "B", dong: "102", ho: "102" }],
+    "101", "102"
+  ), null);
+  // 호가 여러 건이면 확정하지 않는다.
+  assert.equal(selectDongAgnosticHoCandidate(
+    [{ unique_no: "A", dong: "A", ho: "102" }, { unique_no: "B", dong: "B", ho: "102" }],
+    "101", "102"
+  ), null);
+});
+
+test("중복 동·동무시 복구가 재판정 대상으로 승격된다", async () => {
+  const { needsDongAgnosticHoRematch } = await import("../public/iros-run-contract.mjs");
+  const base = {
+    complete: true, collector_version: "iros-collector-v4", parser_version: "iros-parser-v4",
+    matcher_version: "iros-matcher-v11", recovery_version: "iros-recovery-v5"
+  };
+  const row = {
+    raw: "경북 경주시 황성동 241-4 청우아파트 302동 102호",
+    result: { status: "CONFIRMED", unit: { dong: "302", ho: "102" }, bdNm: "청우아파트" },
+    reg: { ...base, status: "REG_UNIT_NOT_FOUND",
+      candidates: [{ unique_no: "A", dong: "가", ho: "102", real_cls_cd: "집합건물" }] }
+  };
+  assert.equal(needsDongAgnosticHoRematch(row), true);
+
+  // 중복 동은 기존 RAW_UNIT 경로가 잡는다.
+  const dup = {
+    raw: "전북 전주시 완산구 효자동1가 799 한신휴플러스 106동 1동 102호",
+    result: { status: "CONFIRMED", unit: { dong: "1", ho: "102" }, bdNm: "한신휴플러스" },
+    reg: { ...base, status: "REG_UNIT_NOT_FOUND",
+      candidates: [{ unique_no: "A", dong: "106", ho: "102", real_cls_cd: "집합건물" }] }
+  };
+  assert.equal(markStaleIrosRows([dup])[0].reg.stale_reason, "RAW_UNIT_REMATCH");
+});
+
+test("app.js가 동무시 폴백을 마지막 관문으로 둔다", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.equal(source.includes('applyModule("R-IROS-DONG-AGNOSTIC-HO"'), true);
+  // 정상 매칭·RAW-UNIT을 모두 지난 뒤에만 열린다.
+  const rawUnit = source.indexOf('applyModule("R-IROS-RAW-UNIT"');
+  const agnosticHo = source.indexOf('applyModule("R-IROS-DONG-AGNOSTIC-HO"');
+  assert.equal(rawUnit < agnosticHo, true);
 });
