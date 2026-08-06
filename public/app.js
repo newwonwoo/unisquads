@@ -59,6 +59,7 @@ import {
   BATCH_PRIMARY_ACTIONS,
   deriveBatchWorkflowState
 } from "./batch-workflow-state.mjs";
+import { APP_VERSION, RELEASED_AT, buildStamp } from "./version.mjs";
 import {
   browserTabHidden,
   shouldFlushBatchUi,
@@ -5580,7 +5581,13 @@ function AddrRefineTestGui() {
       onMouseLeave: (e) => e.currentTarget.style.opacity = 0.55
     },
     "\u2699"
-  ), /* @__PURE__ */ React.createElement(EnvSettings, { open: settingsOpen, onClose: () => setSettingsOpen(false), config, onSave: saveConfig }), /* @__PURE__ */ React.createElement("div", { style: { position: "relative", zIndex: 1 } }, /* @__PURE__ */ React.createElement("header", { style: { padding: "44px 20px 8px", textAlign: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { fontFamily: mono, fontSize: 11, color: C.cyan, letterSpacing: "0.45em", marginBottom: 12 } }, "ADDR-REFINE\xA0\xB7\xA0v0.1"), /* @__PURE__ */ React.createElement("h1", { style: { fontSize: "clamp(26px, 5.4vw, 40px)", fontWeight: 800, margin: 0, lineHeight: 1.2, letterSpacing: "-0.02em" } }, "\uC5B4\uB5A4 \uC8FC\uC18C\uB4E0,", " ", /* @__PURE__ */ React.createElement("span", { style: {
+  ), /* @__PURE__ */ React.createElement(EnvSettings, { open: settingsOpen, onClose: () => setSettingsOpen(false), config, onSave: saveConfig }), /* @__PURE__ */ React.createElement("div", { style: { position: "relative", zIndex: 1 } }, /* @__PURE__ */ React.createElement("header", { style: { padding: "44px 20px 8px", textAlign: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 12 } },
+    /* @__PURE__ */ React.createElement("div", { style: { fontFamily: mono, fontSize: 11, color: C.cyan, letterSpacing: "0.45em" } },
+      `ADDR-REFINE\xA0\xB7\xA0${buildStamp().label}`),
+    /* @__PURE__ */ React.createElement("div", {
+      title: "위: 이 코드가 만들어진 시점 · 아래: 실제 배포 시점",
+      style: { fontFamily: mono, fontSize: 9.5, color: C.faint, letterSpacing: "0.06em", marginTop: 4 }
+    }, buildStamp().detail)), /* @__PURE__ */ React.createElement("h1", { style: { fontSize: "clamp(26px, 5.4vw, 40px)", fontWeight: 800, margin: 0, lineHeight: 1.2, letterSpacing: "-0.02em" } }, "\uC5B4\uB5A4 \uC8FC\uC18C\uB4E0,", " ", /* @__PURE__ */ React.createElement("span", { style: {
     background: `linear-gradient(90deg, ${C.cyan}, ${C.indigo})`,
     WebkitBackgroundClip: "text",
     backgroundClip: "text",
