@@ -75,3 +75,38 @@ export function canAcceptNaverRegionCorrection({
   if (!(addressMatchEvidence || []).includes("EXACT_ROAD")) return false;
   return sameBuildingIdentity(inputBuildingName, resultBuildingName);
 }
+
+// 원문에 "반촌리420-6반촌명지아파트103-412"처럼 법정동이 지번·건물명과 통째로
+// 붙어 오는 경우가 있다. normalizeAttachedAdminSpacing은 뒤가 숫자로 끝날 때만
+// 띄우므로 이런 토큰은 지역 검증에서 통째로 버려지고, 원문에 분명히 있는
+// 법정동이 "불일치"로 차단된다. 검증 후보를 뽑을 때만 앞머리를 인정한다.
+// 검색어·동호 파싱은 건드리지 않는다.
+const RE_GLUED_ADMIN = /^([가-힣]{1,4}(?:동|읍|면|리|가))\d/;
+// 에이동101호 같은 알파벳 동 표기는 법정동이 아니다.
+const ALPHA_DONG = /^(?:에이|비이|씨|디|에프|에이치|[A-Za-z])동$/;
+
+export function gluedAdminToken(token) {
+  const value = String(token || "").trim();
+  // 상동5길·중앙로2 같은 도로명은 앞머리가 법정동처럼 보여도 도로다.
+  if (/(길|로)$/.test(value)) return "";
+  const matched = value.match(RE_GLUED_ADMIN);
+  if (!matched) return "";
+  const head = matched[1];
+  if (ALPHA_DONG.test(head) || isBuildingPartToken(head)) return "";
+  return head;
+}
+
+// 읍면은 리(법정동 말단)의 상위 계층이다. 같은 시군구 안에서 리 이름은 사실상
+// 유일하므로, 리가 일치하면 읍면 표기 차이는 원문 쪽 오류로 본다.
+//   충남 당진군 송산면 진관리642-2  →  충남 당진시 고대면 진관리 642-6 (실측)
+// 반대로 리가 불일치하면 읍면 일치 여부와 무관하게 그대로 차단된다.
+export function blockingRegionLevel(levels) {
+  const list = levels || [];
+  const leafMatched = list.some((level) => level.name === "법정동" && level.compared?.match);
+  for (const level of list) {
+    if (level.compared?.match) continue;
+    if (level.name === "읍면" && leafMatched) continue;
+    return level;
+  }
+  return null;
+}

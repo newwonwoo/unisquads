@@ -90,7 +90,9 @@ import {
 } from "./browser-test-log.mjs";
 import {
   NAVER_PNU_RECOVERY_VERSION,
+  blockingRegionLevel,
   canAcceptNaverRegionCorrection,
+  gluedAdminToken,
   isBuildingPartToken,
   naverPnuRecoveryQueries,
   shouldEscalateJusoMultiToNaver
@@ -344,6 +346,14 @@ function extractRegion(text) {
   for (const t of s.split(" ")) {
     if (isBuildingPartToken(t)) continue;
     if (RE_SGG.test(t) && out.sgg.length < 2 && !out.bjd) { out.sgg.push(t); continue; }
+    // 지번·건물명과 붙어 온 법정동은 "검증 후보"로만 인정한다. out.bjd(대표값)는
+    // 건드리지 않으므로 조회 문구·라벨 등 다른 경로의 의미는 그대로다.
+    const glued = RE_BJD.test(t) ? "" : gluedAdminToken(t);
+    if (glued) {
+      const bucket = /(동|리|가)$/.test(glued) ? out.leafCandidates : out.eupMyeonCandidates;
+      if (!bucket.includes(glued)) bucket.push(glued);
+      continue;
+    }
     if (RE_BJD.test(t)) {
       const leaf = /(동|리|가)$/.test(t);
       const bucket = leaf ? out.leafCandidates : out.eupMyeonCandidates;
@@ -423,12 +433,11 @@ function validateRegion(inputText, resultJibun, sidoOnly = false, relJibunText =
     // 확정되는 것을 막지 못한다(실측 89건). 법정동까지 본다.
     //   같음 · 표기 차이(장전3동=장전동) · 관련지번(relJibun)이면 통과, 그 외 차단
     const levels = comparableRegionLevels(a, b);
-    for (const level of levels) {
-      if (level.compared.match) continue;
-      if (level.name === "법정동" && relJibunText &&
-          a.leafCandidates.some((leaf) => String(relJibunText).includes(leaf))) continue;
-      return mk("MISMATCH", `${level.name} 불일치(${level.compared.input}≠${level.compared.result})`);
-    }
+    const relJibunCovered = (level) => level.name === "법정동" && relJibunText &&
+      a.leafCandidates.some((leaf) => String(relJibunText).includes(leaf));
+    const blocking = blockingRegionLevel(levels.filter((level) => !relJibunCovered(level)));
+    if (blocking)
+      return mk("MISMATCH", `${blocking.name} 불일치(${blocking.compared.input}≠${blocking.compared.result})`);
     const evidence = levels.map((level) => level.compared.evidence).find(Boolean) || null;
     return mk("MATCH", evidence ? "명시적 행정구역 개편 규칙 일치" :
       (levels.length ? "시도·동일계층 지역 일치" : "시도 일치(동일계층 비교 불가)"), evidence);
@@ -446,20 +455,18 @@ function validateRegion(inputText, resultJibun, sidoOnly = false, relJibunText =
     // 읍·면과 그 아래 동·리는 서로 다른 계층이다. 같은 계층이 양쪽에 있을 때만
     // 비교하고, 원문에 여러 리가 있으면 어느 하나가 결과와 맞으면 통과시킨다.
     const levels = comparableRegionLevels(a, b);
-    for (const level of levels) {
-      if (!level.compared.match)
-        return mk("MISMATCH", `${level.name} 불일치(${level.compared.input}≠${level.compared.result})`);
-      successorEvidence = level.compared.evidence || successorEvidence;
-    }
+    const blocking = blockingRegionLevel(levels);
+    if (blocking)
+      return mk("MISMATCH", `${blocking.name} 불일치(${blocking.compared.input}≠${blocking.compared.result})`);
+    for (const level of levels) successorEvidence = level.compared.evidence || successorEvidence;
     return mk("MATCH", successorEvidence ? "명시적 행정구역 개편 규칙 일치" :
       (levels.length ? "시군구·동일계층 지역 일치" : "시군구 일치"), successorEvidence);
   }
   const levels = comparableRegionLevels(a, b);
   if (levels.length) {
-    for (const level of levels) {
-      if (!level.compared.match)
-        return mk("MISMATCH", `${level.name} 불일치(${level.compared.input}≠${level.compared.result})`);
-    }
+    const blocking = blockingRegionLevel(levels);
+    if (blocking)
+      return mk("MISMATCH", `${blocking.name} 불일치(${blocking.compared.input}≠${blocking.compared.result})`);
     const evidence = levels.map((level) => level.compared.evidence).find(Boolean) || null;
     return mk("MATCH", evidence ? "명시적 행정구역 개편 규칙 일치" : "동일계층 지역 일치", evidence);
   }
