@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   DEFAULT_CONCURRENCY,
+  NAVER_QPS_LIMIT,
+  UPSTREAM_DEFAULTS,
   createAdaptiveLimit,
+  createUpstreamGate,
+  gateClients,
   isTransientOutcome,
   runAdaptivePool
 } from "../public/batch-concurrency.mjs";
@@ -96,10 +100,8 @@ test("주소 배치가 그룹을 동시 처리하도록 연결됐다", async () 
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.ok(source.includes("runAdaptivePool("));
   assert.ok(source.includes("shouldStop: () => batchStopRef.current"));
-  assert.ok(source.includes("concurrency.onSuccess()"));
-  assert.ok(source.includes("concurrency.onTransient()"));
   // 전파는 모든 조회가 끝난 뒤에 돌아야 한다(순서 의존).
-  const pool = source.indexOf("const processGroup = async (idxs, concurrency)");
+  const pool = source.indexOf("const processGroup = async (idxs)");
   const propagate = source.indexOf("propagateAddressGroup(next, groupHints, evidenceFor)");
   assert.notEqual(pool, -1);
   assert.equal(pool < propagate, true);
@@ -130,65 +132,78 @@ test("장애가 이어지면 한도가 최소까지 떨어진다", () => {
   assert.equal(limit.stats().raised, 0, "장애 중에는 한 번도 올라가지 않는다");
 });
 
-test("감속과 연속실패 집계가 한 곳에서 결정된다", async () => {
+test("자동중단용 연속 실패는 결과 상태로 센다", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.ok(source.includes("if (isTransientOutcome(r)) {"));
-  assert.ok(source.includes("consecTransient += 1;\n        concurrency.onTransient();"));
-  assert.ok(source.includes("consecTransient = 0;\n        concurrency.onSuccess();"));
-  // 성공/실패 신호가 try/catch 안에 흩어져 있으면 장애를 성공으로 센다.
-  const body = source.slice(source.indexOf("const processGroup = async (idxs, concurrency)"));
-  assert.equal((body.match(/concurrency\.onSuccess\(\)/g) || []).length, 1);
-  assert.equal((body.match(/concurrency\.onTransient\(\)/g) || []).length, 1);
+  // refineAddress는 장애를 예외가 아니라 SYSTEM_ERROR 결과로 돌려준다.
+  assert.ok(source.includes("if (isTransientOutcome(r)) consecTransient += 1;"));
+  assert.ok(source.includes("else consecTransient = 0;"));
+  // 감속은 게이트가 호출 단위로 한다. 행 단위 중복 신호가 남으면 안 된다.
+  const body = source.slice(source.indexOf("const processGroup = async (idxs)"));
+  assert.equal((body.match(/concurrency\.on(Success|Transient)\(\)/g) || []).length, 0);
 });
 
-test("원천별 한도가 서로를 끌어내리지 않는다", () => {
-  // 한 한도를 공유하면 소수 원천의 실패가 다수 원천까지 감속시킨다.
-  // 실측: 네이버 15%가 429를 낼 때 공유 한도는 4에 묶여 처리량이 8배 떨어졌다.
-  const juso = createAdaptiveLimit({ start: 4, min: 1, max: 12, raiseAfter: 2 });
-  const naver = createAdaptiveLimit({ start: 4, min: 1, max: 12, raiseAfter: 2 });
 
-  // 네이버만 계속 실패, JUSO는 계속 성공
-  for (let i = 0; i < 8; i++) {
-    naver.onTransient();
-    juso.onSuccess();
-  }
-  assert.equal(naver.value(), 1, "실패한 원천만 최소까지 내려간다");
-  assert.equal(juso.value() > 4, true, "정상 원천은 영향을 받지 않고 오른다");
+test("네이버 게이트는 공식 초당 제한 아래로 호출 간격을 유지한다", () => {
+  // 공식: 초당 10회. 간격 120ms → 상한 약 8.3 QPS.
+  const naver = UPSTREAM_DEFAULTS.naver;
+  assert.equal(1000 / naver.minIntervalMs < NAVER_QPS_LIMIT, true);
+  assert.equal(naver.minIntervalMs >= 100, true, "100ms 미만이면 10 QPS를 넘는다");
 });
 
-test("두 원천 풀이 동시에 돌고 한쪽이 비어도 끝난다", async () => {
-  const limits = { juso: createAdaptiveLimit({ start: 4, min: 1, max: 4 }),
-                   naver: createAdaptiveLimit({ start: 4, min: 1, max: 4 }) };
-  const order = [];
-  await Promise.all(["juso", "naver"].map((upstream) =>
-    runAdaptivePool(upstream === "juso" ? [1, 2, 3] : [], async (item) => {
-      await tick(1);
-      order.push(`${upstream}:${item}`);
-    }, { limit: limits[upstream] })
-  ));
-  assert.equal(order.length, 3, "비어 있는 풀이 전체를 막지 않는다");
-
-  // 양쪽 모두 항목이 있으면 순차가 아니라 겹쳐서 돈다.
+test("게이트가 동시 실행 수와 호출 간격을 함께 지킨다", async () => {
+  const gate = createUpstreamGate({ start: 2, min: 1, max: 2, minIntervalMs: 40 });
   let active = 0;
-  let peakBoth = 0;
-  await Promise.all(["juso", "naver"].map((upstream) =>
-    runAdaptivePool([1, 2, 3, 4], async () => {
-      active += 1; peakBoth = Math.max(peakBoth, active);
-      await tick(5);
-      active -= 1;
-    }, { limit: limits[upstream] })
-  ));
-  assert.equal(peakBoth > 4, true, "두 풀의 동시 실행이 합쳐진다");
+  let peak = 0;
+  const starts = [];
+  await Promise.all(Array.from({ length: 6 }, () => gate.run(async () => {
+    starts.push(Date.now());
+    active += 1; peak = Math.max(peak, active);
+    await tick(5);
+    active -= 1;
+  })));
+  assert.equal(peak <= 2, true, "동시 실행 수 상한을 지킨다");
+  const gaps = starts.slice(1).map((t, i) => t - starts[i]);
+  // 간격 제한이 없으면 6건이 거의 동시에 시작한다.
+  assert.equal(starts[starts.length - 1] - starts[0] >= 40 * 4, true, "호출 간격을 벌린다");
 });
 
-test("배치가 원천별로 분류해 두 풀을 함께 돌린다", async () => {
+test("게이트는 일시 오류에만 감속하고 0건 응답은 성공으로 본다", async () => {
+  const gate = createUpstreamGate({ start: 4, min: 1, max: 4, raiseAfter: 1000 });
+  await gate.run(async () => []);            // 0건 = 정상 응답
+  assert.equal(gate.limit.value(), 4);
+
+  const transient = Object.assign(new Error("HTTP 429"), { transient: true });
+  await assert.rejects(gate.run(async () => { throw transient; }));
+  assert.equal(gate.limit.value(), 2, "일시 오류만 절반으로 줄인다");
+
+  await assert.rejects(gate.run(async () => { throw new Error("일반 오류"); }));
+  assert.equal(gate.limit.value(), 2, "분류되지 않은 오류는 감속하지 않는다");
+});
+
+test("게이트를 씌워도 클라이언트 호출 규약은 그대로다", async () => {
+  const calls = [];
+  const clients = {
+    juso: async (kw) => { calls.push(["juso", kw]); return [{ ok: 1 }]; },
+    naverLocal: async (kw) => { calls.push(["naver", kw]); return []; },
+    other: "그대로"
+  };
+  const gates = { juso: createUpstreamGate({ start: 2 }), naver: createUpstreamGate({ start: 2 }) };
+  const gated = gateClients(clients, gates);
+  assert.deepEqual(await gated.juso("역삼동 1"), [{ ok: 1 }]);
+  assert.deepEqual(await gated.naverLocal("부전타워"), []);
+  assert.deepEqual(calls, [["juso", "역삼동 1"], ["naver", "부전타워"]]);
+  assert.equal(gated.other, "그대로");
+  // 게이트가 없으면 원본을 그대로 돌려준다.
+  assert.equal(gateClients(clients, {}).juso, clients.juso);
+});
+
+test("배치가 행 분류가 아니라 호출 지점에서 제한한다", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  // 분류 기준은 지번 파싱 여부(cascade의 진입 조건과 같다).
-  assert.ok(source.includes('preprocess(next[idxs[0]].raw || "").jibun ? "juso" : "naver"'));
-  assert.ok(source.includes('await Promise.all(["juso", "naver"].map((upstream) =>'));
-  assert.ok(source.includes("limit: upstreamLimits[upstream]"));
-  // 순차로 돌리면 분리한 의미가 없다.
-  assert.equal(source.includes("await runAdaptivePool(byUpstream.juso"), false);
-  // 자동중단은 원천과 무관하게 전역이어야 한다.
-  assert.ok(source.includes("shouldStop: () => batchStopRef.current"));
+  assert.ok(source.includes("gateClients(clients, gates)"));
+  assert.ok(source.includes("refineAddress(next[idxs[0]].raw, gatedClients"));
+  assert.ok(source.includes("createUpstreamGate(UPSTREAM_DEFAULTS.juso)"));
+  assert.ok(source.includes("createUpstreamGate(UPSTREAM_DEFAULTS.naver)"));
+  // 지번 유무로 행을 나누던 방식은 네이버 승격을 잡지 못해 폐기했다.
+  assert.equal(source.includes('preprocess(next[idxs[0]].raw || "").jibun ? "juso" : "naver"'), false);
+  assert.equal(source.includes("byUpstream"), false);
 });

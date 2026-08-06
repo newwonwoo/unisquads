@@ -61,7 +61,14 @@ import {
 } from "./batch-workflow-state.mjs";
 import { APP_VERSION, RELEASED_AT, buildStamp } from "./version.mjs";
 import { carryOverResults } from "./result-carryover.mjs";
-import { createAdaptiveLimit, isTransientOutcome, runAdaptivePool } from "./batch-concurrency.mjs";
+import {
+  UPSTREAM_DEFAULTS,
+  createAdaptiveLimit,
+  createUpstreamGate,
+  gateClients,
+  isTransientOutcome,
+  runAdaptivePool
+} from "./batch-concurrency.mjs";
 import {
   browserTabHidden,
   shouldFlushBatchUi,
@@ -4925,31 +4932,27 @@ function AddrRefineTestGui() {
     // 루프 전에 원문만으로 계산되고, 주소군 전파는 루프 뒤에 돈다. 각 그룹은
     // 자기 행 인덱스에만 쓴다). 한도는 낮게 시작해 성공이 쌓이면 올리고
     // 일시 오류가 나오면 즉시 반으로 줄인다.
-    // 원천별로 한도를 나눈다. 한 한도를 공유하면 소수 원천이 한도에 걸릴 때
-    // 다수 원천까지 같이 느려진다(실측: 네이버 15%가 429를 내면 전체 처리량이
-    // 8배 떨어져 동시화 이전 수준으로 돌아간다).
-    // 지번이 파싱되면 JUSO로 가고, 없으면 네이버로 간다(cascade의 진입 조건).
-    // 분류가 틀려도 잘못된 한도에 묶일 뿐 결과는 달라지지 않는다.
-    const upstreamLimits = {
-      juso: createAdaptiveLimit(),
-      naver: createAdaptiveLimit()
+    // 원천별 한도는 행이 아니라 호출 지점에서 건다. 행을 미리 분류하는 방식은
+    // 통하지 않는다 — 지번이 있어도 JUSO가 0건이면 네이버로 넘어가기 때문에
+    // (실측: 만화리 271-8 부전타워는 JUSO 2회 + 네이버 3회) 어느 풀에 넣든
+    // 네이버 실제 호출량이 통제되지 않고, 두 풀의 한도가 합쳐져 한도의 두 배가
+    // 네이버로 몰린다.
+    const gates = {
+      juso: createUpstreamGate(UPSTREAM_DEFAULTS.juso),
+      naver: createUpstreamGate(UPSTREAM_DEFAULTS.naver)
     };
-    const byUpstream = { juso: [], naver: [] };
-    for (const idxs of groups.values()) {
-      const upstream = preprocess(next[idxs[0]].raw || "").jibun ? "juso" : "naver";
-      byUpstream[upstream].push(idxs);
-    }
-    const processGroup = async (idxs, concurrency) => {
+    const gatedClients = gateClients(clients, gates);
+    const processGroup = async (idxs) => {
       if (batchStopRef.current) return;
       let r;
       try {
-        r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));  // 대표는 그룹 첫 행의 원본 raw + 우편번호
+        r = await refineAddress(next[idxs[0]].raw, gatedClients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));  // 대표는 그룹 첫 행의 원본 raw + 우편번호
       } catch (e) {
         // W4(2026-07-17): transient(API 순간한도 429 등)면 800ms 대기 후 1회 자동 재시도.
         // 순간한도는 잠깐 기다리면 풀림. 1회만(2회+는 배치 지연). 실패 시 기존 TRANSIENT 기록.
         try {
           await new Promise((res) => setTimeout(res, 800));
-          r = await refineAddress(next[idxs[0]].raw, clients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));
+          r = await refineAddress(next[idxs[0]].raw, gatedClients, next[idxs[0]].zip, groupHints, next[idxs[0]].unitOverride, dongsoAnchors, ownerOfRow(next[idxs[0]]));
         } catch (e2) {
           r = { status: "FAILED", failKind: "TRANSIENT",
                 message: `일시 오류(재시도 후): ${e2 && e2.message ? e2.message : e2}` };
@@ -4958,13 +4961,9 @@ function AddrRefineTestGui() {
       // refineAddress는 API 장애를 예외로 올리지 않고 SYSTEM_ERROR 결과로
       // 돌려주므로 예외만 보면 장애 중에도 성공으로 센다. 결과 상태로 판정해
       // 동시 실행을 줄이고 연속 실패도 여기서 센다.
-      if (isTransientOutcome(r)) {
-        consecTransient += 1;
-        concurrency.onTransient();
-      } else {
-        consecTransient = 0;
-        concurrency.onSuccess();
-      }
+      // 감속은 게이트가 호출 단위로 한다. 여기서는 자동중단용 연속 실패만 센다.
+      if (isTransientOutcome(r)) consecTransient += 1;
+      else consecTransient = 0;
       for (const i of idxs) {
         const row = next[i];
         const isolated = cloneResult(r);
@@ -5008,14 +5007,11 @@ function AddrRefineTestGui() {
         setAutoStopMsg(`연속 오류 ${consecTransient}회 감지 — API 한도 소진 또는 장애 가능성이 있어 자동 중단했습니다. 잠시 후(또는 내일) '일괄 정제'를 다시 누르면 실패분부터 이어서 진행합니다.`);
       }
     };
-    // 두 원천을 동시에 돌린다. 순차로 돌리면 분리한 의미가 없다.
-    await Promise.all(["juso", "naver"].map((upstream) =>
-      runAdaptivePool(
-        byUpstream[upstream],
-        (idxs) => processGroup(idxs, upstreamLimits[upstream]),
-        { limit: upstreamLimits[upstream], shouldStop: () => batchStopRef.current }
-      )
-    ));
+    // 그룹 풀은 작업을 흘려보내기만 한다. 실제 호출 제한은 게이트가 한다.
+    await runAdaptivePool([...groups.values()], processGroup, {
+      limit: createAdaptiveLimit({ start: 16, min: 16, max: 16 }),
+      shouldStop: () => batchStopRef.current
+    });
     // R8'(2026-07-17): 모든 조회가 끝난 뒤 마지막에 전파한다. 앞 단계가
     // CONFIRMED를 늘릴수록 기준행이 생기는 그룹도 늘어나므로 순서가 중요하다.
     if (!batchStopRef.current) {
