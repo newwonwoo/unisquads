@@ -7,6 +7,7 @@ import {
   needsUnitProfileVersionRematch,
   selectIrosRecoveryAction
 } from "./failure-recovery-plan.mjs";
+import { PNULESS_IROS_VERSION, isPnulessIrosRow } from "./pnuless-iros.mjs";
 
 export {
   needsCommercialRangeUnitRematch,
@@ -21,7 +22,7 @@ export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
   parser: "iros-parser-v4",
   matcher: "iros-matcher-v11",
-  recovery: "iros-recovery-v5"
+  recovery: "iros-recovery-v6"
 });
 
 export const IROS_RETRYABLE_STATUSES = Object.freeze([
@@ -88,7 +89,10 @@ export function isReusableIrosResult(reg, current = IROS_RUN_VERSIONS) {
 
 export function rowRequiresIros(row) {
   const result = row?.result;
-  if (!result || result.status !== "CONFIRMED") return false;
+  if (!result) return false;
+  // IROS 조회는 지번주소로 한다. PNU는 완전후보 캐시의 그룹 키일 뿐이므로
+  // 주소가 확인된 행은 PNU가 없어도 세대를 특정할 수 있다.
+  if (result.status !== "CONFIRMED") return isPnulessIrosRow(row);
   if (result.isJip && !result.unit?.ho) return false;
   return true;
 }
@@ -191,11 +195,27 @@ export function irosOutcomeStats(rows, current = IROS_RUN_VERSIONS) {
     pendingRecovery: 0,
     retryRequired: 0,
     unstarted: 0,
-    pending: 0
+    pending: 0,
+    // PNU 없는 조회 경로는 기존 주소확정 기준 집계를 흔들지 않도록 분리한다.
+    pnulessTarget: 0,
+    pnulessResolved: 0,
+    pnuReverseRecovered: 0
   };
   for (const row of rows || []) {
     const result = row?.result;
-    if (!result || !["CONFIRMED", "확정"].includes(result.status)) continue;
+    if (!result || !["CONFIRMED", "확정"].includes(result.status)) {
+      if (isPnulessIrosRow(row)) {
+        out.pnulessTarget += 1;
+        if (row?.reg?.status === "RESOLVED" && String(row.reg.unique_no || "").trim()) {
+          out.pnulessResolved += 1;
+        }
+      }
+      continue;
+    }
+    if (result.pnulessRecovery?.version === PNULESS_IROS_VERSION &&
+        String(result.pnulessRecovery.recovered_pnu || "").trim()) {
+      out.pnuReverseRecovered += 1;
+    }
     out.addressConfirmed += 1;
     if ((result.isJip && !result.unit?.ho) || row?.reg?.status === "UNIT_INPUT_REQUIRED") {
       out.inputRequired += 1;
