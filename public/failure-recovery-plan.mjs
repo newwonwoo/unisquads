@@ -1,6 +1,8 @@
 import { extractBuildingRangeIntent } from "./address-subbuilding-rules.mjs";
 import { UNIT_PROFILE_VERSION } from "./iros-unit-profile.mjs";
 import {
+  buildingKey,
+  candidateMatchesUnit,
   filterUnitPropertyCandidates,
   rawUnitRecoveryVariants,
   selectUniqueRawUnitCandidate
@@ -117,6 +119,20 @@ export const FAILURE_RECOVERY_MODULES = Object.freeze({
     id: "R-IROS-EXPLICIT-ALTERNATE-LOT",
     phase: "IROS",
     version: "2",
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_DONG_AGNOSTIC: Object.freeze({
+    id: "R-IROS-DONG-AGNOSTIC",
+    phase: "IROS",
+    version: "1",
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_LOT_FALLBACK: Object.freeze({
+    id: "R-IROS-LOT-FALLBACK",
+    phase: "IROS",
+    version: "1",
     automatic: true,
     disposition: "AUTO_RETRY"
   }),
@@ -268,6 +284,31 @@ export function rawUnitRematchEvidence(row) {
   return selectUniqueRawUnitCandidate(typed.candidates, row?.raw || "", unit);
 }
 
+// 원문에 "N동" 표기가 아예 없는데 추정 동 때문에 세대를 못 찾은 행.
+// 저장된 완전후보 안에서 호로만 다시 보면 한 건으로 좁혀진다(실측 94행).
+export function needsDongAgnosticRematch(row) {
+  const reg = row?.reg;
+  if (!UNIT_FAILURES.has(String(reg?.status || "")) || reg?.complete !== true) return false;
+  const unit = row?.result?.unit || {};
+  if (!unit.dong || !unit.ho) return false;
+  if (/\d+\s*\uB3D9/.test(String(row?.raw || ""))) return false;
+  const typed = filterUnitPropertyCandidates(reg?.candidates || [], unit.dong, unit.ho);
+  const hoOnly = (typed.candidates || []).filter((candidate) =>
+    candidateMatchesUnit(candidate, "", unit.ho));
+  return hoOnly.length === 1;
+}
+
+// 확정 지번으로 후보를 거르면 전멸하지만, 같은 건물명 후보는 남아 있는 행.
+// 복수지번 건물의 등기 소재지번이 확정 지번과 다를 때 생긴다(실측 194행).
+export function needsLotFallbackRematch(row) {
+  const reg = row?.reg;
+  if (String(reg?.status || "") !== "REG_VALIDATION_FAILED") return false;
+  if (String(reg?.failure_stage || "") !== "PROPERTY_CLASS") return false;
+  const wanted = buildingKey(row?.result?.bdNm || "");
+  if (!wanted) return false;
+  return (reg?.candidates || []).some((candidate) => buildingKey(candidate?.buldnm) === wanted);
+}
+
 export function selectIrosRecoveryAction(row) {
   const reg = row?.reg;
   if (!reg || (reg.status === "RESOLVED" && String(reg.unique_no || "").trim())) return null;
@@ -309,6 +350,18 @@ export function selectIrosRecoveryAction(row) {
     return moduleDecision(
       FAILURE_RECOVERY_MODULES.I_UNIT_BEARING_BUILDING,
       "UNIT_BEARING_BUILDING_REMATCH"
+    );
+  }
+  if (needsLotFallbackRematch(row)) {
+    return moduleDecision(
+      FAILURE_RECOVERY_MODULES.I_LOT_FALLBACK,
+      "IROS_LOT_FALLBACK_REMATCH"
+    );
+  }
+  if (needsDongAgnosticRematch(row)) {
+    return moduleDecision(
+      FAILURE_RECOVERY_MODULES.I_DONG_AGNOSTIC,
+      "IROS_DONG_AGNOSTIC_REMATCH"
     );
   }
   if (needsUnitProfileVersionRematch(reg)) {
