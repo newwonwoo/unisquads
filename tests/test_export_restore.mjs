@@ -97,6 +97,16 @@ test("주소 근거 없는 고유번호·미완료 등기·불량 PNU는 복원�
   assert.equal(badPnu.result, null);
 });
 
+test("app.js가 결과지 시트를 자동 선택하고 복원 경로에 연결한다", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  // 결과지 통합문서는 요약 시트가 첫 장 — 시트를 훑어 결과지 헤더를 찾아야 한다
+  assert.equal(source.includes("detectExportLayout(head)"), true);
+  assert.equal(source.includes("restoreRowsFromExport(body, exportLayout)"), true);
+  // 업로드 안내가 결과지 모드를 구분해 표시한다
+  assert.equal(source.includes('mode: "export"'), true);
+});
+
 test("복원 통계", () => {
   const rows = [
     { result: {}, reg: {} }, { result: {} }, { result: null }

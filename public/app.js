@@ -5177,7 +5177,14 @@ function AddrRefineTestGui() {
     try {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf);
-      const ws = wb.Sheets[wb.SheetNames[0]];
+      // 결과지 통합문서는 요약 시트가 첫 장이다. 결과지 헤더(원본주소·정제상태
+      // ·PNU·등기상태…)를 가진 시트가 있으면 그 시트를 데이터로 쓴다.
+      let ws = wb.Sheets[wb.SheetNames[0]];
+      for (const sheetName of wb.SheetNames) {
+        const sheet = wb.Sheets[sheetName];
+        const head = XLSX.utils.sheet_to_json(sheet, { header: 1, range: "A1:CZ1" })[0] || [];
+        if (detectExportLayout(head)) { ws = sheet; break; }
+      }
       const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
       // 주소가 A열이 아닐 수 있으므로, 행에 값이 하나라도 있으면 유효 행으로 봄
       const filled = data.filter((row) => (row ?? []).some((c) => String(c ?? "").trim() !== ""));
@@ -5294,7 +5301,9 @@ function AddrRefineTestGui() {
       const nextUploadStats = {
         ...analyzeBatchUpload(sourceRawValues, built.length, statMap.size, normalizeRawKey),
         sourceRows: sourceRawValues.length,
-        mapping: addrColIdx >= 0
+        mapping: exportLayout
+          ? { mode: "export", restored: countRestored(built) }
+          : addrColIdx >= 0
           ? {
               mode: "header",
               addr: `${header0[addrIdx].trim()}(${colLetter(addrIdx)})`,
@@ -6326,7 +6335,7 @@ function AddrRefineTestGui() {
     } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: C.faint, marginBottom: 4, letterSpacing: "0.04em" } }, label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, color, fontFamily: mono, fontWeight: 700 } }, value)))), uploadStats && (uploadStats.emptyRows > 0 || uploadStats.refineRows !== uploadStats.addressRows) && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: C.faint, margin: "8px 0 0", fontFamily: mono } }, [
       uploadStats.emptyRows > 0 ? `빈주소 ${uploadStats.emptyRows.toLocaleString()}행 제외` : "",
       uploadStats.refineRows !== uploadStats.addressRows ? `복수지번·세대 분리 후 처리행 ${uploadStats.refineRows.toLocaleString()}행` : ""
-    ].filter(Boolean).join(" · ")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : C.dim, marginTop: 6 } }, uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${rows.length}행)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), batchWorkflow.primaryAction !== BATCH_PRIMARY_ACTIONS.NONE && !batchRegBusy && /* @__PURE__ */ React.createElement(
+    ].filter(Boolean).join(" · ")), uploadStats && /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: uploadStats.mapping.mode === "fallback" ? C.warn : (uploadStats.mapping.mode === "export" ? C.ok : C.dim), marginTop: 6 } }, uploadStats.mapping.mode === "export" ? `결과지 인식(이어가기) — 주소 확정 ${(uploadStats.mapping.restored?.address || 0).toLocaleString()}행 · 등기고유번호 ${(uploadStats.mapping.restored?.iros || 0).toLocaleString()}행 복원 · 일괄 정제 시 실패 행만 조회` : uploadStats.mapping.mode === "header" ? `인식: 주소=${uploadStats.mapping.addr}` + (uploadStats.mapping.detail ? ` · 상세=${uploadStats.mapping.detail} 자동결합` : "") + ` · 샘플: "${uploadStats.sample}"` : `⚠ 주소 헤더 미검출 — A열을 주소로 사용합니다(구양식). 샘플: "${uploadStats.sample}"`), fileErr && /* @__PURE__ */ React.createElement("p", { style: { color: C.err, fontSize: 12.5, marginTop: 12 } }, fileErr)), rows.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, margin: "20px 0 14px", flexWrap: "wrap", justifyContent: "center" } }, /* @__PURE__ */ React.createElement("button", { onClick: runBatch, disabled: batchBusy, style: { ...btnP, opacity: batchBusy ? 0.6 : 1 } }, batchBusy ? `정제중 ${batchGroupTotal ? Math.round(batchGroupDone / batchGroupTotal * 100) : 0}% · 처리단위 ${batchGroupDone}/${batchGroupTotal} · 반영 ${batchDone}/${rows.length}행` : (batchDone > 0 && batchDone === rows.length ? `정제 완료 (${rows.length}행)` : `일괄 정제 (${rows.length}행)`)), batchBusy && /* @__PURE__ */ React.createElement("button", { onClick: stopBatch, style: { ...btnS, borderColor: C.err, color: C.err } }, "\uC911\uB2E8"), autoStopMsg && !batchBusy && /* @__PURE__ */ React.createElement("p", { style: { width: "100%", textAlign: "center", fontSize: 12.5, color: C.warn, margin: "2px 0 0" } }, autoStopMsg), batchStop && !batchBusy && !batchRegBusy && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: C.dim } }, "\uC911\uB2E8\uB428 \xB7 \uB2E4\uC2DC \uC815\uC81C\uD558\uBA74 \uC774\uC5B4\uC11C \uC9C4\uD589"), batchWorkflow.primaryAction !== BATCH_PRIMARY_ACTIONS.NONE && !batchRegBusy && /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: batchWorkflow.primaryAction === BATCH_PRIMARY_ACTIONS.LOOKUP_IROS ||
