@@ -22,7 +22,8 @@ export const ADDRESS_FAILED_REQUERY_VERSION = "address-failed-requery-v1";
 export const ADDRESS_FAILED_REQUERY_MODULES = Object.freeze({
   R_ADDR_BUILDING_NAME_LOT: "1",
   R_ADDR_EXCLUDED_LOT: "1",
-  R_ADDR_NAVER_LOT_RESCUE: "1"
+  R_ADDR_NAVER_LOT_RESCUE: "1",
+  R_ADDR_ADMIN_DONG_LOT: "1"
 });
 
 function text(value) {
@@ -145,6 +146,45 @@ export function pickExcludedLotCandidate(hits, plan, rejectedBuildingName = "") 
     if (!name || !buildingNamesMatch(plan.buildingName, name)) return false;
     if (text(rejectedBuildingName) && name === text(rejectedBuildingName)) return false;
     return true;
+  });
+  return matched.length === 1 ? matched[0] : null;
+}
+
+// ── 2-2. 행정동 표기 지번의 법정동 교정 ──────────────────────────────
+
+// "대치4동 889-56"처럼 숫자 행정동으로 적힌 지번은 JUSO 지번검색(법정동
+// 기준)에서 0건이 된다(실측: 대치4동 0건 ↔ 대치동 1건·건물까지 일치).
+// 표준 명명 규칙상 숫자 행정동의 법정동은 숫자를 뺀 이름이므로, 실패한
+// 행에서만 숫자를 벗겨 한 번 재검색한다. "효자동2가"류(가 끝)는 법정동
+// 표기이므로 건드리지 않는다.
+export function buildAdminDongLotRequeryPlan(pre, status) {
+  const eligible = new Set(["FAILED", "HUMAN_INPUT_ERROR", "NAVER_CONFIRMED_PNU_FAILED"]);
+  if (!eligible.has(text(status))) return null;
+  const emd = text(pre?.emd);
+  const jibun = text(pre?.jibun);
+  if (!jibun) return null;
+  const m = /^([가-힣]{1,10}?)\d{1,2}동$/.exec(emd);
+  if (!m || !m[1]) return null;
+  const legalDong = `${m[1]}동`;
+  const region = [pre?.sidoFull || pre?.sido, pre?.sgg].map(text).filter(Boolean);
+  if (!region.length) return null;
+  return {
+    version: ADDRESS_FAILED_REQUERY_VERSION,
+    query: [...region, legalDong, jibun].join(" "),
+    adminDong: emd,
+    legalDong,
+    jibun
+  };
+}
+
+// 재검색 결과에서 교정 법정동+원문 지번이 정확히 일치하는 후보 하나만 채택한다.
+export function pickAdminDongLotCandidate(hits, plan) {
+  if (!plan) return null;
+  const wanted = `${plan.legalDong}|${plan.jibun.replace(/^산\s*/, "")}`;
+  const matched = (Array.isArray(hits) ? hits : []).filter((candidate) => {
+    const lot = extractLegalLot(candidate?.jibunAddr || "");
+    if (!lot) return false;
+    return `${lot.legal}|${lot.lot}` === wanted;
   });
   return matched.length === 1 ? matched[0] : null;
 }

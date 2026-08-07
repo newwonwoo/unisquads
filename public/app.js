@@ -23,11 +23,13 @@ import {
 } from "./unit-match.mjs";
 import {
   ADDRESS_FAILED_REQUERY_MODULES,
+  buildAdminDongLotRequeryPlan,
   buildBuildingNameRequeryPlan,
   buildExcludedLotRequeryPlan,
   buildNaverLotRescueQuery,
   evaluateBuildingNameRequery,
   needsNaverLotRescue,
+  pickAdminDongLotCandidate,
   pickExcludedLotCandidate,
   pickNaverLotCandidate
 } from "./address-failed-requery.mjs";
@@ -2514,9 +2516,48 @@ function lotPreOf(pre, candidate) {
     emdCands: lotInfo?.legal ? [lotInfo.legal] : pre.emdCands
   };
 }
+// R-ADDR-ADMIN-DONG-LOT: 숫자 행정동 표기 지번(대치4동 889-56)의 법정동
+// 교정 재검색. 교정 법정동+원문 지번이 정확히 한 건일 때만 확정한다.
+async function attemptAdminDongLotRequery(result, pre, clients) {
+  try {
+    const plan = buildAdminDongLotRequeryPlan(pre, result?.status);
+    if (!plan) return null;
+    const hits = await clients.juso(plan.query);
+    const picked = pickAdminDongLotCandidate(hits, plan);
+    if (!picked) return null;
+    const recovered = resolve([picked], lotPreOf(pre, picked));
+    // 지역 검증은 행정동을 법정동으로 바꾼 입력 기준으로 본다(같은 명명 규칙).
+    const inputText = String(pre.regionText || pre.cleaned || "")
+      .replace(plan.adminDong, plan.legalDong);
+    const rv = validateRegion(inputText, recovered.jibunAddr, false, "");
+    if (recovered.status !== "CONFIRMED" || rv.status === "MISMATCH") return null;
+    recovered.searchLevel = result.searchLevel || null;
+    recovered.jusoQuery = `${result.jusoQuery || pre.cleaned} ▸ [법정동교정]${plan.query}`;
+    recovered.candCount = 1;
+    recovered.reviewNeeded = recovered.reviewNeeded || "admin_dong_lot_requery";
+    recovered.validation = {
+      status: "MATCH",
+      reason: `행정동 표기(${plan.adminDong})를 법정동(${plan.legalDong})으로 교정해 정확 지번 일치`,
+      inputSgg: rv.inputSgg, resultSgg: rv.resultSgg
+    };
+    recovered.addressMatchEvidence = [...new Set([
+      ...(recovered.addressMatchEvidence || []), "ADMIN_DONG_LOT_REQUERY"
+    ])];
+    recovered.failedRequery = {
+      module: "R-ADDR-ADMIN-DONG-LOT",
+      version: ADDRESS_FAILED_REQUERY_MODULES.R_ADDR_ADMIN_DONG_LOT
+    };
+    return recovered;
+  } catch {
+    return null;
+  }
+}
 async function attemptFailedAddressRequery(result, pre, clients) {
   try {
     const status = String(result?.status || "");
+    // 행정동 숫자 표기 교정이 가장 결정적(정확 지번 일치)이라 먼저 본다.
+    const adminDong = await attemptAdminDongLotRequery(result, pre, clients);
+    if (adminDong) return adminDong;
 
     // R-ADDR-EXCLUDED-LOT: 용도 불일치로 배제한 후보의 지번을 재확인.
     // 같은 지번에 원문 건물명과 일치하는 다른 건물이 정확히 하나면 채택.
@@ -2790,6 +2831,8 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
         message: `\uB124\uC774\uBC84 \uC8FC\uC18C \uD655\uC778(PNU \uBBF8\uD655\uBCF4): ${naverAddr || c.jibunAddr || ""}`,
         validation: { status: "NOT_AVAILABLE", reason: "네이버 확정", inputSgg: "", resultSgg: "" },
       };
+      const adminDongFixed = await attemptAdminDongLotRequery(pnuFailed, pre, clients);
+      if (adminDongFixed) return adminDongFixed;
       const rescued = await attemptNaverLotRescue(pnuFailed, pre, clients);
       return rescued || pnuFailed;
     }
