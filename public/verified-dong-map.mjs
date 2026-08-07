@@ -102,6 +102,29 @@ export function buildVerifiedDongMap(rows) {
     map.set(key, { mappedDong, anchors: count, basis: "anchor" });
   }
 
+  // 충돌 가드(중앙아파트 실측 반례에서 도출): 등기부가 물리 여러 동을 한
+  // 동으로 합본 기재한 단지에서는 동무시 앵커(101→102)가 생기지만, 등기부
+  // 102동은 원문 102동 요청이 이미 차지하고 있다 — 매핑하면 서로 다른 두
+  // 세대가 같은 고유번호를 나눠 갖는다(실측: 고유번호 32건이 이미 중복 확정).
+  //   1) 매핑 대상 등기부 동이 같은 지번에서 직접 요청되고 있으면 버린다.
+  //   2) 같은 지번의 서로 다른 요청 동이 같은 등기부 동으로 수렴하면
+  //      전부 버린다(서로 다른 물리 동이 한 동일 수는 없다).
+  for (const [key, entry] of [...map]) {
+    const lot = key.slice(0, key.indexOf("#"));
+    const requested = requestedByLot.get(lot);
+    if (requested && requested.has(entry.mappedDong)) map.delete(key);
+  }
+  const targetKeys = new Map();
+  for (const [key, entry] of map) {
+    const lot = key.slice(0, key.indexOf("#"));
+    const target = `${lot}→${entry.mappedDong}`;
+    if (!targetKeys.has(target)) targetKeys.set(target, []);
+    targetKeys.get(target).push(key);
+  }
+  for (const keys of targetKeys.values()) {
+    if (keys.length > 1) for (const key of keys) map.delete(key);
+  }
+
   // 소거법: 미일치 요청 동 1개 ↔ 미일치 주거 등기부 동 1개.
   for (const [lot, requested] of requestedByLot) {
     const registry = registryByLot.get(lot);
