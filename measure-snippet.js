@@ -267,10 +267,10 @@ function canAcceptDongsoAnchorCorrection({ validation, anchorName, resultBuildin
   return Boolean(result) && result.includes(anchor);
 }
 // ── public/unit-match.mjs ──
-const MATCHER_VERSION = "iros-matcher-v11";
+const MATCHER_VERSION = "iros-matcher-v13";
 
 const IROS_MODULE_VERSIONS = Object.freeze({
-  IROS_CANDIDATE_NORMALIZE: "2",
+  IROS_CANDIDATE_NORMALIZE: "3",
   R_IROS_MULTILOT: "2",
   R_IROS_BUILDING_EVIDENCE: "1",
   R_IROS_HO_BUILDING: "1",
@@ -280,7 +280,10 @@ const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_UNIT_BEARING_BUILDING: "1",
   R_IROS_DONG_AGNOSTIC: "1",
   R_IROS_LOT_FALLBACK: "1",
-  R_IROS_DONG_AGNOSTIC_HO: "1"
+  R_IROS_DONG_AGNOSTIC_HO: "2",
+  R_IROS_FLOOR_DISAMBIG: "1",
+  R_IROS_SHOP_DONG_EXCLUSION: "1",
+  R_IROS_NAMELESS_REGISTRY_EXACT: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -337,6 +340,22 @@ function candidateUnitVariants(candidate) {
         dong: prefixedDong,
         ho: unitKey(room[2], "ho"),
         source: "composite_dong_room_prefix"
+      });
+    }
+  }
+
+  // IROS 실측: 호가 "103동902"처럼 자기 동을 접두어로 달고 오는 등기부가 있다
+  // (부산 범일역풍림아이원, 동 "103" 호 "103동902" — 실측 46행). 접두어가 그
+  // 후보의 동 표기와 정확히 일치할 때만 분해한다. "국동101" 같은 고유명 호나
+  // 다른 동을 가리키는 값은 건드리지 않는다.
+  const embedded = rawHo.match(/^제?\s*([0-9A-Za-z가-힣]+)\s*동\s*(\d{1,5}(?:-\d{1,4})?)\s*호?$/);
+  if (embedded) {
+    const prefixedDong = dongAliasKey(embedded[1]);
+    if (prefixedDong && (prefixedDong === base.dong || dongTokens.includes(prefixedDong))) {
+      variants.unshift({
+        dong: prefixedDong,
+        ho: unitKey(embedded[2], "ho"),
+        source: "self_dong_ho_prefix"
       });
     }
   }
@@ -505,6 +524,61 @@ function selectUniqueRawUnitCandidate(candidates, rawAddress, currentUnit = {}) 
   return null;
 }
 
+// R-IROS-SHOP-DONG-EXCLUSION: 동 표기가 없는 요청에서 같은 호가 무동 세대와
+// 상가동 세대에 함께 있을 때(횡성 서도아파트 실측: 호 102가 무동 1건 +
+// 상가동 1건), 상가동은 동 없는 주거 요청의 대상일 수 없으므로 배제한다.
+// 숫자·알파벳 동이 하나라도 섞여 있으면 어느 동을 의미하는지 알 수 없으므로
+// 배제하지 않고 복수결과를 그대로 유지한다.
+function excludeShopDongForDonglessRequest(matched) {
+  const source = Array.isArray(matched) ? matched : [];
+  const noDong = source.filter((candidate) => candidateHasNoDong(candidate));
+  if (!noDong.length || noDong.length === source.length) return source;
+  const others = source.filter((candidate) => !candidateHasNoDong(candidate));
+  const allShop = others.every((candidate) =>
+    candidateUnitVariants(candidate).every((variant) =>
+      !variant.dong || /^상가/.test(variant.dong)));
+  return allShop ? noDong : source;
+}
+
+// R-IROS-FLOOR-DISAMBIG: 동·호가 완전히 같은 후보가 여러 건인데 등기부의
+// floor 필드로만 갈리는 건물이 있다(청주 진흥아파트 실측: 동 101 호 "1"이
+// 층 1~6으로 6건, 원문은 "101동 3층1호" — 136행). 원문에 명시된 층이 있고,
+// 그 층의 후보가 정확히 한 건일 때만 채택한다.
+//
+// 지상층만 다룬다. 지하는 등기부 floor 표기가 "B1"·"지1" 등으로 갈려 실측
+// 근거가 없다. 층 정보가 원문에 없거나, 같은 층이 여러 건이면 확정하지 않는다.
+const RE_RAW_FLOOR_ROOM =
+  /(?:^|\s)(지하|지|B|b)?\s*(\d{1,2})\s*층\s*(?:제?\s*)?(?:비|B|b)?\s*(\d{1,3})\s*호?(?=\s|$)/g;
+
+function selectFloorDisambiguatedCandidate(candidates, rawAddress, currentUnit = {}) {
+  const raw = String(rawAddress || "");
+  const currentDong = dongAliasKey(currentUnit?.dong);
+  const currentHo = unitKey(currentUnit?.ho, "ho");
+  if (!currentHo) return null;
+  const matches = [...raw.matchAll(RE_RAW_FLOOR_ROOM)];
+  const match = matches.at(-1);
+  if (!match) return null;
+  if (match[1]) return null; // 지하: 실측 근거 없음 — 확정하지 않는다
+  if (unitKey(match[3], "ho") !== currentHo) return null;
+  const wantFloor = String(Number(match[2]));
+  const unique = new Map();
+  let matchedCount = 0;
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    if (!candidateMatchesUnit(candidate, currentDong, currentHo)) continue;
+    const floor = String(candidate?.floor ?? "").trim();
+    if (!/^\d+$/.test(floor) || String(Number(floor)) !== wantFloor) continue;
+    matchedCount += 1;
+    const key = candidateIdentity(candidate);
+    if (key && !unique.has(key)) unique.set(key, candidate);
+  }
+  if (unique.size !== 1) return null;
+  return {
+    candidate: [...unique.values()][0],
+    matched_floor: wantFloor,
+    matched_candidate_count: matchedCount
+  };
+}
+
 // R-IROS-DONG-AGNOSTIC-HO: 원문 동 표기가 등기부 동 체계와 아예 다른 건물이
 // 있다(원문 `101동`, 등기부 `A동`·`가동`·공란). 요청한 동이 완전 후보 어디에도
 // 존재하지 않고, 요청한 호를 가진 세대가 지번 전체에서 정확히 한 건일 때만
@@ -522,8 +596,15 @@ function selectDongAgnosticHoCandidate(candidates, wantedDong, wantedHo) {
   );
   if (dongExists) return null;
   const matched = source.filter((candidate) => candidateMatchesUnit(candidate, "", ho));
+  // 실측(횡성 서도아파트 94행): 동 표기가 없는 등기부에 상가동 세대가 섞이면
+  // 같은 호가 2건이 되어 유일성이 깨진다. 명시적으로 다른 동이 적힌 후보는
+  // 요청한 동일 수 없다는 근거 있는 사실이므로, 동 표기가 없는 후보가 하나라도
+  // 있으면 그 안에서만 유일성을 본다. 전부 명시 동이면(청우 302↔301) 기존
+  // 그대로 전체에서 유일성을 요구한다.
+  const noDong = matched.filter((candidate) => candidateHasNoDong(candidate));
+  const pool = noDong.length ? noDong : matched;
   const unique = new Map();
-  for (const candidate of matched) {
+  for (const candidate of pool) {
     const key = candidateIdentity(candidate);
     if (key && !unique.has(key)) unique.set(key, candidate);
   }
@@ -533,11 +614,28 @@ function selectDongAgnosticHoCandidate(candidates, wantedDong, wantedHo) {
     requested_dong: dong,
     matched_ho: ho,
     matched_candidate_count: matched.length,
+    no_dong_candidate_count: noDong.length,
     candidate_dongs: [...new Set(
       source.flatMap((candidate) =>
         candidateUnitVariants(candidate).map((variant) => variant.dong).filter(Boolean))
     )].sort()
   };
+}
+
+// R-IROS-NAMELESS-REGISTRY-EXACT: 검토 플래그 행의 건물명 교차검증은 등기부가
+// 건물명을 아예 적지 않는 건물에서는 원천적으로 불가능하다(실측: 한 단지
+// 208건·268건 전부 빈값 — 완전수집과 동·호 정확 매칭까지 성공하고도 여기서
+// 457행이 죽었다). 이때는 이미 성립한 더 강한 근거 — 확정 지번 정확 일치
+// 위에서의 동·호 정확 매칭 유일 — 로 통과시킨다.
+//
+// 후보 건물명이 적혀 있으면 이 경로는 절대 열리지 않는다. 이름이 있는데
+// 다르면 "다른 건물"이라는 근거 있는 사실이고, 그 게이트가 실제로 옆 단지
+// 오확정을 막은 실측이 있기 때문이다.
+function selectNamelessRegistryExact(candidates, exactUnitMatch) {
+  if (exactUnitMatch !== true) return null;
+  const source = Array.isArray(candidates) ? candidates : [];
+  if (source.length !== 1) return null;
+  return buildingKey(source[0]?.buldnm) ? null : source[0];
 }
 
 function buildingKey(value) {
@@ -679,6 +777,195 @@ function summarizeCandidatePropertyClasses(candidates) {
   );
   return ["집합건물", "건물", "토지"].filter((value) => found.has(value)).join("|");
 }
+// ── public/address-failed-requery.mjs ──
+// 주소 실패 행 재조회 규칙 — 실패 상태에서만 발화하는 세 가지 복구 경로.
+//
+// 2026-08-07 실측(20,023행 실행의 미회수 군집)에서 도출했다. 세 경로 모두
+// 이미 실패로 판정난 행에서만 동작하므로 기존 CONFIRMED 행을 뒤집을 수 없다.
+//
+// 1. R-ADDR-BUILDING-NAME-LOT: 지번식 검색이 0건인데 원문에 건물명이 있으면
+//    지역+건물명으로 JUSO를 재검색한다. 같은 건물이 여러 지번에 걸쳐 있으면
+//    (동별 필지 분리 상가 실측: 1동=1082, 6동=1086처럼 detBdNmList가 동↔지번
+//    매핑을 제공) 원문 동이 실존하는 지번 하나로만 확정하고, 못 좁히면
+//    복수후보(AMBIGUOUS)로 남겨 기존 복수PNU-IROS 판별로 넘긴다.
+// 2. R-ADDR-EXCLUDED-LOT: 용도 불일치로 배제한 후보(유치원·학교 등)의 지번을
+//    JUSO 지번 검색으로 재확인한다. 같은 지번에 원문 건물명과 일치하는 다른
+//    건물이 있으면 그 후보로 확정한다(동일 단지 부속시설이 대표로 잡힌 실측).
+// 3. R-ADDR-NAVER-LOT-RESCUE: 네이버가 주소를 확인해 줬지만 지번 없는
+//    주소만 돌려준 행. 읍면동+건물명으로 지역검색을 다시 해 주거 카테고리
+//    항목의 지번을 얻고, 그 지번을 JUSO로 교차확인해서만 채택한다.
+
+
+const ADDRESS_FAILED_REQUERY_VERSION = "address-failed-requery-v1";
+
+const ADDRESS_FAILED_REQUERY_MODULES = Object.freeze({
+  R_ADDR_BUILDING_NAME_LOT: "1",
+  R_ADDR_EXCLUDED_LOT: "1",
+  R_ADDR_NAVER_LOT_RESCUE: "1"
+});
+
+function text(value) {
+  return String(value ?? "").trim();
+}
+
+function stripTags(value) {
+  return text(value).replace(/<[^>]+>/g, "");
+}
+
+// 시도로 시작하는 지번 주소인지. IROS·JUSO 재조회는 시도 없는 주소로는
+// 범위가 흐려지므로, 원문 유래 주소는 시도 접두를 요구한다.
+const RE_SIDO_PREFIX =
+  /^(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충청|충북|충남|전라|전북|전남|경상|경북|경남|제주)/;
+
+function hasRegionalLotAddress(value) {
+  const source = text(value);
+  if (!RE_SIDO_PREFIX.test(source)) return false;
+  const lot = extractLegalLot(source);
+  if (!lot) return false;
+  // 법정동 앞에 시도+시군구 두 단계 이상이 있어야 한다. 시도만 있으면
+  // 같은 도의 동명 리·동이 소재지 조회에서 뒤섞인다.
+  return source.slice(0, source.indexOf(lot.legal)).trim().split(/\s+/).filter(Boolean).length >= 2;
+}
+
+// 지번주소에서 `… 법정동 지번`까지만 남긴다(건물명·동·호 제거).
+function lotScopedText(value) {
+  const source = text(value).replace(/\s+/g, " ");
+  const lot = extractLegalLot(source);
+  if (!lot) return "";
+  return source.slice(0, lot.lotEnd).trim();
+}
+
+function legalLotKey(value) {
+  const lot = extractLegalLot(value);
+  if (!lot) return "";
+  return `${lot.legal}|${lot.mountain ? "산" : ""}${lot.lot}`;
+}
+
+// ── 1. 지역+건물명 재검색 ──────────────────────────────────────────────
+
+// FAILED(검색 0건)·HUMAN_INPUT_ERROR 행에서만 계획을 만든다.
+function buildBuildingNameRequeryPlan(pre, status) {
+  const eligible = new Set(["FAILED", "HUMAN_INPUT_ERROR"]);
+  if (!eligible.has(text(status))) return null;
+  const buildingName = text(pre?.bldName);
+  if (!buildingName) return null;
+  const region = [pre?.sidoFull || pre?.sido, pre?.sgg, pre?.eup, pre?.emd]
+    .map(text).filter(Boolean);
+  if (!region.length) return null;
+  return {
+    version: ADDRESS_FAILED_REQUERY_VERSION,
+    query: [...region, buildingName].join(" "),
+    buildingName,
+    unitDong: unitKey(pre?.unit?.dong, "dong")
+  };
+}
+
+function detBdDongTokens(candidate) {
+  return text(candidate?.detBdNmList)
+    .split(",")
+    .map((token) => token.replace(/\(.*?\)\s*$/, "").trim())
+    .map((token) => {
+      const m = /^(.+?)동$/.exec(token);
+      return m ? unitKey(m[1], "dong") : "";
+    })
+    .filter(Boolean);
+}
+
+// 재검색 결과 판정. 건물명이 일치하는 후보만 보고,
+//   - 원문 동이 detBdNmList에 실존하는 지번이 정확히 하나 → 그 지번으로 확정
+//   - 후보가 한 지번뿐 → 그 지번으로 확정
+//   - 그 외 → 복수후보로 반환(기존 복수PNU-IROS 판별에 넘긴다)
+function evaluateBuildingNameRequery(hits, plan) {
+  const source = Array.isArray(hits) ? hits : [];
+  const named = source.filter((candidate) =>
+    buildingNamesMatch(plan?.buildingName, candidate?.bdNm));
+  if (!named.length) return null;
+
+  if (plan?.unitDong) {
+    const dongHits = named.filter((candidate) =>
+      detBdDongTokens(candidate).includes(plan.unitDong));
+    if (dongHits.length === 1) {
+      return { kind: "UNIT_DONG_LOT", candidate: dongHits[0], candidates: dongHits };
+    }
+  }
+
+  const lots = new Set(named.map((candidate) =>
+    legalLotKey(candidate?.jibunAddr || candidate?.roadAddr)));
+  if (named.length === 1 || lots.size === 1) {
+    return { kind: "SINGLE_LOT", candidate: named[0], candidates: [named[0]] };
+  }
+  return { kind: "MULTI", candidates: named };
+}
+
+// ── 2. 용도불일치 배제 후보의 지번 재확인 ─────────────────────────────
+
+// 배제된 후보(비주거)의 지번으로 재검색할 계획. 원문에 건물명이 있어야
+// 같은 지번의 다른 건물을 근거 있게 고를 수 있다.
+function buildExcludedLotRequeryPlan({ rejectedAddress, buildingName }) {
+  const query = lotScopedText(rejectedAddress);
+  if (!query || !text(buildingName)) return null;
+  return {
+    version: ADDRESS_FAILED_REQUERY_VERSION,
+    query,
+    rejectedLotKey: legalLotKey(rejectedAddress),
+    buildingName: text(buildingName)
+  };
+}
+
+// 같은 지번 + 원문 건물명 일치 후보가 정확히 하나일 때만 채택한다.
+// 배제됐던 건물명(유치원 등)과 같은 이름은 다시 고르지 않는다.
+function pickExcludedLotCandidate(hits, plan, rejectedBuildingName = "") {
+  if (!plan?.rejectedLotKey) return null;
+  const source = Array.isArray(hits) ? hits : [];
+  const matched = source.filter((candidate) => {
+    const lotKey = legalLotKey(candidate?.jibunAddr || candidate?.roadAddr);
+    if (!lotKey || lotKey !== plan.rejectedLotKey) return false;
+    const name = text(candidate?.bdNm);
+    if (!name || !buildingNamesMatch(plan.buildingName, name)) return false;
+    if (text(rejectedBuildingName) && name === text(rejectedBuildingName)) return false;
+    return true;
+  });
+  return matched.length === 1 ? matched[0] : null;
+}
+
+// ── 3. 네이버 지번 구조(레스큐) ───────────────────────────────────────
+
+// 네이버 확정 주소에 지번이 없을 때만 발화한다.
+function needsNaverLotRescue(result) {
+  if (text(result?.status) !== "NAVER_CONFIRMED_PNU_FAILED") return false;
+  for (const value of [result?.naverJibunAddr, result?.naverAddr, result?.jibunAddr]) {
+    if (extractLegalLot(value)) return false;
+  }
+  return true;
+}
+
+function buildNaverLotRescueQuery(pre) {
+  const buildingName = text(pre?.bldName);
+  if (!buildingName) return "";
+  const region = [pre?.sgg, pre?.eup, pre?.emd].map(text).filter(Boolean);
+  if (!region.length) return "";
+  return [...region, buildingName].join(" ");
+}
+
+// 주거 카테고리(주택>…, 아파트>…)이면서 건물명이 일치하고 주소에 지번이
+// 있는 항목만 본다. 지번이 하나로 수렴할 때만 그 지번을 돌려준다.
+function pickNaverLotCandidate(items, buildingName) {
+  const wanted = text(buildingName);
+  if (!wanted) return null;
+  const matched = (Array.isArray(items) ? items : []).filter((item) => {
+    const category = text(item?.category);
+    if (!/^주택|아파트/.test(category)) return false;
+    if (!buildingNamesMatch(wanted, stripTags(item?.title))) return false;
+    return Boolean(extractLegalLot(item?.address));
+  });
+  if (!matched.length) return null;
+  const lots = new Set(matched.map((item) => legalLotKey(item.address)));
+  if (lots.size !== 1) return null;
+  return {
+    lotAddress: lotScopedText(matched[0].address),
+    item: matched[0]
+  };
+}
 // ── public/pnuless-iros.mjs ──
 // PNU 없는 IROS 조회와 IROS 소재지 역확정.
 //
@@ -698,11 +985,19 @@ function summarizeCandidatePropertyClasses(candidates) {
 // 행정구역·지번 정규식이 뽑아낸 토큰만으로 조립한다(구조적으로 유출 불가).
 
 
-const PNULESS_IROS_VERSION = "pnuless-iros-v1";
 
-// PNU는 없지만 주소 자체는 외부 원천이 정상으로 확인해 준 상태만 허용한다.
-// AMBIGUOUS(복수 PNU)는 기존 R-ADDR-AMBIGUOUS-PNU-IROS가 담당하고,
-// FAILED/HUMAN_INPUT_ERROR는 주소 문자열 자체를 믿을 수 없으므로 제외한다.
+const PNULESS_IROS_VERSION = "pnuless-iros-v2";
+
+// PNU는 없지만 주소 자체는 외부 원천이 정상으로 확인해 준 상태를 허용한다.
+// AMBIGUOUS(복수 PNU)는 기존 R-ADDR-AMBIGUOUS-PNU-IROS가 담당한다.
+//
+// v2(2026-08-07): FAILED(주소미발견)도 조건부 허용한다. JUSO에 없는 필지가
+// 등기부에는 완전수집으로 존재하는 실측(주소 검색 0건 지번에서 등기 82세대
+// 정확 매칭 확정)에서 도출했다. 원문 자체에 시도부터 지번까지 완전한
+// 지번주소와 동·호가 모두 명시된 행만 대상이며, 채택은 기존 매칭 계약
+// (완전수집 + 동·호 정확 매칭 유일)을 그대로 통과해야 한다.
+// HUMAN_INPUT_ERROR는 외부 원천이 "그 주소는 없다"고 답한 상태이므로
+// 여전히 제외한다.
 const PNULESS_ELIGIBLE_ADDRESS_STATUSES = Object.freeze([
   "NAVER_CONFIRMED_PNU_FAILED"
 ]);
@@ -740,22 +1035,48 @@ function addressSources(result) {
 // 때만 계획을 만든다. 호가 없으면 세대를 특정할 수 없으므로 대상이 아니다.
 function buildPnulessIrosPlan(row) {
   const result = row?.result;
-  if (!result || !ELIGIBLE.has(text(result.status))) return null;
+  if (!result) return null;
   if (pnuOf(result.pnu)) return null;
   const ho = unitKey(result.unit?.ho, "ho");
   if (!ho) return null;
+  const status = text(result.status);
 
-  for (const { source, value } of addressSources(result)) {
-    const address = lotScopedAddress(value);
-    if (!address) continue;
+  if (ELIGIBLE.has(status)) {
+    for (const { source, value } of addressSources(result)) {
+      const address = lotScopedAddress(value);
+      if (!address) continue;
+      return {
+        version: PNULESS_IROS_VERSION,
+        address,
+        addressSource: source,
+        dong: unitKey(result.unit?.dong, "dong"),
+        ho,
+        // PNU가 없으면 "이 지번이 맞다"는 독립 근거가 JUSO에 없다. 건물명이
+        // 있는 행은 기존 검토 플래그 경로로 건물명 교차검증까지 강제한다.
+        strictBuilding: Boolean(text(result.bdNm)),
+        groupKey: `PNULESS:${address}`
+      };
+    }
+    return null;
+  }
+
+  // R-IROS-PNULESS-RAW-LOT(v2): 주소 검색이 0건(FAILED·NOT_FOUND)이어도
+  // 원문 자체에 완전한 지번주소(시도~지번)와 동·호가 모두 명시돼 있으면
+  // 그 지번을 소재지로 직조회한다. 원문 지번의 신뢰는 조회로 얻는 게 아니라
+  // 완전수집 후 동·호 정확 매칭이 유일할 때만 성립한다.
+  if (status === "FAILED" && text(result.reason) === "NOT_FOUND") {
+    const dong = unitKey(result.unit?.dong, "dong");
+    if (!dong) return null;
+    const raw = text(row?.raw);
+    if (!hasRegionalLotAddress(raw)) return null;
+    const address = lotScopedAddress(raw);
+    if (!address) return null;
     return {
       version: PNULESS_IROS_VERSION,
       address,
-      addressSource: source,
-      dong: unitKey(result.unit?.dong, "dong"),
+      addressSource: "rawLot",
+      dong,
       ho,
-      // PNU가 없으면 "이 지번이 맞다"는 독립 근거가 JUSO에 없다. 건물명이
-      // 있는 행은 기존 검토 플래그 경로로 건물명 교차검증까지 강제한다.
       strictBuilding: Boolean(text(result.bdNm)),
       groupKey: `PNULESS:${address}`
     };

@@ -4,18 +4,33 @@ import {
   alternateRawLotAddresses,
   buildingEvidenceKind,
   buildingKey,
+  buildingNamesMatch,
   candidateHasNoDong,
   candidateMatchesAddressLot,
   candidateMatchesUnit,
+  excludeShopDongForDonglessRequest,
+  extractLegalLot,
   filterUnitPropertyCandidates,
   matchedCandidateUnitVariant,
   rawUnitRecoveryVariants,
   selectDongAgnosticHoCandidate,
+  selectFloorDisambiguatedCandidate,
+  selectNamelessRegistryExact,
   selectUniqueRawUnitCandidate,
   summarizeCandidatePropertyClasses,
   targetPropertyClass,
   unitKey
 } from "./unit-match.mjs";
+import {
+  ADDRESS_FAILED_REQUERY_MODULES,
+  buildBuildingNameRequeryPlan,
+  buildExcludedLotRequeryPlan,
+  buildNaverLotRescueQuery,
+  evaluateBuildingNameRequery,
+  needsNaverLotRescue,
+  pickExcludedLotCandidate,
+  pickNaverLotCandidate
+} from "./address-failed-requery.mjs";
 import {
   PNULESS_IROS_VERSION,
   acceptReversePnu,
@@ -2482,6 +2497,150 @@ function pipelineEvidenceForRow(row, groupHints, dongsoAnchors) {
     pnuIrosEvidence: row?.result?.pnuIrosEvidence || null
   };
 }
+// 실패 상태에서만 발화하는 주소 재조회 3경로(address-failed-requery.mjs).
+// 어느 경로든 확정 조건(지역 검증 통과 + 단일 후보)을 못 채우면 null을
+// 돌려주고 원래 실패 결과가 그대로 유지된다 — 기존 CONFIRMED 회귀 불가.
+function lotPreOf(pre, candidate) {
+  const lotInfo = extractLegalLot(candidate?.jibunAddr || "");
+  return {
+    ...pre,
+    jibun: lotInfo ? `${lotInfo.mountain ? "산" : ""}${lotInfo.lot}` : pre.jibun,
+    emd: lotInfo?.legal || pre.emd,
+    emdCands: lotInfo?.legal ? [lotInfo.legal] : pre.emdCands
+  };
+}
+async function attemptFailedAddressRequery(result, pre, clients) {
+  try {
+    const status = String(result?.status || "");
+
+    // R-ADDR-EXCLUDED-LOT: 용도 불일치로 배제한 후보의 지번을 재확인.
+    // 같은 지번에 원문 건물명과 일치하는 다른 건물이 정확히 하나면 채택.
+    if (status === "VALIDATION_FAILED" &&
+        /^용도 불일치/.test(String(result?.validation?.reason || ""))) {
+      const plan = buildExcludedLotRequeryPlan({
+        rejectedAddress: result.jibunAddr || result.roadAddr || "",
+        buildingName: pre?.bldName || ""
+      });
+      if (!plan) return null;
+      const hits = await clients.juso(plan.query);
+      const picked = pickExcludedLotCandidate(hits, plan, result.bdNm || "");
+      if (!picked) return null;
+      const recovered = resolve([picked], lotPreOf(pre, picked));
+      const rv = validateRegion(pre.regionText || pre.cleaned, recovered.jibunAddr, false, "");
+      if (recovered.status !== "CONFIRMED" || rv.status === "MISMATCH") return null;
+      recovered.searchLevel = result.searchLevel || null;
+      recovered.jusoQuery = `${result.jusoQuery || pre.cleaned} ▸ [배제지번]${plan.query}`;
+      recovered.candCount = 1;
+      recovered.reviewNeeded = recovered.reviewNeeded || "excluded_lot_requery";
+      recovered.validation = {
+        status: "MATCH",
+        reason: "용도 불일치로 배제한 후보의 지번에서 원문 건물명 일치 건물로 재확정",
+        inputSgg: rv.inputSgg, resultSgg: rv.resultSgg
+      };
+      recovered.addressMatchEvidence = [...new Set([
+        ...(recovered.addressMatchEvidence || []), "EXCLUDED_LOT_REQUERY"
+      ])];
+      recovered.failedRequery = {
+        module: "R-ADDR-EXCLUDED-LOT",
+        version: ADDRESS_FAILED_REQUERY_MODULES.R_ADDR_EXCLUDED_LOT
+      };
+      return recovered;
+    }
+
+    // R-ADDR-BUILDING-NAME-LOT: 지번식 검색 0건 행의 지역+건물명 재검색.
+    if (status === "FAILED" && String(result?.reason || "") !== "NOT_FOUND") return null;
+    const plan = buildBuildingNameRequeryPlan(pre, status);
+    if (!plan) return null;
+    const hits = await clients.juso(plan.query);
+    const judged = evaluateBuildingNameRequery(hits, plan);
+    if (!judged) return null;
+    if (judged.kind === "MULTI") {
+      // 지번을 하나로 못 좁히면 복수후보로만 승격한다. 확정이 아니라
+      // 기존 복수PNU-IROS 판별(R-ADDR-AMBIGUOUS-PNU-IROS)의 입력이 된다.
+      const multi = resolve(judged.candidates, { ...pre, jibun: "" });
+      if (multi.status !== "AMBIGUOUS") return null;
+      multi.searchLevel = result.searchLevel || null;
+      multi.jusoQuery = `${result.jusoQuery || pre.cleaned} ▸ [건물명]${plan.query}`;
+      multi.candCount = judged.candidates.length;
+      multi.validation = { status: "NOT_AVAILABLE",
+        reason: "건물명 재검색 — 복수 지번", inputSgg: "", resultSgg: "" };
+      multi.addressMatchEvidence = [...new Set([
+        ...(multi.addressMatchEvidence || []), "BUILDING_NAME_REQUERY_MULTI"
+      ])];
+      multi.failedRequery = {
+        module: "R-ADDR-BUILDING-NAME-LOT",
+        version: ADDRESS_FAILED_REQUERY_MODULES.R_ADDR_BUILDING_NAME_LOT,
+        kind: "MULTI"
+      };
+      return multi;
+    }
+    const single = resolve([judged.candidate], lotPreOf(pre, judged.candidate));
+    const rv = validateRegion(pre.regionText || pre.cleaned, single.jibunAddr, false, "");
+    if (single.status !== "CONFIRMED" || rv.status === "MISMATCH") return null;
+    single.searchLevel = result.searchLevel || null;
+    single.jusoQuery = `${result.jusoQuery || pre.cleaned} ▸ [건물명]${plan.query}`;
+    single.candCount = judged.candidates.length;
+    single.reviewNeeded = single.reviewNeeded || "building_name_requery";
+    single.validation = {
+      status: "MATCH",
+      reason: judged.kind === "UNIT_DONG_LOT"
+        ? "건물명 재검색 — 원문 동이 실존하는 지번으로 확정"
+        : "건물명 재검색 — 단일 지번 확정",
+      inputSgg: rv.inputSgg, resultSgg: rv.resultSgg
+    };
+    single.addressMatchEvidence = [...new Set([
+      ...(single.addressMatchEvidence || []),
+      judged.kind === "UNIT_DONG_LOT" ? "BUILDING_NAME_UNIT_DONG_LOT" : "BUILDING_NAME_SINGLE_LOT"
+    ])];
+    single.failedRequery = {
+      module: "R-ADDR-BUILDING-NAME-LOT",
+      version: ADDRESS_FAILED_REQUERY_MODULES.R_ADDR_BUILDING_NAME_LOT,
+      kind: judged.kind
+    };
+    return single;
+  } catch {
+    return null; // 일시 오류는 재조회만 포기하고 원래 실패를 유지한다
+  }
+}
+// R-ADDR-NAVER-LOT-RESCUE: 네이버가 지번 없는 주소만 준 행의 지번 구조.
+async function attemptNaverLotRescue(pnuFailed, pre, clients) {
+  try {
+    if (!needsNaverLotRescue(pnuFailed)) return null;
+    const rescueQuery = buildNaverLotRescueQuery(pre);
+    if (!rescueQuery) return null;
+    const items = await clients.naverLocal(rescueQuery);
+    const picked = pickNaverLotCandidate(items, pre.bldName);
+    if (!picked?.lotAddress) return null;
+    const lotHits = await clients.juso(picked.lotAddress);
+    const named = (lotHits || []).filter((hit) => buildingNamesMatch(pre.bldName, hit?.bdNm));
+    if (named.length !== 1) return null;
+    const rescued = resolve([named[0]], lotPreOf(pre, named[0]));
+    const rv = validateRegion(pre.regionText || pre.cleaned, rescued.jibunAddr, true, "");
+    if (rescued.status !== "CONFIRMED" || rv.status === "MISMATCH") return null;
+    rescued.searchLevel = "L3";
+    rescued.jusoQuery = `${pnuFailed.jusoQuery || pre.cleaned} ▸ [레스큐]${rescueQuery} ▸ ${picked.lotAddress}`;
+    rescued.candCount = 1;
+    rescued.naverAddr = pnuFailed.naverAddr || "";
+    rescued.naverJibunAddr = picked.lotAddress;
+    rescued.naverRoadAddr = pnuFailed.naverRoadAddr || "";
+    rescued.reviewNeeded = rescued.reviewNeeded || "naver_lot_rescue";
+    rescued.validation = {
+      status: "MATCH",
+      reason: "네이버 지역검색 지번 구조 + JUSO 교차확인",
+      inputSgg: rv.inputSgg, resultSgg: rv.resultSgg
+    };
+    rescued.addressMatchEvidence = [...new Set([
+      ...(rescued.addressMatchEvidence || []), "NAVER_LOT_RESCUE"
+    ])];
+    rescued.failedRequery = {
+      module: "R-ADDR-NAVER-LOT-RESCUE",
+      version: ADDRESS_FAILED_REQUERY_MODULES.R_ADDR_NAVER_LOT_RESCUE
+    };
+    return rescued;
+  } catch {
+    return null;
+  }
+}
 async function refineAddress(raw, clients, zipcode = "", groupHints = null, unitOverride = null, dongsoAnchors = null, owner = "") {
   // R9: 동소를 기준행 건물명으로 치환한 뒤 전처리한다(치환 후 파싱해야 동·호가 잡힌다)
   let _raw = raw;
@@ -2611,7 +2770,7 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
     } else {
       // 네이버 주소는 정상이나 PNU 미확보 → 별도 상태(주소는 유효)
       const c = candidates[0] || {};
-      return {
+      const pnuFailed = {
         status: "NAVER_CONFIRMED_PNU_FAILED",
         jibunAddr: c.jibunAddr || naverAddr || null,
         roadAddr: c.roadAddr || null,
@@ -2626,11 +2785,13 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
         message: `\uB124\uC774\uBC84 \uC8FC\uC18C \uD655\uC778(PNU \uBBF8\uD655\uBCF4): ${naverAddr || c.jibunAddr || ""}`,
         validation: { status: "NOT_AVAILABLE", reason: "네이버 확정", inputSgg: "", resultSgg: "" },
       };
+      const rescued = await attemptNaverLotRescue(pnuFailed, pre, clients);
+      return rescued || pnuFailed;
     }
   }
   if (humanInputError) {
     // 네이버 3단계 정상호출 + 전부 0건 → 인적 입력오류(주소 자체가 틀림)
-    return {
+    const humanError = {
       status: "HUMAN_INPUT_ERROR",
       reason: "HUMAN_INPUT_ERROR",
       unit: pre.unit,
@@ -2638,6 +2799,8 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
       searchLevel: "L3", jusoQuery, candCount: 0,
       validation: { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" },
     };
+    const requeried = await attemptFailedAddressRequery(humanError, pre, clients);
+    return requeried || humanError;
   }
 
   const result = resolve(candidates, pre);
@@ -2739,6 +2902,12 @@ async function refineAddress(raw, clients, zipcode = "", groupHints = null, unit
     }
   } else {
     result.validation = { status: "NOT_AVAILABLE", reason: "", inputSgg: "", resultSgg: "" };
+  }
+  // 실패로 끝난 행만 재조회 3경로를 시도한다. 성공(CONFIRMED) 행은 위에서
+  // 이미 반환 형태가 굳었고 이 호출은 실패 상태에서만 결과를 바꾼다.
+  if (["FAILED", "HUMAN_INPUT_ERROR", "VALIDATION_FAILED"].includes(result.status)) {
+    const requeried = await attemptFailedAddressRequery(result, pre, clients);
+    if (requeried) return requeried;
   }
   return result;
 }
@@ -4128,14 +4297,34 @@ function AddrRefineTestGui() {
       let unitProfileRecovery = null;
       let rawUnitRecovery = null;
       let dongAgnosticRecovery = null;
+      let floorDisambigRecovery = null;
+      let exactUnitMatched = false;
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
           const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
-          if (variant?.source === "composite_dong_room_prefix") {
+          if (variant?.source === "composite_dong_room_prefix" ||
+              variant?.source === "self_dong_ho_prefix") {
             applyModule("IROS-CANDIDATE-NORMALIZE", IROS_MODULE_VERSIONS.IROS_CANDIDATE_NORMALIZE);
           }
           return Boolean(variant);
         });
+        // 검토 게이트의 무기재 건물명 예외(R-IROS-NAMELESS-REGISTRY-EXACT)는
+        // 1차 정확 매칭에서 잡힌 후보에만 열린다. 폴백 경로로 잡힌 후보는
+        // 근거가 더 약하므로 제외한다.
+        exactUnitMatched = matched.length > 0;
+        // R-IROS-SHOP-DONG-EXCLUSION: 동 없는 요청에서 같은 호가 무동 세대와
+        // 상가동에만 갈리면 상가동을 배제한다(서도아파트 실측). 숫자·알파벳
+        // 동이 섞여 있으면 배제하지 않는다.
+        if (matched.length > 1 && !wantDong && wantHo) {
+          const trimmed = excludeShopDongForDonglessRequest(matched);
+          if (trimmed.length < matched.length) {
+            matched = trimmed;
+            applyModule(
+              "R-IROS-SHOP-DONG-EXCLUSION",
+              IROS_MODULE_VERSIONS.R_IROS_SHOP_DONG_EXCLUSION
+            );
+          }
+        }
         // 단일 동 건물: 후보 전체에 동이 없고 호는 있을 때 호로만 재매칭.
         if (!matched.length && wantDong && wantHo) {
           const anyDong = cands.some((c) => !candidateHasNoDong(c));
@@ -4221,6 +4410,25 @@ function AddrRefineTestGui() {
         }
       }
 
+      // R-IROS-FLOOR-DISAMBIG: 동·호가 완전히 같은 후보가 여러 건인데 등기부
+      // floor 필드로만 갈리는 건물(진흥아파트: 동 101 호 "1"이 층 1~6으로 6건,
+      // 원문 "101동 3층1호" — 실측 136행). 원문에 명시된 층의 후보가 정확히
+      // 한 건일 때만 채택한다. 층 정보가 없거나 같은 층이 여러 건이면 그대로
+      // REG_MULTI로 남긴다.
+      if (cands.length > 1 && (wantDong || wantHo)) {
+        const floored = selectFloorDisambiguatedCandidate(
+          cands,
+          row.raw,
+          row.result.unit || {}
+        );
+        if (floored?.candidate) {
+          cands = [floored.candidate];
+          floorDisambigRecovery = floored;
+          applyModule("R-IROS-FLOOR-DISAMBIG", IROS_MODULE_VERSIONS.R_IROS_FLOOR_DISAMBIG);
+        }
+      }
+      stageCounts.floor_disambiguation = floorDisambigRecovery ? 1 : 0;
+
       // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 원문 동 표기가 등기부 동 체계에
       // 아예 존재하지 않고(101동 ↔ A동·가동·공란), 요청한 호를 가진 세대가 이
       // 지번 전체에서 정확히 한 건일 때만 동을 무시하고 그 한 건을 채택한다.
@@ -4265,6 +4473,7 @@ function AddrRefineTestGui() {
 
       // 검토 플래그가 있으면 건물명까지 확인되어야 자동확정.
       if (row.result.reviewNeeded) {
+        const beforeStrict = cands;
         cands = cands.filter((c) => {
           const evidence = buildingEvidenceKind(c.buldnm, row.result.bdNm, row.raw);
           if (evidence === "raw_exact_name") {
@@ -4274,16 +4483,29 @@ function AddrRefineTestGui() {
         });
         stageCounts.strict_building = cands.length;
         if (!cands.length) {
-          return {
-            status: "REG_VALIDATION_FAILED",
-            candidates: all,
-            complete: true,
-            failure_stage: "STRICT_BUILDING",
-            stage_counts: stageCounts,
-            applied_modules: appliedModules,
-            message: "검토대상 건물명 교차검증 실패",
-            at: nowText()
-          };
+          // R-IROS-NAMELESS-REGISTRY-EXACT: 등기부가 건물명을 아예 적지 않아
+          // 교차검증이 원천 불가능한 건물. 확정 지번 위 동·호 정확 매칭이
+          // 유일한 한 건일 때만 그 근거로 통과시킨다(실측 457행).
+          const nameless = selectNamelessRegistryExact(beforeStrict, exactUnitMatched);
+          if (nameless) {
+            cands = [nameless];
+            stageCounts.strict_building = 1;
+            applyModule(
+              "R-IROS-NAMELESS-REGISTRY-EXACT",
+              IROS_MODULE_VERSIONS.R_IROS_NAMELESS_REGISTRY_EXACT
+            );
+          } else {
+            return {
+              status: "REG_VALIDATION_FAILED",
+              candidates: all,
+              complete: true,
+              failure_stage: "STRICT_BUILDING",
+              stage_counts: stageCounts,
+              applied_modules: appliedModules,
+              message: "검토대상 건물명 교차검증 실패",
+              at: nowText()
+            };
+          }
         }
       }
 
@@ -4301,9 +4523,11 @@ function AddrRefineTestGui() {
           raw_unit_recovery: rawUnitRecovery,
           unit_profile_recovery: unitProfileRecovery,
           dong_agnostic_recovery: dongAgnosticRecovery,
+          floor_disambiguation: floorDisambigRecovery,
           message: rawUnitRecovery ? "원문 동·층·호 표기로 완전후보 한 건 수렴" :
+            (floorDisambigRecovery ? "동·호 동일 복수후보를 원문 층으로 한 건 수렴" :
             (dongAgnosticRecovery ? "등기부에 없는 동 표기 — 지번 전체에서 호가 한 건으로 수렴" :
-            (unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치")),
+            (unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치"))),
           at: nowText()
         };
       }

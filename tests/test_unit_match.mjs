@@ -9,11 +9,13 @@ import {
   candidateMatchesAddressLot,
   candidateMatchesUnit,
   candidateUnitVariants,
+  excludeShopDongForDonglessRequest,
   filterExpectedPropertyClass,
   filterUnitPropertyCandidates,
   propertyClassKey,
   rawUnitRecoverySignature,
   rawUnitRecoveryVariants,
+  selectFloorDisambiguatedCandidate,
   selectUniqueRawUnitCandidate,
   summarizeCandidatePropertyClasses,
   targetPropertyClass,
@@ -119,6 +121,20 @@ test("composite IROS dong and room prefixes are normalized safely", () => {
   assert.equal(candidateMatchesUnit({ dong: "204", ho: "204-1" }, "204", "204-1"), true);
 });
 
+test("self-dong prefixed ho decomposes only when it names the candidate's own dong", () => {
+  // 부산 범일역풍림아이원 실측: 동 "103", 호 "103동902" (46행)
+  assert.equal(candidateMatchesUnit({ dong: "103", ho: "103동902" }, "103", "902"), true);
+  // 층까지 붙은 표기: 동 "101", 호 "101동1902"
+  assert.equal(candidateMatchesUnit({ dong: "101", ho: "101동1902" }, "101", "1902"), true);
+  // 접두어가 그 후보의 동과 다르면 절대 분해하지 않는다
+  assert.equal(candidateMatchesUnit({ dong: "103", ho: "104동902" }, "103", "902"), false);
+  assert.equal(candidateMatchesUnit({ dong: "103", ho: "104동902" }, "104", "902"), false);
+  // 동 표기가 없는 후보의 "N동M" 호도 분해하지 않는다 (근거 없는 추측 금지)
+  assert.equal(candidateMatchesUnit({ dong: "", ho: "103동902" }, "103", "902"), false);
+  // 원래 표기 그대로도 계속 매칭된다 (회귀 방지)
+  assert.equal(candidateMatchesUnit({ dong: "103", ho: "103동902" }, "103", "103동902"), true);
+});
+
 test("raw N-M호 recovery is fallback-only evidence for a missing dong", () => {
   assert.deepEqual(
     rawUnitRecoveryVariants(
@@ -192,6 +208,90 @@ test("raw unit recovery takes the first variant that is unique on its own", () =
     { dong: "101", ho: "8" }
   );
   assert.equal(ambiguous, null);
+});
+
+test("nameless-registry exact pass opens only for a unique exact match with empty name", async () => {
+  const { selectNamelessRegistryExact } = await import("../public/unit-match.mjs");
+  // 실측(삼본·동산): 등기부 건물명 전부 빈값 — 동·호 정확 매칭 유일이면 통과
+  const nameless = { unique_no: "A", dong: "101", ho: "101", buldnm: "" };
+  assert.equal(selectNamelessRegistryExact([nameless], true)?.unique_no, "A");
+  // 건물명이 적혀 있으면 절대 열리지 않는다 (옆 단지 오확정 방어 유지)
+  assert.equal(selectNamelessRegistryExact(
+    [{ unique_no: "B", dong: "106", ho: "101", buldnm: "배방삼정그린코아" }], true), null);
+  // 폴백 매칭(동무시·프로파일 등)으로 잡힌 후보에는 열리지 않는다
+  assert.equal(selectNamelessRegistryExact([nameless], false), null);
+  // 유일하지 않으면 열리지 않는다
+  assert.equal(selectNamelessRegistryExact(
+    [nameless, { unique_no: "C", dong: "101", ho: "101", buldnm: "" }], true), null);
+  assert.equal(selectNamelessRegistryExact([], true), null);
+});
+
+test("dongless request excludes shop-dong twins only when no real dong is involved", () => {
+  // 횡성 서도아파트 실측: 동 없는 요청의 호 102가 무동 세대 + 상가동 세대
+  const apt = { unique_no: "APT", dong: "", ho: "102" };
+  const shop = { unique_no: "SHOP", dong: "상가", ho: "102" };
+  assert.deepEqual(
+    excludeShopDongForDonglessRequest([apt, shop]).map((c) => c.unique_no),
+    ["APT"]
+  );
+  // 숫자 동이 섞여 있으면 어느 동인지 알 수 없다 — 배제하지 않는다
+  const tower = { unique_no: "T101", dong: "101", ho: "102" };
+  assert.equal(excludeShopDongForDonglessRequest([apt, shop, tower]).length, 3);
+  // 전부 무동이거나 전부 상가면 그대로 둔다
+  assert.equal(excludeShopDongForDonglessRequest([apt]).length, 1);
+  assert.equal(excludeShopDongForDonglessRequest([shop]).length, 1);
+});
+
+test("floor field disambiguates identical dong-ho candidates only with raw floor evidence", () => {
+  // 청주 진흥아파트 실측: 동 101 호 "1"이 floor 1~6으로 6건, 원문 "101동 3층1호" (136행)
+  const candidates = [1, 2, 3, 4, 5, 6].map((floor) => ({
+    unique_no: `F${floor}`, dong: "101", ho: "1", floor: String(floor),
+    real_cls_cd: "집합건물"
+  }));
+  const picked = selectFloorDisambiguatedCandidate(
+    candidates,
+    "충북 청주시 청원구 내수읍 마산리 123 진흥아파트 101동 3층1호",
+    { dong: "101", ho: "1" }
+  );
+  assert.equal(picked?.candidate.unique_no, "F3");
+  assert.equal(picked?.matched_floor, "3");
+
+  // 같은 층이 두 건이면 확정하지 않는다
+  const dup = [...candidates, { unique_no: "F3B", dong: "101", ho: "1", floor: "3" }];
+  assert.equal(selectFloorDisambiguatedCandidate(
+    dup,
+    "충북 청주시 청원구 내수읍 마산리 123 진흥아파트 101동 3층1호",
+    { dong: "101", ho: "1" }
+  ), null);
+
+  // 원문에 층 표기가 없으면 손대지 않는다
+  assert.equal(selectFloorDisambiguatedCandidate(
+    candidates,
+    "충북 청주시 청원구 내수읍 마산리 123 진흥아파트 101동 1호",
+    { dong: "101", ho: "1" }
+  ), null);
+
+  // 지하는 실측 근거가 없으므로 확정하지 않는다
+  assert.equal(selectFloorDisambiguatedCandidate(
+    candidates,
+    "충북 청주시 내수읍 마산리 123 진흥아파트 101동 지하3층1호",
+    { dong: "101", ho: "1" }
+  ), null);
+
+  // 원문 층 호가 요청 호와 다르면 손대지 않는다
+  assert.equal(selectFloorDisambiguatedCandidate(
+    candidates,
+    "충북 청주시 내수읍 마산리 123 진흥아파트 101동 3층2호",
+    { dong: "101", ho: "1" }
+  ), null);
+
+  // floor 필드가 비어 있는 등기부에서는 동작하지 않는다
+  assert.equal(selectFloorDisambiguatedCandidate(
+    [{ unique_no: "A", dong: "101", ho: "1", floor: "" },
+     { unique_no: "B", dong: "101", ho: "1", floor: "" }],
+    "진흥아파트 101동 3층1호",
+    { dong: "101", ho: "1" }
+  ), null);
 });
 
 test("raw alternate lot stays in the same legal dong", () => {

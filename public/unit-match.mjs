@@ -1,9 +1,9 @@
 import { extractExplicitLotRefs } from "./address-multilot-rules.mjs";
 
-export const MATCHER_VERSION = "iros-matcher-v11";
+export const MATCHER_VERSION = "iros-matcher-v13";
 
 export const IROS_MODULE_VERSIONS = Object.freeze({
-  IROS_CANDIDATE_NORMALIZE: "2",
+  IROS_CANDIDATE_NORMALIZE: "3",
   R_IROS_MULTILOT: "2",
   R_IROS_BUILDING_EVIDENCE: "1",
   R_IROS_HO_BUILDING: "1",
@@ -13,7 +13,10 @@ export const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_UNIT_BEARING_BUILDING: "1",
   R_IROS_DONG_AGNOSTIC: "1",
   R_IROS_LOT_FALLBACK: "1",
-  R_IROS_DONG_AGNOSTIC_HO: "1"
+  R_IROS_DONG_AGNOSTIC_HO: "2",
+  R_IROS_FLOOR_DISAMBIG: "1",
+  R_IROS_SHOP_DONG_EXCLUSION: "1",
+  R_IROS_NAMELESS_REGISTRY_EXACT: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -70,6 +73,22 @@ export function candidateUnitVariants(candidate) {
         dong: prefixedDong,
         ho: unitKey(room[2], "ho"),
         source: "composite_dong_room_prefix"
+      });
+    }
+  }
+
+  // IROS 실측: 호가 "103동902"처럼 자기 동을 접두어로 달고 오는 등기부가 있다
+  // (부산 범일역풍림아이원, 동 "103" 호 "103동902" — 실측 46행). 접두어가 그
+  // 후보의 동 표기와 정확히 일치할 때만 분해한다. "국동101" 같은 고유명 호나
+  // 다른 동을 가리키는 값은 건드리지 않는다.
+  const embedded = rawHo.match(/^제?\s*([0-9A-Za-z가-힣]+)\s*동\s*(\d{1,5}(?:-\d{1,4})?)\s*호?$/);
+  if (embedded) {
+    const prefixedDong = dongAliasKey(embedded[1]);
+    if (prefixedDong && (prefixedDong === base.dong || dongTokens.includes(prefixedDong))) {
+      variants.unshift({
+        dong: prefixedDong,
+        ho: unitKey(embedded[2], "ho"),
+        source: "self_dong_ho_prefix"
       });
     }
   }
@@ -238,6 +257,61 @@ export function selectUniqueRawUnitCandidate(candidates, rawAddress, currentUnit
   return null;
 }
 
+// R-IROS-SHOP-DONG-EXCLUSION: 동 표기가 없는 요청에서 같은 호가 무동 세대와
+// 상가동 세대에 함께 있을 때(횡성 서도아파트 실측: 호 102가 무동 1건 +
+// 상가동 1건), 상가동은 동 없는 주거 요청의 대상일 수 없으므로 배제한다.
+// 숫자·알파벳 동이 하나라도 섞여 있으면 어느 동을 의미하는지 알 수 없으므로
+// 배제하지 않고 복수결과를 그대로 유지한다.
+export function excludeShopDongForDonglessRequest(matched) {
+  const source = Array.isArray(matched) ? matched : [];
+  const noDong = source.filter((candidate) => candidateHasNoDong(candidate));
+  if (!noDong.length || noDong.length === source.length) return source;
+  const others = source.filter((candidate) => !candidateHasNoDong(candidate));
+  const allShop = others.every((candidate) =>
+    candidateUnitVariants(candidate).every((variant) =>
+      !variant.dong || /^상가/.test(variant.dong)));
+  return allShop ? noDong : source;
+}
+
+// R-IROS-FLOOR-DISAMBIG: 동·호가 완전히 같은 후보가 여러 건인데 등기부의
+// floor 필드로만 갈리는 건물이 있다(청주 진흥아파트 실측: 동 101 호 "1"이
+// 층 1~6으로 6건, 원문은 "101동 3층1호" — 136행). 원문에 명시된 층이 있고,
+// 그 층의 후보가 정확히 한 건일 때만 채택한다.
+//
+// 지상층만 다룬다. 지하는 등기부 floor 표기가 "B1"·"지1" 등으로 갈려 실측
+// 근거가 없다. 층 정보가 원문에 없거나, 같은 층이 여러 건이면 확정하지 않는다.
+const RE_RAW_FLOOR_ROOM =
+  /(?:^|\s)(지하|지|B|b)?\s*(\d{1,2})\s*층\s*(?:제?\s*)?(?:비|B|b)?\s*(\d{1,3})\s*호?(?=\s|$)/g;
+
+export function selectFloorDisambiguatedCandidate(candidates, rawAddress, currentUnit = {}) {
+  const raw = String(rawAddress || "");
+  const currentDong = dongAliasKey(currentUnit?.dong);
+  const currentHo = unitKey(currentUnit?.ho, "ho");
+  if (!currentHo) return null;
+  const matches = [...raw.matchAll(RE_RAW_FLOOR_ROOM)];
+  const match = matches.at(-1);
+  if (!match) return null;
+  if (match[1]) return null; // 지하: 실측 근거 없음 — 확정하지 않는다
+  if (unitKey(match[3], "ho") !== currentHo) return null;
+  const wantFloor = String(Number(match[2]));
+  const unique = new Map();
+  let matchedCount = 0;
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    if (!candidateMatchesUnit(candidate, currentDong, currentHo)) continue;
+    const floor = String(candidate?.floor ?? "").trim();
+    if (!/^\d+$/.test(floor) || String(Number(floor)) !== wantFloor) continue;
+    matchedCount += 1;
+    const key = candidateIdentity(candidate);
+    if (key && !unique.has(key)) unique.set(key, candidate);
+  }
+  if (unique.size !== 1) return null;
+  return {
+    candidate: [...unique.values()][0],
+    matched_floor: wantFloor,
+    matched_candidate_count: matchedCount
+  };
+}
+
 // R-IROS-DONG-AGNOSTIC-HO: 원문 동 표기가 등기부 동 체계와 아예 다른 건물이
 // 있다(원문 `101동`, 등기부 `A동`·`가동`·공란). 요청한 동이 완전 후보 어디에도
 // 존재하지 않고, 요청한 호를 가진 세대가 지번 전체에서 정확히 한 건일 때만
@@ -255,8 +329,15 @@ export function selectDongAgnosticHoCandidate(candidates, wantedDong, wantedHo) 
   );
   if (dongExists) return null;
   const matched = source.filter((candidate) => candidateMatchesUnit(candidate, "", ho));
+  // 실측(횡성 서도아파트 94행): 동 표기가 없는 등기부에 상가동 세대가 섞이면
+  // 같은 호가 2건이 되어 유일성이 깨진다. 명시적으로 다른 동이 적힌 후보는
+  // 요청한 동일 수 없다는 근거 있는 사실이므로, 동 표기가 없는 후보가 하나라도
+  // 있으면 그 안에서만 유일성을 본다. 전부 명시 동이면(청우 302↔301) 기존
+  // 그대로 전체에서 유일성을 요구한다.
+  const noDong = matched.filter((candidate) => candidateHasNoDong(candidate));
+  const pool = noDong.length ? noDong : matched;
   const unique = new Map();
-  for (const candidate of matched) {
+  for (const candidate of pool) {
     const key = candidateIdentity(candidate);
     if (key && !unique.has(key)) unique.set(key, candidate);
   }
@@ -266,11 +347,28 @@ export function selectDongAgnosticHoCandidate(candidates, wantedDong, wantedHo) 
     requested_dong: dong,
     matched_ho: ho,
     matched_candidate_count: matched.length,
+    no_dong_candidate_count: noDong.length,
     candidate_dongs: [...new Set(
       source.flatMap((candidate) =>
         candidateUnitVariants(candidate).map((variant) => variant.dong).filter(Boolean))
     )].sort()
   };
+}
+
+// R-IROS-NAMELESS-REGISTRY-EXACT: 검토 플래그 행의 건물명 교차검증은 등기부가
+// 건물명을 아예 적지 않는 건물에서는 원천적으로 불가능하다(실측: 한 단지
+// 208건·268건 전부 빈값 — 완전수집과 동·호 정확 매칭까지 성공하고도 여기서
+// 457행이 죽었다). 이때는 이미 성립한 더 강한 근거 — 확정 지번 정확 일치
+// 위에서의 동·호 정확 매칭 유일 — 로 통과시킨다.
+//
+// 후보 건물명이 적혀 있으면 이 경로는 절대 열리지 않는다. 이름이 있는데
+// 다르면 "다른 건물"이라는 근거 있는 사실이고, 그 게이트가 실제로 옆 단지
+// 오확정을 막은 실측이 있기 때문이다.
+export function selectNamelessRegistryExact(candidates, exactUnitMatch) {
+  if (exactUnitMatch !== true) return null;
+  const source = Array.isArray(candidates) ? candidates : [];
+  if (source.length !== 1) return null;
+  return buildingKey(source[0]?.buldnm) ? null : source[0];
 }
 
 export function buildingKey(value) {
