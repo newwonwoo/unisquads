@@ -8,6 +8,7 @@ import {
   selectIrosRecoveryAction
 } from "./failure-recovery-plan.mjs";
 import { PNULESS_IROS_VERSION, isPnulessIrosRow } from "./pnuless-iros.mjs";
+import { isMalformedCollectionResult } from "./iros-collection-repair.mjs";
 
 export {
   needsCommercialRangeUnitRematch,
@@ -84,6 +85,9 @@ export function isReusableIrosResult(reg, current = IROS_RUN_VERSIONS) {
   // 다시 열 때 가장 먼저 지나가므로, 여기서 던지면 앱이 마운트 중에 죽는다.
   if (!reg || !reg.status || reg.stale === true || reg.recovery_pending === true) return false;
   if (isProtectedIrosSuccess(reg)) return true;
+  // 형식이상 응답(총건수 없음·0건)은 같은 문구로 다시 불러도 같은 답이다.
+  // 재시도 대상으로 두면 배치가 이 행을 영원히 다시 집어넣는다(실측 1건).
+  if (isMalformedCollectionResult(reg)) return true;
   return !isRetryableIrosStatus(reg.status);
 }
 
