@@ -99,6 +99,7 @@ import {
   isMalformedCollection,
   isMalformedCollectionResult
 } from "./iros-collection-repair.mjs";
+import { decideUnitCandidates } from "./unit-decision.mjs";
 import {
   countRestored,
   detectExportLayout,
@@ -4352,155 +4353,29 @@ function AddrRefineTestGui() {
       }
       stageCounts.property_class = cands.length;
       const unitCandidatePool = cands;
-      let unitProfileRecovery = null;
-      let rawUnitRecovery = null;
-      let dongAgnosticRecovery = null;
-      let floorDisambigRecovery = null;
-      let exactUnitMatched = false;
-      if (wantDong || wantHo) {
-        let matched = cands.filter((c) => {
-          const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
-          if (variant?.source === "composite_dong_room_prefix" ||
-              variant?.source === "self_dong_ho_prefix") {
-            applyModule("IROS-CANDIDATE-NORMALIZE", IROS_MODULE_VERSIONS.IROS_CANDIDATE_NORMALIZE);
-          }
-          return Boolean(variant);
-        });
-        // 검토 게이트의 무기재 건물명 예외(R-IROS-NAMELESS-REGISTRY-EXACT)는
-        // 1차 정확 매칭에서 잡힌 후보에만 열린다. 폴백 경로로 잡힌 후보는
-        // 근거가 더 약하므로 제외한다.
-        exactUnitMatched = matched.length > 0;
-        // R-IROS-SHOP-DONG-EXCLUSION: 동 없는 요청에서 같은 호가 무동 세대와
-        // 상가동에만 갈리면 상가동을 배제한다(서도아파트 실측). 숫자·알파벳
-        // 동이 섞여 있으면 배제하지 않는다.
-        if (matched.length > 1 && !wantDong && wantHo) {
-          const trimmed = excludeShopDongForDonglessRequest(matched);
-          if (trimmed.length < matched.length) {
-            matched = trimmed;
-            applyModule(
-              "R-IROS-SHOP-DONG-EXCLUSION",
-              IROS_MODULE_VERSIONS.R_IROS_SHOP_DONG_EXCLUSION
-            );
-          }
-        }
-        // 단일 동 건물: 후보 전체에 동이 없고 호는 있을 때 호로만 재매칭.
-        if (!matched.length && wantDong && wantHo) {
-          const anyDong = cands.some((c) => !candidateHasNoDong(c));
-          const anyHo = cands.some((c) => unitKey(c.ho, "ho"));
-          if (!anyDong && anyHo)
-            matched = cands.filter((c) => candidateMatchesUnit(c, "", wantHo));
-        }
-        // R-IROS-DONG-AGNOSTIC: 원문에 "N동"이라는 표기 자체가 없으면 동은
-        // 그룹 전파로 붙은 추정값이다. 추정 동 때문에 정확한 호를 버리지 않는다.
-        //   "읍하리 442 서도아파트 102"  →  동 101(추정) 호 102  →  후보에 101동 없음
-        // 호로만 다시 보아 정확히 한 건이면 채택한다(실측 94행).
-        if (!matched.length && wantDong && wantHo && !/\d+\s*\uB3D9/.test(String(row.raw || ""))) {
-          const hoOnly = cands.filter((c) => candidateMatchesUnit(c, "", wantHo));
-          if (hoOnly.length === 1) {
-            matched = hoOnly;
-            applyModule("R-IROS-DONG-AGNOSTIC", IROS_MODULE_VERSIONS.R_IROS_DONG_AGNOSTIC);
-          }
-        }
-        // R-IROS-HO-BUILDING: 해당 후보의 동만 비어 있고 호·건물명이 정확히
-        // 맞는 한 건을 안전하게 선택한다.
-        if (!matched.length && wantDong && wantHo && row.result.bdNm) {
-          const wantedBuilding = buildingKey(row.result.bdNm);
-          const hoBuilding = cands.filter((c) =>
-            candidateHasNoDong(c) &&
-            candidateMatchesUnit(c, "", wantHo) &&
-            buildingKey(c.buldnm) === wantedBuilding
-          );
-          if (hoBuilding.length === 1) {
-            matched = hoBuilding;
-            applyModule("R-IROS-HO-BUILDING", IROS_MODULE_VERSIONS.R_IROS_HO_BUILDING);
-          }
-        }
-        cands = matched;
-
-        // R-IROS-RAW-UNIT: 정상 동·호 매칭이 단일 한 건으로 끝나지 않을 때만
-        // 원문에 명시된 `501-101호`, `6층8호` 변형을 완전후보 안에서 재매칭한다.
-        // 여러 해석이 서로 다른 고유번호로 갈리면 확정하지 않는다.
-        if (cands.length !== 1 && rawUnitVariants.length) {
-          const recovered = selectUniqueRawUnitCandidate(
-            unitCandidatePool,
-            row.raw,
-            row.result.unit || {}
-          );
-          if (recovered?.candidate) {
-            cands = [recovered.candidate];
-            rawUnitRecovery = {
-              selected_variant: recovered.variant,
-              variants_tried: recovered.variantsTried,
-              matched_candidate_count: recovered.matchedCandidateCount
-            };
-            applyModule("R-IROS-RAW-UNIT", IROS_MODULE_VERSIONS.R_IROS_RAW_UNIT);
-          }
-        }
+      // 세대 판정 사다리는 unit-decision.mjs로 꺼내 두었다. 회귀 감사
+      // (npm run audit:regression)가 이 함수를 실측 후보 코퍼스에 그대로
+      // 돌려 기존 판정이 바뀌지 않았는지 전수로 확인한다.
+      const decision = decideUnitCandidates({
+        pool: unitCandidatePool,
+        wantDong,
+        wantHo,
+        raw: row.raw,
+        unit: row.result.unit || {},
+        bdNm: row.result.bdNm || "",
+        subBuilding: row.result.subBuilding || null,
+        rawUnitVariants
+      });
+      cands = decision.candidates;
+      for (const tag of decision.appliedModules) {
+        if (!appliedModules.includes(tag)) appliedModules.push(tag);
       }
-      stageCounts.unit = cands.length;
-      stageCounts.raw_unit_recovery = rawUnitRecovery ? 1 : 0;
-
-      // R-IROS-UNIT-PROFILE: 주소의 동·층·호를 의도값으로 보존하고,
-      // 현재 지번의 완전 후보를 건물별로 묶어 실제 동·호 표기방식을 학습한다.
-      // 기존 결과가 단일 한 건이 아닐 때만 적용하며, 모든 해석이 한 고유번호로
-      // 수렴해야 확정한다.
-      if ((wantDong || wantHo) && cands.length !== 1) {
-        const profiled = matchUnitByBuildingProfile(
-          unitCandidatePool,
-          row.raw,
-          row.result.unit || {},
-          row.result.bdNm || "",
-          row.result.subBuilding || null
-        );
-        unitProfileRecovery = profiled.audit;
-        stageCounts.unit_profile_matches = profiled.audit?.matched_candidate_count || 0;
-        if (profiled.status === "UNIQUE" && profiled.candidate) {
-          cands = [profiled.candidate];
-          unitProfileRecovery = {
-            ...profiled.audit,
-            selected_strategy: profiled.strategy,
-            selected_profile: profiled.profile
-          };
-          stageCounts.unit_profile_recovery = 1;
-          applyModule("R-IROS-UNIT-PROFILE", IROS_MODULE_VERSIONS.R_IROS_UNIT_PROFILE);
-        } else {
-          stageCounts.unit_profile_recovery = 0;
-        }
-      }
-
-      // R-IROS-FLOOR-DISAMBIG: 동·호가 완전히 같은 후보가 여러 건인데 등기부
-      // floor 필드로만 갈리는 건물(진흥아파트: 동 101 호 "1"이 층 1~6으로 6건,
-      // 원문 "101동 3층1호" — 실측 136행). 원문에 명시된 층의 후보가 정확히
-      // 한 건일 때만 채택한다. 층 정보가 없거나 같은 층이 여러 건이면 그대로
-      // REG_MULTI로 남긴다.
-      if (cands.length > 1 && (wantDong || wantHo)) {
-        const floored = selectFloorDisambiguatedCandidate(
-          cands,
-          row.raw,
-          row.result.unit || {}
-        );
-        if (floored?.candidate) {
-          cands = [floored.candidate];
-          floorDisambigRecovery = floored;
-          applyModule("R-IROS-FLOOR-DISAMBIG", IROS_MODULE_VERSIONS.R_IROS_FLOOR_DISAMBIG);
-        }
-      }
-      stageCounts.floor_disambiguation = floorDisambigRecovery ? 1 : 0;
-
-      // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 원문 동 표기가 등기부 동 체계에
-      // 아예 존재하지 않고(101동 ↔ A동·가동·공란), 요청한 호를 가진 세대가 이
-      // 지번 전체에서 정확히 한 건일 때만 동을 무시하고 그 한 건을 채택한다.
-      // 요청 동이 후보에 실제로 있으면 "그 동에 그 호가 없다"가 근거 있는
-      // 사실이므로 모듈이 스스로 닫힌다.
-      if (!cands.length && wantDong && wantHo) {
-        const relaxed = selectDongAgnosticHoCandidate(unitCandidatePool, wantDong, wantHo);
-        if (relaxed?.candidate) {
-          cands = [relaxed.candidate];
-          dongAgnosticRecovery = relaxed;
-          applyModule("R-IROS-DONG-AGNOSTIC-HO", IROS_MODULE_VERSIONS.R_IROS_DONG_AGNOSTIC_HO);
-        }
-      }
-      stageCounts.dong_agnostic_ho = dongAgnosticRecovery ? 1 : 0;
+      Object.assign(stageCounts, decision.stageCounts);
+      const unitProfileRecovery = decision.unitProfileRecovery;
+      const rawUnitRecovery = decision.rawUnitRecovery;
+      const dongAgnosticRecovery = decision.dongAgnosticRecovery;
+      const floorDisambigRecovery = decision.floorDisambigRecovery;
+      const exactUnitMatched = decision.exactUnitMatched;
 
       if (!cands.length) {
         return {

@@ -232,7 +232,11 @@ test("mode-specific record count is explicit for integrity validation", () => {
 });
 
 test("patched app contains the required hardening contracts", async () => {
-  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const source = [
+    await readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    await readFile(new URL("../public/unit-decision.mjs", import.meta.url), "utf8")
+  ].join("\n");
+
   for (const marker of [
     "buildVerifiedWorkbookArray",
     "현재까지 결과 다운로드",
