@@ -101,6 +101,11 @@ import {
 } from "./iros-collection-repair.mjs";
 import { decideUnitCandidates } from "./unit-decision.mjs";
 import {
+  applyVerifiedDongMapRematch,
+  buildVerifiedDongMap,
+  planVerifiedDongMapRematch
+} from "./verified-dong-map.mjs";
+import {
   runAdminDongLotRequery,
   runFailedAddressRequery,
   runNaverLotRescue
@@ -4726,6 +4731,28 @@ function AddrRefineTestGui() {
         propagated += 1;
       }
       if (propagated) await checkpoint({ phase: "propagation" }, { force: true });
+    }
+
+    // ── 검증 동 매핑 전파 ───────────────────────────────────────────
+    // 원문 동 표기 체계가 등기부와 다른 단지(원조: 원문 201 = 등기부 102).
+    // 같은 지번·같은 요청 동에서 동무시 매칭이 한 동으로만 확정한 앵커가
+    // 2건 이상이면, 남은 실패 행을 그 동의 정확 매칭 유일로만 재판정한다.
+    // 조회 없음 — 저장된 완전후보에서 재매칭만 한다.
+    if (!batchStopRef.current) {
+      const dongMap = buildVerifiedDongMap(next);
+      let remapped = 0;
+      if (dongMap.size) {
+        for (let index = 0; index < next.length; index++) {
+          const plan = planVerifiedDongMapRematch(next[index], dongMap);
+          if (!plan) continue;
+          next[index] = {
+            ...next[index],
+            reg: withIrosVersions(applyVerifiedDongMapRematch(next[index].reg, plan))
+          };
+          remapped += 1;
+        }
+      }
+      if (remapped) await checkpoint({ phase: "dong_map" }, { force: true });
     }
 
     // ── IROS 소재지 → JUSO 역확정으로 PNU 복구 ──────────────────────
