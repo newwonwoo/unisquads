@@ -52,6 +52,10 @@ test("npm test가 회귀 감사를 먼저 돌린다", async () => {
     pkg.scripts.test.includes("audit-matching-regression"),
     "npm test에서 회귀 감사가 빠졌다"
   );
+  assert.ok(
+    pkg.scripts.test.includes("audit-module-interference"),
+    "npm test에서 모듈 간섭 감사가 빠졌다"
+  );
   assert.ok(pkg.scripts["audit:regression"], "audit:regression 스크립트가 없다");
   assert.ok(pkg.scripts["audit:update"], "audit:update 스크립트가 없다");
 });

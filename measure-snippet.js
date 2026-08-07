@@ -283,7 +283,8 @@ const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_DONG_AGNOSTIC_HO: "2",
   R_IROS_FLOOR_DISAMBIG: "1",
   R_IROS_SHOP_DONG_EXCLUSION: "1",
-  R_IROS_NAMELESS_REGISTRY_EXACT: "1"
+  R_IROS_NAMELESS_REGISTRY_EXACT: "1",
+  R_IROS_SINGLE_DONG_HO: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -533,6 +534,13 @@ function excludeShopDongForDonglessRequest(matched) {
   const source = Array.isArray(matched) ? matched : [];
   const noDong = source.filter((candidate) => candidateHasNoDong(candidate));
   if (!noDong.length || noDong.length === source.length) return source;
+  // 무회귀 기권(간섭 감사 실측): 상가를 배제하고 남는 무동 후보는 전부
+  // 집합건물 세대여야 한다. 명시 전유부로 편입된 일반건물이 남으면 그건
+  // "주거 세대"라는 이 규칙의 전제가 성립하지 않으므로 기권한다 — 일반건물
+  // 1호를 세대로 확정하던 충돌이 실제로 있었다.
+  if (!noDong.every((candidate) => propertyClassKey(candidate) === "집합건물")) {
+    return source;
+  }
   const others = source.filter((candidate) => !candidateHasNoDong(candidate));
   const allShop = others.every((candidate) =>
     candidateUnitVariants(candidate).every((variant) =>

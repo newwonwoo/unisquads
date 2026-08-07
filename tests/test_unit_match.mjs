@@ -228,8 +228,8 @@ test("nameless-registry exact pass opens only for a unique exact match with empt
 
 test("dongless request excludes shop-dong twins only when no real dong is involved", () => {
   // 횡성 서도아파트 실측: 동 없는 요청의 호 102가 무동 세대 + 상가동 세대
-  const apt = { unique_no: "APT", dong: "", ho: "102" };
-  const shop = { unique_no: "SHOP", dong: "상가", ho: "102" };
+  const apt = { unique_no: "APT", dong: "", ho: "102", real_cls_cd: "집합건물" };
+  const shop = { unique_no: "SHOP", dong: "상가", ho: "102", real_cls_cd: "집합건물" };
   assert.deepEqual(
     excludeShopDongForDonglessRequest([apt, shop]).map((c) => c.unique_no),
     ["APT"]
@@ -240,6 +240,42 @@ test("dongless request excludes shop-dong twins only when no real dong is involv
   // 전부 무동이거나 전부 상가면 그대로 둔다
   assert.equal(excludeShopDongForDonglessRequest([apt]).length, 1);
   assert.equal(excludeShopDongForDonglessRequest([shop]).length, 1);
+  // 무회귀 기권(간섭 감사 실측): 남는 무동 후보가 집합건물 세대가 아니면
+  // 배제하지 않는다 — 일반건물 1호를 세대로 확정하던 충돌이 있었다
+  const generalBuilding = { unique_no: "GB", dong: "", ho: "102", real_cls_cd: "건물" };
+  const shopUnit = { unique_no: "SHOP2", dong: "상가", ho: "102", real_cls_cd: "집합건물" };
+  assert.equal(excludeShopDongForDonglessRequest([generalBuilding, shopUnit]).length, 2);
+});
+
+test("원문 재해석 모듈은 평문 일치 집합 밖의 세대를 고르면 기권한다", async () => {
+  const { decideUnitCandidates, decisionSignature } = await import("../public/unit-decision.mjs");
+  const { rawUnitRecoveryVariants } = await import("../public/unit-match.mjs");
+  // 간섭 감사 실측(서도): 평문 101호가 있는데 "1층101호"를 1101호(11층)로
+  // 합성해 엉뚱한 세대를 확정하던 충돌. RAW-UNIT·UNIT-PROFILE 둘 다 기권해야 한다.
+  const pool = [
+    { unique_no: "F1-101", dong: "", ho: "101", floor: "1", real_cls_cd: "집합건물" },
+    { unique_no: "SHOP-101", dong: "상가", ho: "101", floor: "1", real_cls_cd: "집합건물" },
+    { unique_no: "F11-1101", dong: "", ho: "1101", floor: "11", real_cls_cd: "집합건물" }
+  ];
+  const raw = "읍하리 442 서도아파트 1층101호";
+  const unit = { dong: "", ho: "101" };
+  const input = { pool, wantDong: "", wantHo: "101", raw, unit,
+    rawUnitVariants: rawUnitRecoveryVariants(raw, unit) };
+  // 전체 사다리: 상가 배제로 평문 101호가 확정된다
+  assert.equal(decisionSignature(decideUnitCandidates(input)),
+    "RESOLVED:F1-101:R-IROS-SHOP-DONG-EXCLUSION@1");
+  // 상가 배제를 막아도(평문이 2건으로 남아도) 1101호로 새지 않아야 한다
+  const withoutShop = decideUnitCandidates(input, { disabled: ["SHOP_DONG_EXCLUSION"] });
+  assert.notEqual(decisionSignature(withoutShop), `RESOLVED:F11-1101:${withoutShop.appliedModules.join(",")}`);
+  assert.equal(withoutShop.candidates.every((c) => c.unique_no !== "F11-1101"), true);
+  // 평문 일치가 0건이면(층 유실 표기) 재해석은 자유롭게 연다 — 회수 능력 보존
+  const lost = decideUnitCandidates({
+    pool: [{ unique_no: "R-608", dong: "101", ho: "608", real_cls_cd: "집합건물" }],
+    wantDong: "101", wantHo: "8", raw: "진흥아파트 101동 6층8호",
+    unit: { dong: "101", ho: "8" },
+    rawUnitVariants: rawUnitRecoveryVariants("진흥아파트 101동 6층8호", { dong: "101", ho: "8" })
+  });
+  assert.equal(decisionSignature(lost), "RESOLVED:R-608:R-IROS-RAW-UNIT@2");
 });
 
 test("floor field disambiguates identical dong-ho candidates only with raw floor evidence", () => {
