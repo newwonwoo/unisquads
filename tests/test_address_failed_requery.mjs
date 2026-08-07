@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ADDRESS_FAILED_REQUERY_MODULES,
+  buildAdminDongLotRequeryPlan,
   buildBuildingNameRequeryPlan,
   buildExcludedLotRequeryPlan,
   buildNaverLotRescueQuery,
@@ -9,6 +10,7 @@ import {
   hasRegionalLotAddress,
   lotScopedText,
   needsNaverLotRescue,
+  pickAdminDongLotCandidate,
   pickExcludedLotCandidate,
   pickNaverLotCandidate
 } from "../public/address-failed-requery.mjs";
@@ -192,8 +194,37 @@ test("지역 지번주소 판정과 지번 스코프 절단", () => {
     "충북 보은군 내북면 동산리 148-3");
 });
 
+// ── 행정동 표기 지번의 법정동 교정 (실측: 대치4동 889-56 ↔ 대치동 889-56) ─
+
+test("숫자 행정동 지번은 실패 상태에서만 법정동으로 교정 재검색한다", () => {
+  const pre = { sido: "서울", sgg: "강남구", emd: "대치4동", jibun: "889-56" };
+  const plan = buildAdminDongLotRequeryPlan(pre, "NAVER_CONFIRMED_PNU_FAILED");
+  assert.equal(plan.query, "서울 강남구 대치동 889-56");
+  assert.equal(plan.legalDong, "대치동");
+  // 성공 상태에서는 절대 발화하지 않는다
+  assert.equal(buildAdminDongLotRequeryPlan(pre, "CONFIRMED"), null);
+  // 숫자 없는 법정동·"N가"류 법정동 표기는 건드리지 않는다
+  assert.equal(buildAdminDongLotRequeryPlan({ ...pre, emd: "대치동" }, "FAILED"), null);
+  assert.equal(buildAdminDongLotRequeryPlan({ ...pre, emd: "효자동2가" }, "FAILED"), null);
+  // 지번 없는 행은 대상이 아니다
+  assert.equal(buildAdminDongLotRequeryPlan({ ...pre, jibun: "" }, "FAILED"), null);
+});
+
+test("교정 법정동+원문 지번이 정확히 한 건일 때만 채택한다", () => {
+  const plan = buildAdminDongLotRequeryPlan(
+    { sido: "서울", sgg: "강남구", emd: "대치4동", jibun: "889-56" }, "FAILED");
+  const hit = { jibunAddr: "서울특별시 강남구 대치동 889-56 더 나인 오피스텔", bdNm: "더 나인 오피스텔" };
+  assert.equal(pickAdminDongLotCandidate([hit], plan), hit);
+  // 지번이 다른 후보는 세지 않는다
+  assert.equal(pickAdminDongLotCandidate(
+    [{ jibunAddr: "서울특별시 강남구 대치동 889-5" }], plan), null);
+  // 정확 일치가 복수면 확정하지 않는다
+  assert.equal(pickAdminDongLotCandidate([hit, { ...hit }], plan), null);
+});
+
 test("모듈 버전이 고정돼 감사 추적이 가능하다", () => {
   assert.deepEqual(Object.keys(ADDRESS_FAILED_REQUERY_MODULES).sort(), [
-    "R_ADDR_BUILDING_NAME_LOT", "R_ADDR_EXCLUDED_LOT", "R_ADDR_NAVER_LOT_RESCUE"
+    "R_ADDR_ADMIN_DONG_LOT", "R_ADDR_BUILDING_NAME_LOT",
+    "R_ADDR_EXCLUDED_LOT", "R_ADDR_NAVER_LOT_RESCUE"
   ]);
 });
