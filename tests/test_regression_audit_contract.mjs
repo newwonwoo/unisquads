@@ -57,6 +57,10 @@ test("npm test가 회귀 감사를 먼저 돌린다", async () => {
     "npm test에서 공통모듈 감사가 빠졌다"
   );
   assert.ok(
+    pkg.scripts.test.includes("audit-preprocess"),
+    "npm test에서 전처리 감사가 빠졌다"
+  );
+  assert.ok(
     pkg.scripts.test.includes("audit-module-interference"),
     "npm test에서 모듈 간섭 감사가 빠졌다"
   );
