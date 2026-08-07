@@ -45,10 +45,36 @@ function mapKey(result, requestedDong) {
 
 // 확정 행에서 앵커를 모은다: 동무시 매칭(RESOLVED + dong_agnostic_recovery)이
 // "요청 동 D를 등기부 동 X로" 확정한 행들.
+//
+// 소거법(실측 근거를 준 지적): 주거동이 등기부에 N개뿐이고 요청 동들 중
+// N-1개가 이미 등기부 동과 그대로 일치한다면, 남는 요청 동 하나는 남는
+// 등기부 동 하나일 수밖에 없다(원조: 등기부 101·102, 요청 101·201, 101이
+// 일치 → 201=102). 앵커 없이도 성립하는 구조적 근거라 함께 만든다.
+// 두 근거가 상충하면 그 매핑은 통째로 버린다.
 export function buildVerifiedDongMap(rows) {
-  const anchors = new Map(); // key -> Map<mappedDong, count>
-  for (const row of Array.isArray(rows) ? rows : []) {
+  const source = Array.isArray(rows) ? rows : [];
+  const anchors = new Map();          // key -> Map<mappedDong, count>
+  const requestedByLot = new Map();   // lot -> Set<요청 동>
+  const registryByLot = new Map();    // lot -> Set<주거 등기부 동>
+  for (const row of source) {
     const reg = row?.reg;
+    const lot = lotKeyOf(row?.result);
+    const requested = dongAliasKey(row?.result?.unit?.dong);
+    if (lot && requested && unitKey(row?.result?.unit?.ho, "ho")) {
+      if (!requestedByLot.has(lot)) requestedByLot.set(lot, new Set());
+      requestedByLot.get(lot).add(requested);
+    }
+    // 완전수집 실패 행이 그 지번의 전체 후보를 들고 있다.
+    if (lot && reg?.complete === true && (reg.candidates || []).length > 1) {
+      if (!registryByLot.has(lot)) registryByLot.set(lot, new Set());
+      const registry = registryByLot.get(lot);
+      for (const candidate of reg.candidates) {
+        const dong = dongAliasKey(candidate?.dong);
+        if (!dong || /^상가/.test(dong)) continue;
+        if (!String(candidate?.real_cls_cd || candidate?.gubun || "").includes("집합")) continue;
+        registry.add(dong);
+      }
+    }
     const recovery = reg?.dong_agnostic_recovery;
     if (text(reg?.status) !== "RESOLVED" || !recovery) continue;
     const candidate = (reg.candidates || [])[0];
@@ -60,13 +86,37 @@ export function buildVerifiedDongMap(rows) {
     const byDong = anchors.get(key);
     byDong.set(mapped, (byDong.get(mapped) || 0) + 1);
   }
+
   const map = new Map();
   for (const [key, byDong] of anchors) {
     // 앵커가 두 동으로 갈리면 매핑 전체를 버린다 — 근거가 상충한다.
     if (byDong.size !== 1) continue;
     const [mappedDong, count] = [...byDong.entries()][0];
     if (count < MIN_ANCHORS) continue;
-    map.set(key, { mappedDong, anchors: count });
+    map.set(key, { mappedDong, anchors: count, basis: "anchor" });
+  }
+
+  // 소거법: 미일치 요청 동 1개 ↔ 미일치 주거 등기부 동 1개.
+  for (const [lot, requested] of requestedByLot) {
+    const registry = registryByLot.get(lot);
+    if (!registry || !registry.size) continue;
+    const matched = [...requested].filter((dong) => registry.has(dong));
+    const leftoverRequested = [...requested].filter((dong) => !registry.has(dong));
+    const leftoverRegistry = [...registry].filter((dong) => !requested.has(dong));
+    // 최소 한 동은 그대로 일치해야 "같은 단지의 표기 차이"라는 전제가 선다.
+    if (!matched.length) continue;
+    if (leftoverRequested.length !== 1 || leftoverRegistry.length !== 1) continue;
+    const key = `${lot}#${leftoverRequested[0]}`;
+    const byElimination = { mappedDong: leftoverRegistry[0], anchors: 0, basis: "elimination" };
+    const existing = map.get(key);
+    if (existing && existing.mappedDong !== byElimination.mappedDong) {
+      // 앵커와 소거가 상충 — 근거가 갈리므로 매핑을 버린다.
+      map.delete(key);
+      continue;
+    }
+    map.set(key, existing
+      ? { ...existing, basis: "anchor+elimination" }
+      : byElimination);
   }
   return map;
 }
