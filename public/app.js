@@ -96,6 +96,10 @@ import {
 import { APP_VERSION, RELEASED_AT, buildStamp } from "./version.mjs";
 import { carryOverResults } from "./result-carryover.mjs";
 import {
+  isMalformedCollection,
+  isMalformedCollectionResult
+} from "./iros-collection-repair.mjs";
+import {
   countRestored,
   detectExportLayout,
   restoreRowsFromExport
@@ -4275,13 +4279,19 @@ function AddrRefineTestGui() {
       const totalCount = collection.total_count == null ? null : Number(collection.total_count);
       const exactCount = totalCount !== null && rawReceived === totalCount;
       if (!collection.complete || !exactCount) {
+        // 총건수 없이 0건이 온 응답은 같은 문구로 다시 불러도 같은 답이다.
+        // 재시도 대상에서 빼야 배치가 이 행을 무한히 다시 집어넣지 않는다.
+        const malformed = isMalformedCollection(collection);
         return {
           status: "REG_PARTIAL_RESPONSE",
           candidates: all,
           complete: false,
+          collection_malformed: malformed,
           total_count: collection.total_count,
           received_count: collection.received_count,
-          message: `부분응답: 총 ${collection.total_count ?? "미상"}건 중 ${collection.received_count || 0}건 수신`,
+          message: malformed
+            ? "조회 문구에 대한 형식이상 응답(총건수 없음·0건) — 재시도로 풀리지 않습니다"
+            : `부분응답: 총 ${collection.total_count ?? "미상"}건 중 ${collection.received_count || 0}건 수신`,
           at: nowText()
         };
       }
@@ -4777,7 +4787,10 @@ function AddrRefineTestGui() {
           });
           continue;
         }
-        if (reg.status === "REG_UNIT_NOT_FOUND") {
+        // 형식이상 응답은 재시도로 풀리지 않는다. 원문에 명시된 다른 지번이
+        // 있으면 기존 명시 대체지번 복구로 넘긴다(실측: 확정 지번에는 요청 동이
+        // 아예 없고, 원문이 명시한 지번에서 정확 매칭으로 확정된다).
+        if (reg.status === "REG_UNIT_NOT_FOUND" || isMalformedCollectionResult(reg)) {
           const normalizedAddress = member.row.result.jibunAddr || member.row.result.irosQuery || "";
           const alternateAddresses = alternateRawLotAddresses(member.row.raw, normalizedAddress);
           if (alternateAddresses.length) {

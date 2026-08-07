@@ -13,6 +13,7 @@ import {
   selectUniqueRawUnitCandidate
 } from "./unit-match.mjs";
 import { PNULESS_IROS_VERSION, buildPnulessIrosPlan } from "./pnuless-iros.mjs";
+import { isMalformedCollectionResult } from "./iros-collection-repair.mjs";
 import {
   AMBIGUOUS_PNU_RECOVERY_VERSION,
   buildAmbiguousPnuProbePlan,
@@ -443,6 +444,13 @@ export function selectIrosRecoveryAction(row) {
   const reg = row?.reg;
   if (!reg || (reg.status === "RESOLVED" && String(reg.unique_no || "").trim())) return null;
 
+  // 형식이상 응답(총건수 없음·0건)은 같은 문구로 다시 불러도 같은 답이라
+  // 재시도 계획을 만들지 않는다. 대체지번 복구가 걸린 행은 아래 분기가
+  // 그대로 담당하고, 없으면 종결 실패로 분류된다(classifyFailureModule).
+  if (isMalformedCollectionResult(reg) &&
+      reg.recovery_pending !== true && reg.recovery_attempted !== false) {
+    return null;
+  }
   if (RETRYABLE_IROS.has(String(reg.status || ""))) {
     return moduleDecision(
       FAILURE_RECOVERY_MODULES.I_RETRY_INCOMPLETE,
