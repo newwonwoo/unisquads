@@ -112,6 +112,15 @@ export function buildVerifiedDongMap(rows) {
     // 최소 한 동은 그대로 일치해야 "같은 단지의 표기 차이"라는 전제가 선다.
     if (!matched.length) continue;
     if (leftoverRequested.length !== 1 || leftoverRegistry.length !== 1) continue;
+    const key = `${lot}#${leftoverRequested[0]}`;
+    const existing = map.get(key);
+    // 앵커와 소거가 상충하면 커버리지와 무관하게 매핑을 통째로 버린다 —
+    // 구조적 근거(소거)가 앵커와 다른 동을 가리키는 것 자체가 혼선의 증거다.
+    // 커버리지 기권을 먼저 하면 이 상충이 가려져 앵커 매핑이 살아남는다.
+    if (existing && existing.mappedDong !== leftoverRegistry[0]) {
+      map.delete(key);
+      continue;
+    }
     // 호 집합 커버리지 가드(실측 반례에서 도출): 잔여 등기부 동이 잔여 요청
     // 동의 호들을 대부분 갖고 있어야 같은 건물이다. 용당 실측에서 112가 이미
     // 요청돼 잔여가 123(1세대)뿐이 되자 소거가 12→123으로 찍으려 했다 —
@@ -129,17 +138,9 @@ export function buildVerifiedDongMap(rows) {
     }
     const covered = [...wantedHos].filter((ho) => registryHos.has(ho)).length;
     if (!wantedHos.size || covered / wantedHos.size < 0.8) continue;
-    const key = `${lot}#${leftoverRequested[0]}`;
-    const byElimination = { mappedDong: leftoverRegistry[0], anchors: 0, basis: "elimination" };
-    const existing = map.get(key);
-    if (existing && existing.mappedDong !== byElimination.mappedDong) {
-      // 앵커와 소거가 상충 — 근거가 갈리므로 매핑을 버린다.
-      map.delete(key);
-      continue;
-    }
     map.set(key, existing
       ? { ...existing, basis: "anchor+elimination" }
-      : byElimination);
+      : { mappedDong: leftoverRegistry[0], anchors: 0, basis: "elimination" });
   }
   return map;
 }
