@@ -16,12 +16,20 @@
 // 행정구역·지번 정규식이 뽑아낸 토큰만으로 조립한다(구조적으로 유출 불가).
 
 import { extractLegalLot, unitKey } from "./unit-match.mjs";
+import { hasRegionalLotAddress } from "./address-failed-requery.mjs";
 
-export const PNULESS_IROS_VERSION = "pnuless-iros-v1";
+export const PNULESS_IROS_VERSION = "pnuless-iros-v2";
 
-// PNU는 없지만 주소 자체는 외부 원천이 정상으로 확인해 준 상태만 허용한다.
-// AMBIGUOUS(복수 PNU)는 기존 R-ADDR-AMBIGUOUS-PNU-IROS가 담당하고,
-// FAILED/HUMAN_INPUT_ERROR는 주소 문자열 자체를 믿을 수 없으므로 제외한다.
+// PNU는 없지만 주소 자체는 외부 원천이 정상으로 확인해 준 상태를 허용한다.
+// AMBIGUOUS(복수 PNU)는 기존 R-ADDR-AMBIGUOUS-PNU-IROS가 담당한다.
+//
+// v2(2026-08-07): FAILED(주소미발견)도 조건부 허용한다. JUSO에 없는 필지가
+// 등기부에는 완전수집으로 존재하는 실측(주소 검색 0건 지번에서 등기 82세대
+// 정확 매칭 확정)에서 도출했다. 원문 자체에 시도부터 지번까지 완전한
+// 지번주소와 동·호가 모두 명시된 행만 대상이며, 채택은 기존 매칭 계약
+// (완전수집 + 동·호 정확 매칭 유일)을 그대로 통과해야 한다.
+// HUMAN_INPUT_ERROR는 외부 원천이 "그 주소는 없다"고 답한 상태이므로
+// 여전히 제외한다.
 export const PNULESS_ELIGIBLE_ADDRESS_STATUSES = Object.freeze([
   "NAVER_CONFIRMED_PNU_FAILED"
 ]);
@@ -59,22 +67,48 @@ function addressSources(result) {
 // 때만 계획을 만든다. 호가 없으면 세대를 특정할 수 없으므로 대상이 아니다.
 export function buildPnulessIrosPlan(row) {
   const result = row?.result;
-  if (!result || !ELIGIBLE.has(text(result.status))) return null;
+  if (!result) return null;
   if (pnuOf(result.pnu)) return null;
   const ho = unitKey(result.unit?.ho, "ho");
   if (!ho) return null;
+  const status = text(result.status);
 
-  for (const { source, value } of addressSources(result)) {
-    const address = lotScopedAddress(value);
-    if (!address) continue;
+  if (ELIGIBLE.has(status)) {
+    for (const { source, value } of addressSources(result)) {
+      const address = lotScopedAddress(value);
+      if (!address) continue;
+      return {
+        version: PNULESS_IROS_VERSION,
+        address,
+        addressSource: source,
+        dong: unitKey(result.unit?.dong, "dong"),
+        ho,
+        // PNU가 없으면 "이 지번이 맞다"는 독립 근거가 JUSO에 없다. 건물명이
+        // 있는 행은 기존 검토 플래그 경로로 건물명 교차검증까지 강제한다.
+        strictBuilding: Boolean(text(result.bdNm)),
+        groupKey: `PNULESS:${address}`
+      };
+    }
+    return null;
+  }
+
+  // R-IROS-PNULESS-RAW-LOT(v2): 주소 검색이 0건(FAILED·NOT_FOUND)이어도
+  // 원문 자체에 완전한 지번주소(시도~지번)와 동·호가 모두 명시돼 있으면
+  // 그 지번을 소재지로 직조회한다. 원문 지번의 신뢰는 조회로 얻는 게 아니라
+  // 완전수집 후 동·호 정확 매칭이 유일할 때만 성립한다.
+  if (status === "FAILED" && text(result.reason) === "NOT_FOUND") {
+    const dong = unitKey(result.unit?.dong, "dong");
+    if (!dong) return null;
+    const raw = text(row?.raw);
+    if (!hasRegionalLotAddress(raw)) return null;
+    const address = lotScopedAddress(raw);
+    if (!address) return null;
     return {
       version: PNULESS_IROS_VERSION,
       address,
-      addressSource: source,
-      dong: unitKey(result.unit?.dong, "dong"),
+      addressSource: "rawLot",
+      dong,
       ho,
-      // PNU가 없으면 "이 지번이 맞다"는 독립 근거가 JUSO에 없다. 건물명이
-      // 있는 행은 기존 검토 플래그 경로로 건물명 교차검증까지 강제한다.
       strictBuilding: Boolean(text(result.bdNm)),
       groupKey: `PNULESS:${address}`
     };

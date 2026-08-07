@@ -14,6 +14,7 @@ import { readFile, writeFile } from "node:fs/promises";
 const MODULES = [
   "address-multilot-rules.mjs",
   "unit-match.mjs",
+  "address-failed-requery.mjs",
   "pnuless-iros.mjs",
   "verified-unit-propagation.mjs",
   "recovery-impact.mjs"
