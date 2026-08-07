@@ -270,7 +270,7 @@ function canAcceptDongsoAnchorCorrection({ validation, anchorName, resultBuildin
 const MATCHER_VERSION = "iros-matcher-v13";
 
 const IROS_MODULE_VERSIONS = Object.freeze({
-  IROS_CANDIDATE_NORMALIZE: "3",
+  IROS_CANDIDATE_NORMALIZE: "4",
   R_IROS_MULTILOT: "2",
   R_IROS_BUILDING_EVIDENCE: "1",
   R_IROS_HO_BUILDING: "1",
@@ -285,7 +285,8 @@ const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_SHOP_DONG_EXCLUSION: "1",
   R_IROS_NAMELESS_REGISTRY_EXACT: "1",
   R_IROS_SINGLE_DONG_HO: "1",
-  R_IROS_DONG_LOT_RELOCATE: "1"
+  R_IROS_DONG_LOT_RELOCATE: "1",
+  R_IROS_RAW_FLOOR_HO: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -360,6 +361,18 @@ function candidateUnitVariants(candidate) {
         source: "self_dong_ho_prefix"
       });
     }
+  }
+
+  // IROS 실측: 주상복합 등기부가 호에 부동산 유형을 접두한다(논현유호엔시티,
+  // 동 "101" 호 "아파트201"/"오피스텔202" — 실측 28행). 실측된 두 유형어만
+  // 벗기고 동은 그대로 둔다. "상가101"은 상가동 의미와 얽혀 건드리지 않는다.
+  const typed = rawHo.match(/^(아파트|오피스텔)\s*(\d{1,5}(?:-\d{1,4})?)\s*호?$/);
+  if (typed) {
+    variants.push({
+      dong: base.dong,
+      ho: unitKey(typed[2], "ho"),
+      source: "ho_type_prefix"
+    });
   }
   return variants.filter((variant, index, source) =>
     source.findIndex((other) => other.dong === variant.dong && other.ho === variant.ho) === index
@@ -584,6 +597,55 @@ function selectFloorDisambiguatedCandidate(candidates, rawAddress, currentUnit =
   return {
     candidate: [...unique.values()][0],
     matched_floor: wantFloor,
+    matched_candidate_count: matchedCount
+  };
+}
+
+// R-IROS-RAW-FLOOR-HO: 원문 "지X-N" 층-호 표기의 재해석 (갈산 하나상가 실측).
+//
+// 원문 "하나상가 지1-1"을 전처리가 동1·호1로 읽는다. 실측에서 요청 지2~지4의
+// 호 집합이 등기부 2~4층 호 집합과 정확히 대응했다(지3{1,2,3,4}=3층 정확일치,
+// 지4{1,2,3}=4층 정확일치). "지X = X층, N = 호"로 읽되:
+//   - 원문 패턴이 현재 요청 (동,호)의 출처일 때만 발화한다(동=X, 호=N)
+//   - 원문에 실린 건물명과 일치하는 후보만 근거로 삼는다
+//   - "지X"는 지하X층일 수도 있다 — 그 해석에 해당하는 후보(X=1이면 "지하",
+//     X≥2면 "지하X층")에 같은 호가 있으면 중의적이므로 기권한다
+//     (실측: 지1-N은 1층과 지하층 양쪽에 호가 있어 전부 기권이 정답)
+//   - 층 X·호 N 후보가 유일할 때만 채택한다
+function selectRawFloorHoCandidate(pool, rawAddress, wantDong, wantHo) {
+  const raw = String(rawAddress || "");
+  const m = raw.match(/(?:^|\s)지\s*(\d{1,2})\s*-\s*(\d{1,3})(?!\d)/);
+  if (!m) return null;
+  const floorNo = String(Number(m[1]));
+  const hoKey = unitKey(m[2], "ho");
+  if (!hoKey) return null;
+  if (unitKey(wantDong, "dong") !== floorNo || unitKey(wantHo, "ho") !== hoKey) return null;
+  const rawText = raw.replace(/\s+/g, "");
+  const named = (Array.isArray(pool) ? pool : []).filter((candidate) => {
+    const name = String(candidate?.buldnm || "").replace(/\s+/g, "");
+    return name.length >= 2 && rawText.includes(name);
+  });
+  if (!named.length) return null;
+  const basementAlt = Number(m[1]) === 1 ? /^지하(1층?)?$/ : new RegExp(`^지하${Number(m[1])}층?$`);
+  const ambiguous = named.some((candidate) =>
+    basementAlt.test(String(candidate?.floor || "").replace(/\s+/g, "")) &&
+    unitKey(candidate?.ho, "ho") === hoKey);
+  if (ambiguous) return null;
+  const unique = new Map();
+  let matchedCount = 0;
+  for (const candidate of named) {
+    const floor = String(candidate?.floor ?? "").trim();
+    if (!/^\d+$/.test(floor) || String(Number(floor)) !== floorNo) continue;
+    if (unitKey(candidate?.ho, "ho") !== hoKey) continue;
+    matchedCount += 1;
+    const key = candidateIdentity(candidate);
+    if (key && !unique.has(key)) unique.set(key, candidate);
+  }
+  if (unique.size !== 1) return null;
+  return {
+    candidate: [...unique.values()][0],
+    matched_floor: floorNo,
+    matched_ho: hoKey,
     matched_candidate_count: matchedCount
   };
 }
