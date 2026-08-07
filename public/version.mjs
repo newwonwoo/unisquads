@@ -9,12 +9,17 @@
 //                              — Vercel이 실제로 빌드·배포한 시점 (배포 때 생성)
 // "고쳤다"와 "배포됐다"는 다른 사실이므로 한쪽만 보고 판단하지 않는다.
 
-export const APP_VERSION = "1.16.1";
+export const APP_VERSION = "1.16.2";
 
 // ISO 8601. 표시할 때만 KST로 바꾼다.
-export const RELEASED_AT = "2026-08-08T01:25:22+09:00";
+export const RELEASED_AT = "2026-08-08T01:32:25+09:00";
 
 export const CHANGELOG = Object.freeze([
+  Object.freeze({
+    version: "1.16.2",
+    released_at: "2026-08-08T01:32:25+09:00",
+    summary: "소거 매핑에 호 집합 커버리지 가드(80%) — 용당 12→123 오확정 실측 차단"
+  }),
   Object.freeze({
     version: "1.16.1",
     released_at: "2026-08-08T01:25:22+09:00",
