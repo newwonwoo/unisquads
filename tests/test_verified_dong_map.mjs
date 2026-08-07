@@ -76,6 +76,51 @@ test("기권 반례 — 앵커 부족·앵커 상충·복수 매칭·확정 행"
   assert.equal(planVerifiedDongMapRematch(otherDong, map), null);
 });
 
+test("소거법 — 주거동 N개 중 N-1개가 일치하면 남는 하나끼리 매핑한다", () => {
+  // 원조 실측: 등기부 101·102(주거) + 상가, 요청 101(성공)·201(실패).
+  // 101이 그대로 일치 → 남는 요청 201 = 남는 등기부 102. 앵커 없이 성립.
+  const okRow = {
+    result: { jibunAddr: LOT, unit: { dong: "101", ho: "101" } },
+    reg: { status: "RESOLVED", unique_no: "OK", complete: true,
+      candidates: [cand("OK", "101", "101")] }
+  };
+  const failed = {
+    result: { jibunAddr: LOT, unit: { dong: "201", ho: "105" } },
+    reg: { status: "REG_UNIT_NOT_FOUND", complete: true,
+      candidates: [
+        cand("E-101", "101", "105"), cand("E-102", "102", "105"),
+        { unique_no: "S-1", dong: "상가", ho: "105", real_cls_cd: "집합건물" },
+        { unique_no: "B-1", dong: "103", ho: "105", real_cls_cd: "건물" }
+      ] }
+  };
+  const map = buildVerifiedDongMap([okRow, failed]);
+  const plan = planVerifiedDongMapRematch(failed, map);
+  assert.equal(plan.mappedDong, "102");
+  assert.equal(plan.candidate.unique_no, "E-102");
+  // 상가·일반건물 동은 소거 계산에 들어가지 않는다(103은 건물이라 제외됨)
+
+  // 미일치 등기부 동이 둘이면(102·103 둘 다 집합건물) 기권
+  const twoLeft = {
+    ...failed,
+    reg: { ...failed.reg, candidates: [
+      cand("E-101", "101", "105"), cand("E-102", "102", "105"), cand("E-103", "103", "105")
+    ] }
+  };
+  assert.equal(buildVerifiedDongMap([okRow, twoLeft]).size, 0);
+  // 그대로 일치하는 동이 하나도 없으면(전혀 다른 체계) 기권
+  const noMatch = {
+    result: { jibunAddr: LOT, unit: { dong: "201", ho: "105" } },
+    reg: { status: "REG_UNIT_NOT_FOUND", complete: true,
+      candidates: [cand("E-102", "102", "105")] }
+  };
+  assert.equal(buildVerifiedDongMap([noMatch]).size, 0);
+  // 앵커와 소거가 상충하면 매핑을 통째로 버린다
+  const clash = buildVerifiedDongMap([
+    okRow, failed, anchorRow(1, "101"), anchorRow(2, "101")
+  ]);
+  assert.equal(clash.has(`사직동|319-1#201`), false);
+});
+
 test("app.js가 검증 동 매핑 패스를 배치 후처리에 연결한다", async () => {
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
