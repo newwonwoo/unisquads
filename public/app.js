@@ -94,6 +94,11 @@ import {
 import { APP_VERSION, RELEASED_AT, buildStamp } from "./version.mjs";
 import { carryOverResults } from "./result-carryover.mjs";
 import {
+  countRestored,
+  detectExportLayout,
+  restoreRowsFromExport
+} from "./export-restore.mjs";
+import {
   UPSTREAM_DEFAULTS,
   createAdaptiveLimit,
   createUpstreamGate,
@@ -5236,7 +5241,13 @@ function AddrRefineTestGui() {
       // 청크로 쪼개거나 %를 표시할 이유가 없다(진짜 병목은 위 XLSX.read).
       // 가짜 정밀도를 보여주지 않기 위해 단순 map으로 되돌림 —
       // fileParsing 표시는 onFile 시작부터 끝까지 통째로 켜져 있음.
-      const built = body
+      // 결과지(내보낸 xlsx)를 다시 올리면 성공 행을 복원해 이어간다.
+      // 결과지는 이미 행 분리가 끝난 파일이므로 다시 쪼개지 않고, 복원된
+      // CONFIRMED+PNU·RESOLVED+고유번호는 기존 보호 계약으로 재사용된다.
+      const exportLayout = detectExportLayout(header0);
+      const built = exportLayout
+        ? restoreRowsFromExport(body, exportLayout)
+        : body
         .flatMap((r, sourceIndex) => {
           const addrVal = String(r[addrIdx] ?? "").trim();
           const detailVal = detailIdx >= 0 ? String(r[detailIdx] ?? "").trim() : "";
@@ -5267,6 +5278,11 @@ function AddrRefineTestGui() {
           }));
         })
         .filter((row) => row.raw !== "");   // 주소가 실제로 비어있는 행은 제외
+      if (exportLayout) {
+        // 결과지의 생성 열이 부가열로 재수출되지 않게 원본 부가열만 남긴다.
+        extraHeaders2 = exportLayout.extraHeaders;
+        setExtraHeaders(extraHeaders2);
+      }
       // 사전 분석(API 호출 없음): 정제 시작 전에 호출량·중복 구조를 먼저 파악
       const statMap = /* @__PURE__ */ new Map();
       for (const row of built) {
@@ -5305,7 +5321,14 @@ function AddrRefineTestGui() {
       setBatchDone(0);
       await idbSet(BATCH_KEY, { v: 2, rows: carried.rows, extraHeaders: extraHeaders2 });
       setSavedProgress(null);
-      if (carried.restored) {
+      const restoredFromExport = exportLayout ? countRestored(carried.rows) : null;
+      if (restoredFromExport?.address) {
+        setAutoStopMsg(
+          `결과지에서 주소 확정 ${restoredFromExport.address.toLocaleString()}행` +
+          `${restoredFromExport.iros ? ` · 등기고유번호 ${restoredFromExport.iros.toLocaleString()}행` : ""}` +
+          `을 복원했습니다 — '일괄 정제'를 누르면 실패 행만 다시 조회합니다.`
+        );
+      } else if (carried.restored) {
         setAutoStopMsg(
           `이전 결과 ${carried.restored.toLocaleString()}행을 불러왔습니다` +
           `${carried.restoredIros ? ` (등기조회 ${carried.restoredIros.toLocaleString()}행 포함)` : ""}` +
