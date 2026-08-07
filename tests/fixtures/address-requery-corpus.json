@@ -1,0 +1,274 @@
+{
+  "version": 1,
+  "note": "정제율 모듈 간섭 감사용 실측 픽스처. juso/naver 응답은 2026-08-07 라이브 조회 결과 그대로다.",
+  "scenarios": [
+    {
+      "id": "만수동 창대장터상가 1동 (건물명 재검색·동↔지번)",
+      "status": "HUMAN_INPUT_ERROR",
+      "pre": {
+        "sido": "인천",
+        "sgg": "남동구",
+        "emd": "만수동",
+        "jibun": "",
+        "bldName": "창대장터상가",
+        "unit": {
+          "dong": "1",
+          "ho": "110"
+        },
+        "regionText": "인천 남동구 만수동",
+        "cleaned": "인천 남동구 만수동 창대장터상가 1-110"
+      },
+      "result": {
+        "status": "HUMAN_INPUT_ERROR",
+        "jusoQuery": "인천 남동구 만수동 창대장터상가 1-110"
+      },
+      "juso": {
+        "인천 남동구 만수동 창대장터상가": [
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1081-12 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "7동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1086 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "6동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1082 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "1동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1082-1 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "2동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1080 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "3동"
+          }
+        ]
+      },
+      "naver": {}
+    },
+    {
+      "id": "만수동 창대장터상가 동 미상 (복수후보 승격)",
+      "status": "HUMAN_INPUT_ERROR",
+      "pre": {
+        "sido": "인천",
+        "sgg": "남동구",
+        "emd": "만수동",
+        "jibun": "",
+        "bldName": "창대장터상가",
+        "unit": {
+          "dong": "",
+          "ho": "16"
+        },
+        "regionText": "인천 남동구 만수동",
+        "cleaned": "인천 남동구 만수동 창대장터상가 7-비16"
+      },
+      "result": {
+        "status": "HUMAN_INPUT_ERROR",
+        "jusoQuery": "인천 남동구 만수동 창대장터상가 7-비 16"
+      },
+      "juso": {
+        "인천 남동구 만수동 창대장터상가": [
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1081-12 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "7동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1086 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "6동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1082 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "1동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1082-1 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "2동"
+          },
+          {
+            "jibunAddr": "인천광역시 남동구 만수동 1080 창대장터상가",
+            "bdNm": "창대장터상가",
+            "detBdNmList": "3동"
+          }
+        ]
+      },
+      "naver": {}
+    },
+    {
+      "id": "동해 대동아파트 (용도불일치 배제지번 재확인)",
+      "status": "VALIDATION_FAILED",
+      "pre": {
+        "sido": "강원",
+        "sgg": "동해시",
+        "emd": "동회동",
+        "jibun": "",
+        "bldName": "대동아파트",
+        "unit": {
+          "dong": "30",
+          "ho": "1102"
+        },
+        "regionText": "강원 동해시 동회동",
+        "cleaned": "강원 동해시 동회동 대동아파트 동해대동아파트 30동 1102호"
+      },
+      "result": {
+        "status": "VALIDATION_FAILED",
+        "jibunAddr": "강원특별자치도 동해시 동회동 442",
+        "bdNm": "대동유치원",
+        "validation": {
+          "status": "MISMATCH",
+          "reason": "용도 불일치(대동유치원)"
+        }
+      },
+      "juso": {
+        "강원특별자치도 동해시 동회동 442": [
+          {
+            "jibunAddr": "강원특별자치도 동해시 동회동 442 대동아파트, 동회동 현대아파트",
+            "bdNm": "대동아파트, 동회동 현대아파트"
+          },
+          {
+            "jibunAddr": "강원특별자치도 동해시 동회동 442 대동유치원",
+            "bdNm": "대동유치원"
+          },
+          {
+            "jibunAddr": "강원특별자치도 동해시 동회동 442 북삼코아루아파트",
+            "bdNm": "북삼코아루아파트"
+          }
+        ]
+      },
+      "naver": {}
+    },
+    {
+      "id": "순천 용당피오레 (네이버 지번 구조)",
+      "status": "NAVER_CONFIRMED_PNU_FAILED",
+      "pre": {
+        "sido": "전남",
+        "sgg": "순천시",
+        "emd": "용당동",
+        "jibun": "431",
+        "bldName": "용당피오레",
+        "unit": {
+          "dong": "12",
+          "ho": "101"
+        },
+        "regionText": "전남 순천시 용당동",
+        "cleaned": "전남 순천시 용당동 431 용당피오레 아파트 12동 101호"
+      },
+      "result": {
+        "status": "NAVER_CONFIRMED_PNU_FAILED",
+        "naverJibunAddr": "전남광주통합특별시 순천시 용당동",
+        "naverAddr": "전남광주통합특별시 순천시"
+      },
+      "juso": {
+        "전남광주통합특별시 순천시 용당동 748": [
+          {
+            "jibunAddr": "전남광주통합특별시 순천시 용당동 748 용당피오레",
+            "bdNm": "용당피오레",
+            "detBdNmList": "102동, 108동, 106동, 112동, 110동, 113동, 111동, 109동, 124동(상가동)"
+          }
+        ]
+      },
+      "naver": {
+        "순천시 용당동 용당피오레": [
+          {
+            "title": "<b>용당동</b>대주<b>피오레</b>아파트",
+            "category": "주택>아파트",
+            "address": "전남광주통합특별시 순천시 용당동 748"
+          },
+          {
+            "title": "CU 순천뉴용당피오레점",
+            "category": "생활,편의>편의점",
+            "address": "전남광주통합특별시 순천시 용당동 442-9 1층 101호"
+          },
+          {
+            "title": "<b>용당피오레</b>입주자대표회의",
+            "category": "아파트>관리사무소",
+            "address": "전남광주통합특별시 순천시 용당동 748"
+          },
+          {
+            "title": "전남순천 용당피오레아파트 9 전기차충전소",
+            "category": "교통,운수서비스>전기차충전소",
+            "address": "전남광주통합특별시 순천시 용당동 748"
+          }
+        ]
+      }
+    },
+    {
+      "id": "강남 대치4동 889-56 (행정동 법정동 교정)",
+      "status": "NAVER_CONFIRMED_PNU_FAILED",
+      "pre": {
+        "sido": "서울",
+        "sgg": "강남구",
+        "emd": "대치4동",
+        "jibun": "889-56",
+        "bldName": "",
+        "unit": {
+          "dong": "",
+          "ho": ""
+        },
+        "regionText": "서울 강남구 대치4동",
+        "cleaned": "서울 강남구 대치4동 889-56"
+      },
+      "result": {
+        "status": "NAVER_CONFIRMED_PNU_FAILED",
+        "naverJibunAddr": "서울특별시 강남구 대치동",
+        "jusoQuery": "서울 강남구 대치4동 889-56"
+      },
+      "juso": {
+        "서울 강남구 대치동 889-56": [
+          {
+            "jibunAddr": "서울특별시 강남구 대치동 889-56 더 나인 오피스텔",
+            "bdNm": "더 나인 오피스텔",
+            "roadAddr": "서울특별시 강남구 테헤란로64길 14 (대치동)"
+          }
+        ]
+      },
+      "naver": {}
+    },
+    {
+      "id": "임실 신우아파트 (전국 오픽 방어 — 회수 불가 확인)",
+      "status": "VALIDATION_FAILED",
+      "pre": {
+        "sido": "전북",
+        "sgg": "임실군",
+        "emd": "임실읍",
+        "jibun": "",
+        "bldName": "신우아파트",
+        "unit": {
+          "dong": "101",
+          "ho": "101"
+        },
+        "regionText": "전북 임실군 정월리",
+        "cleaned": "전북 임실군 임실읍 정월리 이도리241-1 신우apt 101-101"
+      },
+      "result": {
+        "status": "VALIDATION_FAILED",
+        "jibunAddr": "경기도 양주시 덕계동 417-1",
+        "bdNm": "신우아파트",
+        "validation": {
+          "status": "MISMATCH",
+          "reason": "시도 불일치(전북≠경기)"
+        }
+      },
+      "juso": {
+        "경기도 양주시 덕계동 417-1": [
+          {
+            "jibunAddr": "경기도 양주시 덕계동 417-1 신우아파트",
+            "bdNm": "신우아파트"
+          }
+        ],
+        "전북 임실군 임실읍 신우아파트": []
+      },
+      "naver": {}
+    }
+  ]
+}

@@ -53,8 +53,16 @@ test("npm test가 회귀 감사를 먼저 돌린다", async () => {
     "npm test에서 회귀 감사가 빠졌다"
   );
   assert.ok(
+    pkg.scripts.test.includes("audit-common-primitives"),
+    "npm test에서 공통모듈 감사가 빠졌다"
+  );
+  assert.ok(
     pkg.scripts.test.includes("audit-module-interference"),
     "npm test에서 모듈 간섭 감사가 빠졌다"
+  );
+  assert.ok(
+    pkg.scripts.test.includes("audit-address-interference"),
+    "npm test에서 정제율 모듈 간섭 감사가 빠졌다"
   );
   assert.ok(pkg.scripts["audit:regression"], "audit:regression 스크립트가 없다");
   assert.ok(pkg.scripts["audit:update"], "audit:update 스크립트가 없다");
@@ -65,6 +73,16 @@ test("app.js가 감사 대상 판정 함수를 그대로 쓴다", async () => {
   const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.ok(app.includes('from "./unit-decision.mjs"'), "app.js가 판정 모듈을 안 쓴다");
   assert.ok(app.includes("decideUnitCandidates({"), "app.js가 판정 함수를 호출하지 않는다");
+  // 정제율 체인도 같은 원칙: app.js가 감사 대상 체인을 그대로 호출해야 한다.
+  assert.ok(app.includes('from "./address-failed-decision.mjs"'), "app.js가 주소 체인 모듈을 안 쓴다");
+  assert.ok(app.includes("runFailedAddressRequery(result, pre, clients, addressRequeryCtx())"),
+    "app.js가 주소 체인을 ctx 주입으로 호출하지 않는다");
+});
+
+test("정제율 픽스처 코퍼스는 네 모듈을 전부 발화시킨다", async () => {
+  const corpus = JSON.parse(await readFile(
+    new URL("./fixtures/address-requery-corpus.json", import.meta.url), "utf8"));
+  assert.ok(corpus.scenarios.length >= 5, "시나리오가 너무 적다");
 });
 
 test("판정 서명은 고유번호와 적용 모듈을 함께 담는다", () => {
