@@ -149,6 +149,46 @@ test("소거 커버리지 가드 — 잔여 동이 요청 호를 못 덮으면 �
   assert.equal([...rich.values()][0].mappedDong, "102");
 });
 
+test("충돌 가드 — 매핑 대상 동이 직접 요청되면 기권 (중앙 실측 반례)", () => {
+  // 중앙아파트 실측: 등기부가 물리 101~105동(JUSO 동목록)을 102·103 두 동으로
+  // 합본 기재했다. 원문 102동 요청이 등기 102동을 이미 차지한 상태에서 동무시
+  // 앵커 101→102가 생기는데, 매핑하면 서로 다른 두 세대가 같은 고유번호를
+  // 나눠 갖는다(고유번호 중복 확정 32건 실측). 대상 동이 요청되고 있으면 기권.
+  const ok102 = {
+    result: { jibunAddr: LOT, unit: { dong: "102", ho: "301" } },
+    reg: { status: "RESOLVED", unique_no: "OK-102", complete: true,
+      candidates: [cand("OK-102", "102", "301")] }
+  };
+  const anchors101 = [1, 2].map((n) => ({
+    result: { jibunAddr: LOT, unit: { dong: "101", ho: String(1500 + n) } },
+    reg: { status: "RESOLVED", unique_no: `A101-${n}`, complete: true,
+      dong_agnostic_recovery: { requested_dong: "101", matched_ho: String(1500 + n) },
+      candidates: [cand(`A101-${n}`, "102", String(1500 + n))] }
+  }));
+  assert.equal(buildVerifiedDongMap([ok102, ...anchors101]).size, 0);
+  // 대상 동이 요청되지 않았으면(원조 형태) 그대로 성립한다
+  assert.equal(buildVerifiedDongMap(anchors101).size, 1);
+});
+
+test("충돌 가드 — 두 요청 동이 같은 등기부 동으로 수렴하면 전부 버린다", () => {
+  // 중앙 실측: 104→102, 105→102 앵커가 동시에 생겼다. 서로 다른 물리 동이
+  // 한 등기부 동일 수는 없으므로 수렴이 겹치면 그 지번 매핑 전체를 버린다.
+  const anchorsOf = (reqDong, hoBase) => [1, 2].map((n) => ({
+    result: { jibunAddr: LOT, unit: { dong: reqDong, ho: String(hoBase + n) } },
+    reg: { status: "RESOLVED", unique_no: `${reqDong}-${n}`, complete: true,
+      dong_agnostic_recovery: { requested_dong: reqDong, matched_ho: String(hoBase + n) },
+      candidates: [cand(`${reqDong}-${n}`, "102", String(hoBase + n))] }
+  }));
+  const map = buildVerifiedDongMap([...anchorsOf("104", 1600), ...anchorsOf("105", 1700)]);
+  assert.equal(map.size, 0);
+  // 수렴이 겹치지 않으면 각각 성립한다
+  const split = buildVerifiedDongMap([...anchorsOf("104", 1600).map((row) => ({
+    ...row,
+    reg: { ...row.reg, candidates: [cand(row.reg.unique_no, "112", row.result.unit.ho)] }
+  })), ...anchorsOf("105", 1700)]);
+  assert.equal(split.size, 2);
+});
+
 test("app.js가 검증 동 매핑 패스를 배치 후처리에 연결한다", async () => {
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
