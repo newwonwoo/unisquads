@@ -24,122 +24,16 @@
 // "이 판정 변화를 의도했다"는 선언이고, 리뷰에서 그 diff가 근거가 된다.
 
 import { readFile, writeFile } from "node:fs/promises";
-import { decideUnitCandidates, decisionSignature } from "../public/unit-decision.mjs";
-import { rawUnitRecoveryVariants } from "../public/unit-match.mjs";
+import { decisionSignature } from "../public/unit-decision.mjs";
+import { allDongsOf, decideOne, loadCorpus, requestsFor } from "./audit-requests.mjs";
 
-const CORPUS = new URL("../tests/fixtures/iros-candidate-corpus.json", import.meta.url);
 const BASELINE = new URL("../tests/fixtures/matching-baseline.json", import.meta.url);
 
 const argv = process.argv.slice(2);
 const has = (name) => argv.includes(`--${name}`);
 
-// 코퍼스의 한 지번에서 감사할 요청 목록을 만든다.
-//
-// 실제 존재하는 조합만 넣으면 정확 매칭에서 전부 끝나 폴백 사다리(새 규칙이
-// 사는 곳)가 한 번도 열리지 않는다. 그래서 빗나가는 요청도 함께 만든다.
-// 후보(등기부 데이터)는 전부 실측이고, 요청만 실패 유형을 재현하도록 만든다.
-//
-//   1. 실제 (동, 호) 조합            정확 매칭 — 기존 확정이 뒤집히는지
-//   2. 동 없이 호만                  단일동·상가동 배제 경로
-//   3. 등기부에 없는 동 + 있는 호     동무시 매칭(R-IROS-DONG-AGNOSTIC-HO)
-//   4. 원문에 층이 적힌 형태          층 유일화(R-IROS-FLOOR-DISAMBIG)
-//   5. 있는 동 + 없는 호              미일치·프로파일 복구 경로
-const MISS_DONG_SAMPLE = 3;   // 다른 지번에서 빌려올 "없는 동" 개수
-const MISS_CASE_LIMIT = 40;   // 지번당 빗나감 요청 상한(감사 시간 관리)
-
-function requestsFor(entry, otherDongs) {
-  const candidates = entry.candidates;
-  const dongs = new Set(
-    candidates.map((c) => String(c?.dong ?? "").trim()).filter(Boolean)
-  );
-  const hos = [...new Set(
-    candidates.map((c) => String(c?.ho ?? "").trim()).filter(Boolean)
-  )];
-  const base = entry.raw || entry.id;
-  const seen = new Set();
-  const out = [];
-  const add = (dong, ho, raw) => {
-    const key = `${dong}|${ho}|${raw}`;
-    if (seen.has(key) || !ho) return;
-    seen.add(key);
-    out.push({ dong, ho, raw });
-  };
-
-  for (const candidate of candidates) {
-    add(String(candidate?.dong ?? "").trim(), String(candidate?.ho ?? "").trim(), base);
-  }
-  for (const ho of hos) add("", ho, base);
-
-  // 3. 이 지번에 없는 동. 다른 지번에 실제로 쓰인 표기를 빌려 쓴다.
-  const missDongs = [...otherDongs].filter((d) => !dongs.has(d)).slice(0, MISS_DONG_SAMPLE);
-  for (const dong of missDongs) {
-    for (const ho of hos.slice(0, MISS_CASE_LIMIT)) {
-      add(dong, ho, `${base} ${dong}동 ${ho}호`);
-    }
-  }
-
-  // 4. 원문에 층이 적힌 형태. 등기부 floor 필드가 있는 후보에서만 만든다.
-  for (const candidate of candidates.slice(0, MISS_CASE_LIMIT)) {
-    const floor = String(candidate?.floor ?? "").trim();
-    const ho = String(candidate?.ho ?? "").trim();
-    if (!ho || !/^\d+$/.test(floor)) continue;
-    const dong = String(candidate?.dong ?? "").trim();
-    add(dong, ho, `${base} ${dong ? `${dong}동 ` : ""}${Number(floor)}층${ho}호`);
-  }
-
-  // 5. 있는 동 + 없는 호
-  const missHo = String(
-    Math.max(0, ...hos.map((h) => Number(h)).filter(Number.isFinite)) + 7777
-  );
-  for (const dong of [...dongs].slice(0, MISS_DONG_SAMPLE)) add(dong, missHo, base);
-
-  // 6. 있는 동 × 있는 호인데 실제로는 짝이 아닌 조합.
-  //    오확정이 생긴다면 바로 여기다 — "그 동에는 그 호가 없다"는 근거 있는
-  //    사실을 무시하고 다른 동의 같은 호를 집어오는지 본다.
-  const paired = new Set(
-    candidates.map((c) => `${String(c?.dong ?? "").trim()}|${String(c?.ho ?? "").trim()}`)
-  );
-  let crossed = 0;
-  for (const dong of dongs) {
-    for (const ho of hos) {
-      if (crossed >= MISS_CASE_LIMIT) break;
-      if (paired.has(`${dong}|${ho}`)) continue;
-      add(dong, ho, `${base} ${dong}동 ${ho}호`);
-      crossed += 1;
-    }
-    if (crossed >= MISS_CASE_LIMIT) break;
-  }
-
-  return out.sort((a, b) =>
-    a.dong.localeCompare(b.dong) || a.ho.localeCompare(b.ho) || a.raw.localeCompare(b.raw));
-}
-
-// 판정 한 건. raw는 요청이 지정한 원문을 쓴다 — 원문 표기 복구 규칙
-// (층·중복 동 등)이 실제로 열리는 조건을 그대로 재현하기 위해서다.
-function decideOne(entry, request) {
-  const unit = { dong: request.dong, ho: request.ho };
-  const raw = request.raw || entry.raw || "";
-  return decideUnitCandidates({
-    pool: entry.candidates,
-    wantDong: request.dong,
-    wantHo: request.ho,
-    raw,
-    unit,
-    bdNm: entry.bdNm || "",
-    subBuilding: null,
-    rawUnitVariants: rawUnitRecoveryVariants(raw, unit)
-  });
-}
-
 function buildReport(corpus) {
-  // "이 지번에 없는 동"은 다른 지번에 실제로 쓰인 표기에서 빌려온다.
-  const allDongs = new Set();
-  for (const entry of corpus.lots) {
-    for (const candidate of entry.candidates) {
-      const dong = String(candidate?.dong ?? "").trim();
-      if (dong) allDongs.add(dong);
-    }
-  }
+  const allDongs = allDongsOf(corpus);
   const report = {};
   let cases = 0;
   for (const entry of corpus.lots) {
@@ -154,7 +48,7 @@ function buildReport(corpus) {
   return { report, cases };
 }
 
-const corpus = JSON.parse(await readFile(CORPUS, "utf8"));
+const corpus = await loadCorpus();
 const { report, cases } = buildReport(corpus);
 
 if (has("update")) {

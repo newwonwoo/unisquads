@@ -33,7 +33,23 @@ export const UNIT_DECISION_VERSION = "unit-decision-v1";
 // unit          정제된 동·호 {dong, ho}
 // bdNm          정제된 건물명
 // subBuilding   하위건물 의도
+// 사다리를 이루는 판정 모듈. 모듈 간 간섭 감사(audit-module-interference)가
+// 이 키로 모듈 하나씩을 차단해 "이 모듈이 없었으면 사다리가 무엇을 골랐는가"를
+// 재고, 두 경로가 서로 다른 고유번호를 내면 충돌로 실패시킨다.
+export const DECISION_MODULE_KEYS = Object.freeze([
+  "SHOP_DONG_EXCLUSION",
+  "SINGLE_DONG",
+  "DONG_AGNOSTIC",
+  "HO_BUILDING",
+  "RAW_UNIT",
+  "UNIT_PROFILE",
+  "FLOOR_DISAMBIG",
+  "DONG_AGNOSTIC_HO"
+]);
+
 // rawUnitVariants 원문 표기 복구 변형(있으면 R-IROS-RAW-UNIT이 열린다)
+// options.disabled  간섭 감사 전용 — 지정한 사다리 모듈을 차단한다.
+//                   운영 경로는 절대 넘기지 않는다(기본 [] = 동작 불변).
 export function decideUnitCandidates({
   pool,
   wantDong = "",
@@ -43,8 +59,10 @@ export function decideUnitCandidates({
   bdNm = "",
   subBuilding = null,
   rawUnitVariants = []
-} = {}) {
+} = {}, options = {}) {
   const source = Array.isArray(pool) ? pool : [];
+  const disabled = new Set(options.disabled || []);
+  const enabled = (key) => !disabled.has(key);
   const applied = [];
   const applyModule = (name, version) => {
     const tag = `${name}@${version}`;
@@ -73,7 +91,7 @@ export function decideUnitCandidates({
 
     // R-IROS-SHOP-DONG-EXCLUSION: 동 없는 요청에서 같은 호가 무동 세대와
     // 상가동에만 갈리면 상가동을 배제한다. 숫자·알파벳 동이 섞이면 배제하지 않는다.
-    if (matched.length > 1 && !wantDong && wantHo) {
+    if (enabled("SHOP_DONG_EXCLUSION") && matched.length > 1 && !wantDong && wantHo) {
       const trimmed = excludeShopDongForDonglessRequest(matched);
       if (trimmed.length < matched.length) {
         matched = trimmed;
@@ -81,16 +99,20 @@ export function decideUnitCandidates({
       }
     }
     // 단일 동 건물: 후보 전체에 동이 없고 호는 있을 때 호로만 재매칭.
-    if (!matched.length && wantDong && wantHo) {
+    if (enabled("SINGLE_DONG") && !matched.length && wantDong && wantHo) {
       const anyDong = cands.some((c) => !candidateHasNoDong(c));
       const anyHo = cands.some((c) => String(c?.ho || "").trim());
       if (!anyDong && anyHo) {
         matched = cands.filter((c) => candidateMatchesUnit(c, "", wantHo));
+        if (matched.length) {
+          applyModule("R-IROS-SINGLE-DONG-HO", IROS_MODULE_VERSIONS.R_IROS_SINGLE_DONG_HO);
+        }
       }
     }
     // R-IROS-DONG-AGNOSTIC: 원문에 "N동" 표기가 없으면 동은 그룹 전파로 붙은
     // 추정값이다. 추정 동 때문에 정확한 호를 버리지 않는다.
-    if (!matched.length && wantDong && wantHo && !/\d+\s*동/.test(String(raw || ""))) {
+    if (enabled("DONG_AGNOSTIC") && !matched.length && wantDong && wantHo &&
+        !/\d+\s*동/.test(String(raw || ""))) {
       const hoOnly = cands.filter((c) => candidateMatchesUnit(c, "", wantHo));
       if (hoOnly.length === 1) {
         matched = hoOnly;
@@ -98,7 +120,7 @@ export function decideUnitCandidates({
       }
     }
     // R-IROS-HO-BUILDING: 동만 비어 있고 호·건물명이 정확히 맞는 한 건.
-    if (!matched.length && wantDong && wantHo && bdNm) {
+    if (enabled("HO_BUILDING") && !matched.length && wantDong && wantHo && bdNm) {
       const wantedBuilding = buildingKey(bdNm);
       const hoBuilding = cands.filter((c) =>
         candidateHasNoDong(c) &&
@@ -113,9 +135,19 @@ export function decideUnitCandidates({
     cands = matched;
 
     // R-IROS-RAW-UNIT: 단일 한 건으로 끝나지 않을 때만 원문 표기 변형으로 재매칭.
-    if (cands.length !== 1 && (rawUnitVariants || []).length) {
+    //
+    // 무회귀 기권(간섭 감사 실측): 평문 해석과 일치하는 후보가 이미 있으면,
+    // 재해석 변형은 그 집합 안의 한 건으로 좁힐 때만 쓴다. 평문 일치가 있는데
+    // 변형이 집합 밖의 다른 세대를 고르면 기권한다 — "1층101호"를 1101호
+    // (11층)로 합성해 엉뚱한 세대를 확정하던 충돌이 실제로 있었다. 평문
+    // 일치가 0건일 때(층 유실·중복 동처럼 표기 자체가 어긋난 경우)만 자유롭게
+    // 재해석한다.
+    if (enabled("RAW_UNIT") && cands.length !== 1 && (rawUnitVariants || []).length) {
       const recovered = selectUniqueRawUnitCandidate(source, raw, unit || {});
-      if (recovered?.candidate) {
+      const withinPlainMatches = !cands.length || cands.some((candidate) =>
+        candidate === recovered?.candidate ||
+        (candidate?.unique_no && candidate.unique_no === recovered?.candidate?.unique_no));
+      if (recovered?.candidate && withinPlainMatches) {
         cands = [recovered.candidate];
         rawUnitRecovery = {
           selected_variant: recovered.variant,
@@ -130,11 +162,19 @@ export function decideUnitCandidates({
   stageCounts.raw_unit_recovery = rawUnitRecovery ? 1 : 0;
 
   // R-IROS-UNIT-PROFILE: 건물별 동·호 표기방식을 학습해 재매칭한다.
-  if ((wantDong || wantHo) && cands.length !== 1) {
+  //
+  // 무회귀 기권(간섭 감사 실측): RAW-UNIT과 같은 원칙. 평문 해석과 일치하는
+  // 후보가 이미 있으면 학습된 재해석은 그 집합 안에서만 고른다. 평문 일치가
+  // 있는데 집합 밖의 다른 세대를 고르면 기권한다("1층101호"를 1101호로
+  // 학습 합성하던 충돌 실측).
+  if (enabled("UNIT_PROFILE") && (wantDong || wantHo) && cands.length !== 1) {
     const profiled = matchUnitByBuildingProfile(source, raw, unit || {}, bdNm || "", subBuilding || null);
     unitProfileRecovery = profiled.audit;
     stageCounts.unit_profile_matches = profiled.audit?.matched_candidate_count || 0;
-    if (profiled.status === "UNIQUE" && profiled.candidate) {
+    const withinPlainMatches = !cands.length || cands.some((candidate) =>
+      candidate === profiled.candidate ||
+      (candidate?.unique_no && candidate.unique_no === profiled.candidate?.unique_no));
+    if (profiled.status === "UNIQUE" && profiled.candidate && withinPlainMatches) {
       cands = [profiled.candidate];
       unitProfileRecovery = {
         ...profiled.audit,
@@ -149,7 +189,7 @@ export function decideUnitCandidates({
   }
 
   // R-IROS-FLOOR-DISAMBIG: 동·호 동일 복수후보를 원문 층으로 유일화.
-  if (cands.length > 1 && (wantDong || wantHo)) {
+  if (enabled("FLOOR_DISAMBIG") && cands.length > 1 && (wantDong || wantHo)) {
     const floored = selectFloorDisambiguatedCandidate(cands, raw, unit || {});
     if (floored?.candidate) {
       cands = [floored.candidate];
@@ -161,7 +201,7 @@ export function decideUnitCandidates({
 
   // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 요청 동이 등기부에 아예 없고
   // 요청한 호가 지번 전체에서 한 건일 때만 동을 무시한다.
-  if (!cands.length && wantDong && wantHo) {
+  if (enabled("DONG_AGNOSTIC_HO") && !cands.length && wantDong && wantHo) {
     const relaxed = selectDongAgnosticHoCandidate(source, wantDong, wantHo);
     if (relaxed?.candidate) {
       cands = [relaxed.candidate];
