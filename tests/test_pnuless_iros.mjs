@@ -261,14 +261,18 @@ test("배치가 PNU 없는 계획과 두 후처리를 실제로 연결한다", a
 });
 
 test("동 무시 재매칭은 프로파일 복구가 실패한 뒤 마지막에만 시도한다", async () => {
-  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  const profile = source.indexOf("matchUnitByBuildingProfile(");
-  const agnostic = source.indexOf("selectDongAgnosticHoCandidate(unitCandidatePool");
-  const notFound = source.indexOf('status: (wantDong || wantHo) ? "REG_UNIT_NOT_FOUND"');
+  // 사다리 순서는 unit-decision.mjs가, 그 결과를 쓰는 곳은 app.js가 갖는다.
+  const decision = await readFile(new URL("../public/unit-decision.mjs", import.meta.url), "utf8");
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const profile = decision.indexOf("matchUnitByBuildingProfile(");
+  const agnostic = decision.indexOf("selectDongAgnosticHoCandidate(source");
   assert.notEqual(agnostic, -1);
   assert.equal(profile < agnostic, true);
-  assert.equal(agnostic < notFound, true);
-  assert.ok(source.includes("dong_agnostic_recovery: dongAgnosticRecovery"));
+  // 판정이 끝난 뒤에만 미일치 응답을 만든다.
+  const call = app.indexOf("decideUnitCandidates({");
+  const notFound = app.indexOf('status: (wantDong || wantHo) ? "REG_UNIT_NOT_FOUND"');
+  assert.equal(call < notFound, true);
+  assert.ok(app.includes("dong_agnostic_recovery: dongAgnosticRecovery"));
 });
 
 test("배치 내 확정 지번 색인이 JUSO 호출을 대체한다", async () => {

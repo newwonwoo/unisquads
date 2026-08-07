@@ -3,7 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("minimal address recovery integration is wired without IROS collection changes", async () => {
-  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  // 세대 판정 사다리는 unit-decision.mjs로 분리됐다. 앱의 코드 표면 전체를 본다.
+const source = [
+    await readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    await readFile(new URL("../public/unit-decision.mjs", import.meta.url), "utf8")
+  ].join("\n");
+
   for (const marker of [
     "shouldEscalateJusoMultiToNaver",
     "parseCompactAlphaUnit",

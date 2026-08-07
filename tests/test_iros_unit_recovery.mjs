@@ -159,13 +159,16 @@ test("매처 버전을 올려 새 매칭 규칙이 실행 계약에 반영된다
   assert.equal(contract.includes('matcher: "iros-matcher-v13"'), true);
 });
 
-test("app.js가 두 폴백을 매칭 경로에 연결한다", async () => {
-  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.equal(source.includes('applyModule("R-IROS-DONG-AGNOSTIC"'), true);
-  assert.equal(source.includes('applyModule("R-IROS-LOT-FALLBACK"'), true);
-  // 지번 폴백은 exact_lot 필터 직후, 부동산구분 판정 전이어야 한다.
-  const fallback = source.indexOf('applyModule("R-IROS-LOT-FALLBACK"');
-  const propertyClass = source.indexOf("filterUnitPropertyCandidates(cands");
+test("두 폴백이 매칭 경로에 연결돼 있다", async () => {
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  // 세대 판정 사다리는 unit-decision.mjs에 있고 app.js가 그것을 호출한다.
+  const decision = await readFile(new URL("../public/unit-decision.mjs", import.meta.url), "utf8");
+  assert.equal(decision.includes('applyModule("R-IROS-DONG-AGNOSTIC"'), true);
+  assert.equal(app.includes("decideUnitCandidates({"), true);
+  assert.equal(app.includes('applyModule("R-IROS-LOT-FALLBACK"'), true);
+  // 지번 폴백은 exact_lot 필터 직후, 부동산구분 판정 전이어야 한다(app.js 단계).
+  const fallback = app.indexOf('applyModule("R-IROS-LOT-FALLBACK"');
+  const propertyClass = app.indexOf("filterUnitPropertyCandidates(cands");
   assert.equal(fallback < propertyClass, true);
 });
 
@@ -295,8 +298,8 @@ test("중복 동·동무시 복구가 재판정 대상으로 승격된다", asyn
   assert.equal(markStaleIrosRows([dup])[0].reg.stale_reason, "RAW_UNIT_REMATCH");
 });
 
-test("app.js가 동무시 폴백을 마지막 관문으로 둔다", async () => {
-  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+test("동무시 폴백이 판정 사다리의 마지막 관문이다", async () => {
+  const source = await readFile(new URL("../public/unit-decision.mjs", import.meta.url), "utf8");
   assert.equal(source.includes('applyModule("R-IROS-DONG-AGNOSTIC-HO"'), true);
   // 정상 매칭·RAW-UNIT을 모두 지난 뒤에만 열린다.
   const rawUnit = source.indexOf('applyModule("R-IROS-RAW-UNIT"');

@@ -3,8 +3,12 @@
   "private": true,
   "scripts": {
     "build": "node scripts/generate-build-info.mjs",
-    "test": "node --test tests/*.mjs",
+    "test": "node scripts/audit-matching-regression.mjs && node --test tests/*.mjs",
+    "test:unit": "node --test tests/*.mjs",
     "test:iros": "node scripts/test-iros-e2e.mjs",
+    "audit:regression": "node scripts/audit-matching-regression.mjs",
+    "audit:update": "node scripts/audit-matching-regression.mjs --update",
+    "corpus:build": "node scripts/build-candidate-corpus.mjs",
     "probe:iros": "node scripts/probe-iros.mjs"
   },
   "devDependencies": {
