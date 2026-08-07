@@ -71,12 +71,16 @@ for (const c of cases) for (const row of c.rows) byRaw.set(row.raw, { c, row });
 const jusoCalls = [];
 const resolveCalls = [];
 
+// c.juso는 단일 {match, item}이거나 배열이다. 배열이면 순서대로 첫 일치를
+// 쓰고, entry.items로 복수 결과(동↔지번 재배치의 건물명 검색 등)를 낼 수 있다.
 function jusoReply(keyword) {
   jusoCalls.push(keyword);
   for (const c of cases) {
-    if (!c.juso) continue;
-    const hit = c.juso.match.test(keyword);
-    if (hit) return { common: ok(1), juso: [c.juso.item] };
+    for (const entry of [].concat(c.juso || [])) {
+      if (!entry.match.test(keyword)) continue;
+      const items = entry.items || [entry.item];
+      return { common: ok(items.length), juso: items };
+    }
   }
   return { common: ok(0), juso: [] };
 }
@@ -85,10 +89,18 @@ const ok = (n) => ({
   totalCount: String(n), currentPage: "1", countPerPage: "10"
 });
 
+// c.iros도 단일 또는 배열 — 한 케이스가 두 지번의 수집을 나눠 낼 수 있다.
 function resolveReply(addr) {
   resolveCalls.push(addr);
-  const c = cases.find((x) => x.iros.match.test(addr));
-  const candidates = c ? c.iros.candidates : [];
+  let c = null;
+  let entry = null;
+  outer:
+  for (const candidate of cases) {
+    for (const e of [].concat(candidate.iros || [])) {
+      if (e.match.test(addr)) { c = candidate; entry = e; break outer; }
+    }
+  }
+  const candidates = entry ? entry.candidates : [];
   return {
     status: "OK",
     all_candidates: candidates,
@@ -107,7 +119,7 @@ function resolveReply(addr) {
     effective_page_unit: 50,
     requested_page_unit: 50,
     capability_source: "mock",
-    content_hash: `mock-${c?.name || "none"}-${candidates.length}`,
+    content_hash: `mock-${c?.name || "none"}-${entry?.match?.source || ""}-${candidates.length}`,
     schema_fingerprint: "mock-v1"
   };
 }
