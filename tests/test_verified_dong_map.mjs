@@ -121,6 +121,34 @@ test("소거법 — 주거동 N개 중 N-1개가 일치하면 남는 하나끼�
   assert.equal(clash.has(`사직동|319-1#201`), false);
 });
 
+test("소거 커버리지 가드 — 잔여 동이 요청 호를 못 덮으면 기권 (용당 실측 반례)", () => {
+  // 용당: 잔여 요청 12동(호 101·102·103…) ↔ 잔여 등기부 123동(1세대, 호 101).
+  // 123은 요청 호의 극히 일부만 가진다 — 매핑하면 101호가 오확정된다.
+  const okRow = {
+    result: { jibunAddr: LOT, unit: { dong: "101", ho: "101" } },
+    reg: { status: "RESOLVED", unique_no: "OK", complete: true,
+      candidates: [cand("OK", "101", "101")] }
+  };
+  const failedRows = ["101", "102", "103"].map((ho) => ({
+    result: { jibunAddr: LOT, unit: { dong: "12", ho } },
+    reg: { status: "REG_UNIT_NOT_FOUND", complete: true,
+      candidates: [cand("OK", "101", "101"), cand("T-123", "123", "101")] }
+  }));
+  const map = buildVerifiedDongMap([okRow, ...failedRows]);
+  // 123은 요청 호 3종 중 1종만 커버(33%) → 매핑 자체가 생기지 않는다
+  assert.equal(map.size, 0);
+  // 반대로 잔여 동이 요청 호를 전부 가지면(원조 형태) 매핑이 성립한다
+  const richFailed = ["101", "102", "103"].map((ho) => ({
+    result: { jibunAddr: LOT, unit: { dong: "201", ho } },
+    reg: { status: "REG_UNIT_NOT_FOUND", complete: true,
+      candidates: [cand("OK", "101", "101"),
+        cand(`R-${ho}`, "102", ho)] }
+  }));
+  const rich = buildVerifiedDongMap([okRow, ...richFailed]);
+  assert.equal(rich.size, 1);
+  assert.equal([...rich.values()][0].mappedDong, "102");
+});
+
 test("app.js가 검증 동 매핑 패스를 배치 후처리에 연결한다", async () => {
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");

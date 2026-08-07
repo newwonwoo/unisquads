@@ -56,13 +56,19 @@ export function buildVerifiedDongMap(rows) {
   const anchors = new Map();          // key -> Map<mappedDong, count>
   const requestedByLot = new Map();   // lot -> Set<요청 동>
   const registryByLot = new Map();    // lot -> Set<주거 등기부 동>
+  const requestedHosByLot = new Map(); // lot -> Map<요청 동, Set<호>>
   for (const row of source) {
     const reg = row?.reg;
     const lot = lotKeyOf(row?.result);
     const requested = dongAliasKey(row?.result?.unit?.dong);
-    if (lot && requested && unitKey(row?.result?.unit?.ho, "ho")) {
+    const requestedHo = unitKey(row?.result?.unit?.ho, "ho");
+    if (lot && requested && requestedHo) {
       if (!requestedByLot.has(lot)) requestedByLot.set(lot, new Set());
       requestedByLot.get(lot).add(requested);
+      if (!requestedHosByLot.has(lot)) requestedHosByLot.set(lot, new Map());
+      const byDong = requestedHosByLot.get(lot);
+      if (!byDong.has(requested)) byDong.set(requested, new Set());
+      byDong.get(requested).add(requestedHo);
     }
     // 완전수집 실패 행이 그 지번의 전체 후보를 들고 있다.
     if (lot && reg?.complete === true && (reg.candidates || []).length > 1) {
@@ -106,6 +112,23 @@ export function buildVerifiedDongMap(rows) {
     // 최소 한 동은 그대로 일치해야 "같은 단지의 표기 차이"라는 전제가 선다.
     if (!matched.length) continue;
     if (leftoverRequested.length !== 1 || leftoverRegistry.length !== 1) continue;
+    // 호 집합 커버리지 가드(실측 반례에서 도출): 잔여 등기부 동이 잔여 요청
+    // 동의 호들을 대부분 갖고 있어야 같은 건물이다. 용당 실측에서 112가 이미
+    // 요청돼 잔여가 123(1세대)뿐이 되자 소거가 12→123으로 찍으려 했다 —
+    // 123은 요청 호 120종 중 1종만 가져 오확정이었다. 커버리지 80% 미만은 기권.
+    const wantedHos = requestedHosByLot.get(lot)?.get(leftoverRequested[0]) || new Set();
+    const registryHos = new Set();
+    for (const row of source) {
+      const reg2 = row?.reg;
+      if (lotKeyOf(row?.result) !== lot || reg2?.complete !== true) continue;
+      for (const candidate of reg2.candidates || []) {
+        if (dongAliasKey(candidate?.dong) === leftoverRegistry[0]) {
+          registryHos.add(unitKey(candidate?.ho, "ho"));
+        }
+      }
+    }
+    const covered = [...wantedHos].filter((ho) => registryHos.has(ho)).length;
+    if (!wantedHos.size || covered / wantedHos.size < 0.8) continue;
     const key = `${lot}#${leftoverRequested[0]}`;
     const byElimination = { mappedDong: leftoverRegistry[0], anchors: 0, basis: "elimination" };
     const existing = map.get(key);
