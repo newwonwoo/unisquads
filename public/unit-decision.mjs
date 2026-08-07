@@ -20,6 +20,7 @@ import {
   matchedCandidateUnitVariant,
   selectDongAgnosticHoCandidate,
   selectFloorDisambiguatedCandidate,
+  selectRawFloorHoCandidate,
   selectUniqueRawUnitCandidate,
   IROS_MODULE_VERSIONS
 } from "./unit-match.mjs";
@@ -44,7 +45,8 @@ export const DECISION_MODULE_KEYS = Object.freeze([
   "RAW_UNIT",
   "UNIT_PROFILE",
   "FLOOR_DISAMBIG",
-  "DONG_AGNOSTIC_HO"
+  "DONG_AGNOSTIC_HO",
+  "RAW_FLOOR_HO"
 ]);
 
 // rawUnitVariants 원문 표기 복구 변형(있으면 R-IROS-RAW-UNIT이 열린다)
@@ -81,7 +83,8 @@ export function decideUnitCandidates({
     let matched = cands.filter((c) => {
       const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
       if (variant?.source === "composite_dong_room_prefix" ||
-          variant?.source === "self_dong_ho_prefix") {
+          variant?.source === "self_dong_ho_prefix" ||
+          variant?.source === "ho_type_prefix") {
         applyModule("IROS-CANDIDATE-NORMALIZE", IROS_MODULE_VERSIONS.IROS_CANDIDATE_NORMALIZE);
       }
       return Boolean(variant);
@@ -211,6 +214,25 @@ export function decideUnitCandidates({
   }
   stageCounts.dong_agnostic_ho = dongAgnosticRecovery ? 1 : 0;
 
+  // R-IROS-RAW-FLOOR-HO: 원문 "지X-N"이 동X·호N으로 오파싱된 행의 층-호
+  // 재해석. 한 건으로 못 좁혔을 때만, 원문 건물명 일치 + 층·호 정확 유일 +
+  // 지하 해석 비중의 조건에서 발화한다(갈산 하나상가 실측 — 무동 상가는
+  // 단일동 호 매칭이 층만 다른 복수결과를 남기므로 층으로 좁힌다).
+  // 무회귀 기권: 앞 단계가 남긴 평문 일치 집합이 있으면 그 안에서만 고른다.
+  let rawFloorHoRecovery = null;
+  if (enabled("RAW_FLOOR_HO") && cands.length !== 1 && wantDong && wantHo) {
+    const floored = selectRawFloorHoCandidate(source, raw, wantDong, wantHo);
+    const withinPlainMatches = !cands.length || cands.some((candidate) =>
+      candidate === floored?.candidate ||
+      (candidate?.unique_no && candidate.unique_no === floored?.candidate?.unique_no));
+    if (floored?.candidate && withinPlainMatches) {
+      cands = [floored.candidate];
+      rawFloorHoRecovery = floored;
+      applyModule("R-IROS-RAW-FLOOR-HO", IROS_MODULE_VERSIONS.R_IROS_RAW_FLOOR_HO);
+    }
+  }
+  stageCounts.raw_floor_ho = rawFloorHoRecovery ? 1 : 0;
+
   return {
     candidates: cands,
     appliedModules: applied,
@@ -219,6 +241,7 @@ export function decideUnitCandidates({
     unitProfileRecovery,
     floorDisambigRecovery,
     dongAgnosticRecovery,
+    rawFloorHoRecovery,
     stageCounts
   };
 }

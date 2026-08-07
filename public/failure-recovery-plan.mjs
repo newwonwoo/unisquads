@@ -10,6 +10,7 @@ import {
   selectDongAgnosticHoCandidate,
   selectFloorDisambiguatedCandidate,
   selectNamelessRegistryExact,
+  selectRawFloorHoCandidate,
   selectUniqueRawUnitCandidate
 } from "./unit-match.mjs";
 import { PNULESS_IROS_VERSION, buildPnulessIrosPlan } from "./pnuless-iros.mjs";
@@ -160,7 +161,14 @@ export const FAILURE_RECOVERY_MODULES = Object.freeze({
   I_CANDIDATE_NORMALIZE: Object.freeze({
     id: "IROS-CANDIDATE-NORMALIZE",
     phase: "IROS",
-    version: "3",
+    version: "4",
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_RAW_FLOOR_HO: Object.freeze({
+    id: "R-IROS-RAW-FLOOR-HO",
+    phase: "IROS",
+    version: "1",
     automatic: true,
     disposition: "AUTO_RETRY"
   }),
@@ -371,6 +379,37 @@ export function needsSelfDongHoPrefixRematch(row) {
       "self_dong_ho_prefix";
 }
 
+// 등기부가 호에 부동산 유형을 접두한 행("아파트201"/"오피스텔202" — 논현
+// 유호엔시티 실측 28행). 새 정규화로 정확히 한 건이 매칭되고 그 근거가
+// 유형 접두 분해일 때만 재판정 대상으로 승격한다.
+export function needsHoTypePrefixRematch(row) {
+  const reg = row?.reg;
+  if (!UNIT_FAILURES.has(String(reg?.status || "")) || reg?.complete !== true) return false;
+  const unit = row?.result?.unit || {};
+  if (!unit.ho) return false;
+  const typed = filterUnitPropertyCandidates(reg?.candidates || [], unit.dong || "", unit.ho);
+  if (!typed.verified) return false;
+  const matched = (typed.candidates || []).filter((candidate) =>
+    candidateMatchesUnit(candidate, unit.dong || "", unit.ho));
+  return matched.length === 1 &&
+    matchedCandidateUnitVariant(matched[0], unit.dong || "", unit.ho)?.source ===
+      "ho_type_prefix";
+}
+
+// 원문 "지X-N"이 동X·호N으로 오파싱돼 세대를 못 찾은 행(갈산 하나상가 실측).
+// 층-호 재해석이 정확히 한 건으로 좁혀질 때만 재판정 대상으로 승격한다.
+export function needsRawFloorHoRematch(row) {
+  const reg = row?.reg;
+  if (String(reg?.status || "") !== "REG_UNIT_NOT_FOUND" || reg?.complete !== true) return false;
+  const unit = row?.result?.unit || {};
+  if (!unit.dong || !unit.ho) return false;
+  const typed = filterUnitPropertyCandidates(reg?.candidates || [], unit.dong, unit.ho);
+  if (!typed.verified) return false;
+  return Boolean(
+    selectRawFloorHoCandidate(typed.candidates, row?.raw || "", unit.dong, unit.ho)
+  );
+}
+
 // 동 없는 요청의 같은 호가 무동 세대와 상가동에만 갈려 복수결과로 남은 행
 // (횡성 서도아파트 실측). 상가동 배제로 정확히 한 건이 남을 때만 승격한다.
 export function needsShopDongExclusionRematch(row) {
@@ -488,6 +527,18 @@ export function selectIrosRecoveryAction(row) {
     return moduleDecision(
       FAILURE_RECOVERY_MODULES.I_CANDIDATE_NORMALIZE,
       "IROS_CANDIDATE_NORMALIZE_REMATCH"
+    );
+  }
+  if (needsHoTypePrefixRematch(row)) {
+    return moduleDecision(
+      FAILURE_RECOVERY_MODULES.I_CANDIDATE_NORMALIZE,
+      "IROS_HO_TYPE_PREFIX_REMATCH"
+    );
+  }
+  if (needsRawFloorHoRematch(row)) {
+    return moduleDecision(
+      FAILURE_RECOVERY_MODULES.I_RAW_FLOOR_HO,
+      "IROS_RAW_FLOOR_HO_REMATCH"
     );
   }
   if (needsFloorDisambigRematch(row)) {
