@@ -210,6 +210,22 @@ test("raw unit recovery takes the first variant that is unique on its own", () =
   assert.equal(ambiguous, null);
 });
 
+test("nameless-registry exact pass opens only for a unique exact match with empty name", async () => {
+  const { selectNamelessRegistryExact } = await import("../public/unit-match.mjs");
+  // 실측(삼본·동산): 등기부 건물명 전부 빈값 — 동·호 정확 매칭 유일이면 통과
+  const nameless = { unique_no: "A", dong: "101", ho: "101", buldnm: "" };
+  assert.equal(selectNamelessRegistryExact([nameless], true)?.unique_no, "A");
+  // 건물명이 적혀 있으면 절대 열리지 않는다 (옆 단지 오확정 방어 유지)
+  assert.equal(selectNamelessRegistryExact(
+    [{ unique_no: "B", dong: "106", ho: "101", buldnm: "배방삼정그린코아" }], true), null);
+  // 폴백 매칭(동무시·프로파일 등)으로 잡힌 후보에는 열리지 않는다
+  assert.equal(selectNamelessRegistryExact([nameless], false), null);
+  // 유일하지 않으면 열리지 않는다
+  assert.equal(selectNamelessRegistryExact(
+    [nameless, { unique_no: "C", dong: "101", ho: "101", buldnm: "" }], true), null);
+  assert.equal(selectNamelessRegistryExact([], true), null);
+});
+
 test("dongless request excludes shop-dong twins only when no real dong is involved", () => {
   // 횡성 서도아파트 실측: 동 없는 요청의 호 102가 무동 세대 + 상가동 세대
   const apt = { unique_no: "APT", dong: "", ho: "102" };

@@ -154,9 +154,9 @@ test("이미 고유번호를 얻은 행은 재조회하지 않는다", () => {
 });
 
 test("매처 버전을 올려 새 매칭 규칙이 실행 계약에 반영된다", async () => {
-  assert.equal(MATCHER_VERSION, "iros-matcher-v12");
+  assert.equal(MATCHER_VERSION, "iros-matcher-v13");
   const contract = await readFile(new URL("../public/iros-run-contract.mjs", import.meta.url), "utf8");
-  assert.equal(contract.includes('matcher: "iros-matcher-v12"'), true);
+  assert.equal(contract.includes('matcher: "iros-matcher-v13"'), true);
 });
 
 test("app.js가 두 폴백을 매칭 경로에 연결한다", async () => {
@@ -232,6 +232,43 @@ test("요청 동이 등기부에 존재하면 동을 무시하지 않는다", as
     [{ unique_no: "A", dong: "A", ho: "102" }, { unique_no: "B", dong: "B", ho: "102" }],
     "101", "102"
   ), null);
+});
+
+test("무기재 건물명 검증실패가 재판정 대상으로 승격된다", async () => {
+  const { needsNamelessRegistryRematch } = await import("../public/failure-recovery-plan.mjs");
+  // 실측(어달동 194행): 완전수집 + 정확 매칭 1건인데 건물명 빈값이라 게이트에서 죽음
+  const row = {
+    raw: "강원 동해시 어달동 12-1,2,5 묵호진동1-83 101동 101호",
+    result: { status: "CONFIRMED", unit: { dong: "101", ho: "101" }, bdNm: "삼본아파트",
+      reviewNeeded: "multilot" },
+    reg: {
+      status: "REG_VALIDATION_FAILED", failure_stage: "STRICT_BUILDING", complete: true,
+      candidates: [
+        { unique_no: "A", dong: "101", ho: "101", buldnm: "", real_cls_cd: "집합건물" },
+        { unique_no: "B", dong: "101", ho: "102", buldnm: "", real_cls_cd: "집합건물" }
+      ]
+    }
+  };
+  assert.equal(needsNamelessRegistryRematch(row), true);
+  // 건물명이 적힌 후보는 승격하지 않는다
+  assert.equal(needsNamelessRegistryRematch({
+    ...row,
+    reg: { ...row.reg, candidates: [
+      { unique_no: "A", dong: "101", ho: "101", buldnm: "다른아파트", real_cls_cd: "집합건물" }
+    ] }
+  }), false);
+  // 정확 매칭이 복수면 승격하지 않는다
+  assert.equal(needsNamelessRegistryRematch({
+    ...row,
+    reg: { ...row.reg, candidates: [
+      { unique_no: "A", dong: "101", ho: "101", buldnm: "", real_cls_cd: "집합건물" },
+      { unique_no: "B", dong: "101", ho: "101", buldnm: "", real_cls_cd: "집합건물" }
+    ] }
+  }), false);
+  // 다른 실패 단계는 대상이 아니다
+  assert.equal(needsNamelessRegistryRematch({
+    ...row, reg: { ...row.reg, failure_stage: "PROPERTY_CLASS" }
+  }), false);
 });
 
 test("중복 동·동무시 복구가 재판정 대상으로 승격된다", async () => {

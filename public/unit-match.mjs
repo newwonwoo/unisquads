@@ -1,6 +1,6 @@
 import { extractExplicitLotRefs } from "./address-multilot-rules.mjs";
 
-export const MATCHER_VERSION = "iros-matcher-v12";
+export const MATCHER_VERSION = "iros-matcher-v13";
 
 export const IROS_MODULE_VERSIONS = Object.freeze({
   IROS_CANDIDATE_NORMALIZE: "3",
@@ -15,7 +15,8 @@ export const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_LOT_FALLBACK: "1",
   R_IROS_DONG_AGNOSTIC_HO: "2",
   R_IROS_FLOOR_DISAMBIG: "1",
-  R_IROS_SHOP_DONG_EXCLUSION: "1"
+  R_IROS_SHOP_DONG_EXCLUSION: "1",
+  R_IROS_NAMELESS_REGISTRY_EXACT: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -352,6 +353,22 @@ export function selectDongAgnosticHoCandidate(candidates, wantedDong, wantedHo) 
         candidateUnitVariants(candidate).map((variant) => variant.dong).filter(Boolean))
     )].sort()
   };
+}
+
+// R-IROS-NAMELESS-REGISTRY-EXACT: 검토 플래그 행의 건물명 교차검증은 등기부가
+// 건물명을 아예 적지 않는 건물에서는 원천적으로 불가능하다(실측: 한 단지
+// 208건·268건 전부 빈값 — 완전수집과 동·호 정확 매칭까지 성공하고도 여기서
+// 457행이 죽었다). 이때는 이미 성립한 더 강한 근거 — 확정 지번 정확 일치
+// 위에서의 동·호 정확 매칭 유일 — 로 통과시킨다.
+//
+// 후보 건물명이 적혀 있으면 이 경로는 절대 열리지 않는다. 이름이 있는데
+// 다르면 "다른 건물"이라는 근거 있는 사실이고, 그 게이트가 실제로 옆 단지
+// 오확정을 막은 실측이 있기 때문이다.
+export function selectNamelessRegistryExact(candidates, exactUnitMatch) {
+  if (exactUnitMatch !== true) return null;
+  const source = Array.isArray(candidates) ? candidates : [];
+  if (source.length !== 1) return null;
+  return buildingKey(source[0]?.buldnm) ? null : source[0];
 }
 
 export function buildingKey(value) {

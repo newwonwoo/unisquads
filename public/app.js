@@ -15,6 +15,7 @@ import {
   rawUnitRecoveryVariants,
   selectDongAgnosticHoCandidate,
   selectFloorDisambiguatedCandidate,
+  selectNamelessRegistryExact,
   selectUniqueRawUnitCandidate,
   summarizeCandidatePropertyClasses,
   targetPropertyClass,
@@ -4297,6 +4298,7 @@ function AddrRefineTestGui() {
       let rawUnitRecovery = null;
       let dongAgnosticRecovery = null;
       let floorDisambigRecovery = null;
+      let exactUnitMatched = false;
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
           const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
@@ -4306,6 +4308,10 @@ function AddrRefineTestGui() {
           }
           return Boolean(variant);
         });
+        // 검토 게이트의 무기재 건물명 예외(R-IROS-NAMELESS-REGISTRY-EXACT)는
+        // 1차 정확 매칭에서 잡힌 후보에만 열린다. 폴백 경로로 잡힌 후보는
+        // 근거가 더 약하므로 제외한다.
+        exactUnitMatched = matched.length > 0;
         // R-IROS-SHOP-DONG-EXCLUSION: 동 없는 요청에서 같은 호가 무동 세대와
         // 상가동에만 갈리면 상가동을 배제한다(서도아파트 실측). 숫자·알파벳
         // 동이 섞여 있으면 배제하지 않는다.
@@ -4467,6 +4473,7 @@ function AddrRefineTestGui() {
 
       // 검토 플래그가 있으면 건물명까지 확인되어야 자동확정.
       if (row.result.reviewNeeded) {
+        const beforeStrict = cands;
         cands = cands.filter((c) => {
           const evidence = buildingEvidenceKind(c.buldnm, row.result.bdNm, row.raw);
           if (evidence === "raw_exact_name") {
@@ -4476,16 +4483,29 @@ function AddrRefineTestGui() {
         });
         stageCounts.strict_building = cands.length;
         if (!cands.length) {
-          return {
-            status: "REG_VALIDATION_FAILED",
-            candidates: all,
-            complete: true,
-            failure_stage: "STRICT_BUILDING",
-            stage_counts: stageCounts,
-            applied_modules: appliedModules,
-            message: "검토대상 건물명 교차검증 실패",
-            at: nowText()
-          };
+          // R-IROS-NAMELESS-REGISTRY-EXACT: 등기부가 건물명을 아예 적지 않아
+          // 교차검증이 원천 불가능한 건물. 확정 지번 위 동·호 정확 매칭이
+          // 유일한 한 건일 때만 그 근거로 통과시킨다(실측 457행).
+          const nameless = selectNamelessRegistryExact(beforeStrict, exactUnitMatched);
+          if (nameless) {
+            cands = [nameless];
+            stageCounts.strict_building = 1;
+            applyModule(
+              "R-IROS-NAMELESS-REGISTRY-EXACT",
+              IROS_MODULE_VERSIONS.R_IROS_NAMELESS_REGISTRY_EXACT
+            );
+          } else {
+            return {
+              status: "REG_VALIDATION_FAILED",
+              candidates: all,
+              complete: true,
+              failure_stage: "STRICT_BUILDING",
+              stage_counts: stageCounts,
+              applied_modules: appliedModules,
+              message: "검토대상 건물명 교차검증 실패",
+              at: nowText()
+            };
+          }
         }
       }
 

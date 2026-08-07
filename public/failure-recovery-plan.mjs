@@ -9,6 +9,7 @@ import {
   rawUnitRecoveryVariants,
   selectDongAgnosticHoCandidate,
   selectFloorDisambiguatedCandidate,
+  selectNamelessRegistryExact,
   selectUniqueRawUnitCandidate
 } from "./unit-match.mjs";
 import { PNULESS_IROS_VERSION, buildPnulessIrosPlan } from "./pnuless-iros.mjs";
@@ -164,6 +165,13 @@ export const FAILURE_RECOVERY_MODULES = Object.freeze({
   }),
   I_SHOP_DONG_EXCLUSION: Object.freeze({
     id: "R-IROS-SHOP-DONG-EXCLUSION",
+    phase: "IROS",
+    version: "1",
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_NAMELESS_REGISTRY: Object.freeze({
+    id: "R-IROS-NAMELESS-REGISTRY-EXACT",
     phase: "IROS",
     version: "1",
     automatic: true,
@@ -391,6 +399,23 @@ export function needsFloorDisambigRematch(row) {
   );
 }
 
+// 검토 게이트의 건물명 교차검증에서 죽었지만, 등기부 건물명이 무기재라
+// 교차검증이 원천 불가능했던 행(실측 457행). 동·호 정확 매칭 유일 +
+// 그 후보의 건물명이 빈값일 때만 재판정 대상으로 승격한다.
+export function needsNamelessRegistryRematch(row) {
+  const reg = row?.reg;
+  if (String(reg?.status || "") !== "REG_VALIDATION_FAILED") return false;
+  if (String(reg?.failure_stage || "") !== "STRICT_BUILDING") return false;
+  if (reg?.complete !== true) return false;
+  const unit = row?.result?.unit || {};
+  if (!unit.ho) return false;
+  const typed = filterUnitPropertyCandidates(reg?.candidates || [], unit.dong || "", unit.ho);
+  if (!typed.verified) return false;
+  const matched = (typed.candidates || []).filter((candidate) =>
+    candidateMatchesUnit(candidate, unit.dong || "", unit.ho));
+  return Boolean(selectNamelessRegistryExact(matched, matched.length > 0));
+}
+
 // 확정 지번으로 후보를 거르면 전멸하지만, 같은 건물명 후보는 남아 있는 행.
 // 복수지번 건물의 등기 소재지번이 확정 지번과 다를 때 생긴다(실측 194행).
 export function needsLotFallbackRematch(row) {
@@ -473,6 +498,12 @@ export function selectIrosRecoveryAction(row) {
     return moduleDecision(
       FAILURE_RECOVERY_MODULES.I_UNIT_BEARING_BUILDING,
       "UNIT_BEARING_BUILDING_REMATCH"
+    );
+  }
+  if (needsNamelessRegistryRematch(row)) {
+    return moduleDecision(
+      FAILURE_RECOVERY_MODULES.I_NAMELESS_REGISTRY,
+      "IROS_NAMELESS_REGISTRY_REMATCH"
     );
   }
   if (needsLotFallbackRematch(row)) {
