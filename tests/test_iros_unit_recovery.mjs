@@ -154,9 +154,9 @@ test("이미 고유번호를 얻은 행은 재조회하지 않는다", () => {
 });
 
 test("매처 버전을 올려 새 매칭 규칙이 실행 계약에 반영된다", async () => {
-  assert.equal(MATCHER_VERSION, "iros-matcher-v11");
+  assert.equal(MATCHER_VERSION, "iros-matcher-v12");
   const contract = await readFile(new URL("../public/iros-run-contract.mjs", import.meta.url), "utf8");
-  assert.equal(contract.includes('matcher: "iros-matcher-v11"'), true);
+  assert.equal(contract.includes('matcher: "iros-matcher-v12"'), true);
 });
 
 test("app.js가 두 폴백을 매칭 경로에 연결한다", async () => {
@@ -193,6 +193,31 @@ test("요청 동이 등기부에 아예 없고 호가 유일하면 동을 무시
   );
   assert.equal(picked?.candidate.unique_no, "A");
   assert.equal(picked?.requested_dong, "101");
+});
+
+test("동 무시 매칭에서 명시적으로 다른 동은 유일성을 깨지 않는다", async () => {
+  const { selectDongAgnosticHoCandidate } = await import("../public/unit-match.mjs");
+  // 횡성 서도아파트 실측(94행): 동 표기 없는 세대 157건 + 상가동 7건.
+  // 호 101은 빈 동 1건 + 상가동 1건 — 상가동은 요청한 101동일 수 없으므로
+  // 빈 동 한 건으로 유일하다.
+  const picked = selectDongAgnosticHoCandidate(
+    [
+      { unique_no: "APT", dong: "", ho: "101" },
+      { unique_no: "SHOP", dong: "상가", ho: "101" }
+    ],
+    "101", "101"
+  );
+  assert.equal(picked?.candidate.unique_no, "APT");
+  assert.equal(picked?.no_dong_candidate_count, 1);
+  // 빈 동끼리 여러 건이면 여전히 확정하지 않는다.
+  assert.equal(selectDongAgnosticHoCandidate(
+    [
+      { unique_no: "A", dong: "", ho: "101" },
+      { unique_no: "B", dong: "", ho: "101" },
+      { unique_no: "SHOP", dong: "상가", ho: "101" }
+    ],
+    "101", "101"
+  ), null);
 });
 
 test("요청 동이 등기부에 존재하면 동을 무시하지 않는다", async () => {

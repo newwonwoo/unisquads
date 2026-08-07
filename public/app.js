@@ -7,10 +7,12 @@ import {
   candidateHasNoDong,
   candidateMatchesAddressLot,
   candidateMatchesUnit,
+  excludeShopDongForDonglessRequest,
   filterUnitPropertyCandidates,
   matchedCandidateUnitVariant,
   rawUnitRecoveryVariants,
   selectDongAgnosticHoCandidate,
+  selectFloorDisambiguatedCandidate,
   selectUniqueRawUnitCandidate,
   summarizeCandidatePropertyClasses,
   targetPropertyClass,
@@ -4128,14 +4130,29 @@ function AddrRefineTestGui() {
       let unitProfileRecovery = null;
       let rawUnitRecovery = null;
       let dongAgnosticRecovery = null;
+      let floorDisambigRecovery = null;
       if (wantDong || wantHo) {
         let matched = cands.filter((c) => {
           const variant = matchedCandidateUnitVariant(c, wantDong, wantHo);
-          if (variant?.source === "composite_dong_room_prefix") {
+          if (variant?.source === "composite_dong_room_prefix" ||
+              variant?.source === "self_dong_ho_prefix") {
             applyModule("IROS-CANDIDATE-NORMALIZE", IROS_MODULE_VERSIONS.IROS_CANDIDATE_NORMALIZE);
           }
           return Boolean(variant);
         });
+        // R-IROS-SHOP-DONG-EXCLUSION: 동 없는 요청에서 같은 호가 무동 세대와
+        // 상가동에만 갈리면 상가동을 배제한다(서도아파트 실측). 숫자·알파벳
+        // 동이 섞여 있으면 배제하지 않는다.
+        if (matched.length > 1 && !wantDong && wantHo) {
+          const trimmed = excludeShopDongForDonglessRequest(matched);
+          if (trimmed.length < matched.length) {
+            matched = trimmed;
+            applyModule(
+              "R-IROS-SHOP-DONG-EXCLUSION",
+              IROS_MODULE_VERSIONS.R_IROS_SHOP_DONG_EXCLUSION
+            );
+          }
+        }
         // 단일 동 건물: 후보 전체에 동이 없고 호는 있을 때 호로만 재매칭.
         if (!matched.length && wantDong && wantHo) {
           const anyDong = cands.some((c) => !candidateHasNoDong(c));
@@ -4221,6 +4238,25 @@ function AddrRefineTestGui() {
         }
       }
 
+      // R-IROS-FLOOR-DISAMBIG: 동·호가 완전히 같은 후보가 여러 건인데 등기부
+      // floor 필드로만 갈리는 건물(진흥아파트: 동 101 호 "1"이 층 1~6으로 6건,
+      // 원문 "101동 3층1호" — 실측 136행). 원문에 명시된 층의 후보가 정확히
+      // 한 건일 때만 채택한다. 층 정보가 없거나 같은 층이 여러 건이면 그대로
+      // REG_MULTI로 남긴다.
+      if (cands.length > 1 && (wantDong || wantHo)) {
+        const floored = selectFloorDisambiguatedCandidate(
+          cands,
+          row.raw,
+          row.result.unit || {}
+        );
+        if (floored?.candidate) {
+          cands = [floored.candidate];
+          floorDisambigRecovery = floored;
+          applyModule("R-IROS-FLOOR-DISAMBIG", IROS_MODULE_VERSIONS.R_IROS_FLOOR_DISAMBIG);
+        }
+      }
+      stageCounts.floor_disambiguation = floorDisambigRecovery ? 1 : 0;
+
       // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 원문 동 표기가 등기부 동 체계에
       // 아예 존재하지 않고(101동 ↔ A동·가동·공란), 요청한 호를 가진 세대가 이
       // 지번 전체에서 정확히 한 건일 때만 동을 무시하고 그 한 건을 채택한다.
@@ -4301,9 +4337,11 @@ function AddrRefineTestGui() {
           raw_unit_recovery: rawUnitRecovery,
           unit_profile_recovery: unitProfileRecovery,
           dong_agnostic_recovery: dongAgnosticRecovery,
+          floor_disambiguation: floorDisambigRecovery,
           message: rawUnitRecovery ? "원문 동·층·호 표기로 완전후보 한 건 수렴" :
+            (floorDisambigRecovery ? "동·호 동일 복수후보를 원문 층으로 한 건 수렴" :
             (dongAgnosticRecovery ? "등기부에 없는 동 표기 — 지번 전체에서 호가 한 건으로 수렴" :
-            (unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치")),
+            (unitProfileRecovery?.selected_strategy ? "건물별 IROS 동·호 프로파일로 완전후보 한 건 수렴" : "PNU 완전후보에서 동·호 일치"))),
           at: nowText()
         };
       }

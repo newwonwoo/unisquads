@@ -21,7 +21,7 @@ export {
 export const IROS_RUN_VERSIONS = Object.freeze({
   collector: "iros-collector-v4",
   parser: "iros-parser-v4",
-  matcher: "iros-matcher-v11",
+  matcher: "iros-matcher-v12",
   recovery: "iros-recovery-v6"
 });
 
