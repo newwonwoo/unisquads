@@ -82,7 +82,7 @@ export function buildBuildingNameRequeryPlan(pre, status) {
   };
 }
 
-function detBdDongTokens(candidate) {
+export function detBdDongTokens(candidate) {
   return text(candidate?.detBdNmList)
     .split(",")
     .map((token) => token.replace(/\(.*?\)\s*$/, "").trim())

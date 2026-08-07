@@ -50,6 +50,11 @@ import {
   planVerifiedUnitPropagation
 } from "./verified-unit-propagation.mjs";
 import {
+  buildDongLotRelocatePlan,
+  markDongLotRelocatePending,
+  pickDongLotRelocateLot
+} from "./dong-lot-relocate.mjs";
+import {
   matchUnitByBuildingProfile,
   unitIntentSignature
 } from "./iros-unit-profile.mjs";
@@ -4591,6 +4596,32 @@ function AddrRefineTestGui() {
       }
     }
 
+    // 동↔지번 재배치: 요청 동이 확정 지번 등기부에 없을 때, JUSO 건물명
+    // 검색의 detBdNmList가 그 동을 다른 지번 하나로만 매핑하면 그 지번을
+    // 대체지번 큐에 넣는다(창신 실측: 109동 = 망정동 462-2, 정확 매칭 확증).
+    // 확정은 아래 대체지번 수렴 로직이 한다 — 여기서는 큐잉만.
+    if (!batchStopRef.current) {
+      const relocateSearches = new Map();
+      for (let idx = 0; idx < next.length; idx++) {
+        if (batchStopRef.current) break;
+        const row = next[idx];
+        const plan = buildDongLotRelocatePlan(row);
+        if (!plan) continue;
+        let hits = relocateSearches.get(plan.query);
+        if (hits === undefined) {
+          hits = (await safeCall(clients.juso, plan.query)) || [];
+          relocateSearches.set(plan.query, hits);
+        }
+        const picked = pickDongLotRelocateLot(hits, plan);
+        if (!picked) continue;
+        next[idx] = {
+          ...row,
+          reg: withIrosVersions(markDongLotRelocatePending(row.reg, plan, picked))
+        };
+        addAlternateMember(picked.lotAddress, { idx, row: next[idx] });
+      }
+    }
+
     const alternateEntries = [...alternateGroups.entries()];
     const alternateAttempts = new Map();
     const addAlternateAttempt = (member, address, recovered) => {
@@ -4648,7 +4679,10 @@ function AddrRefineTestGui() {
         const resolved = attempts.filter((attempt) => attempt.recovered.status === "RESOLVED");
         const multiple = attempts.filter((attempt) => attempt.recovered.status === "REG_MULTI");
         const resolvedNos = new Set(resolved.map((attempt) => attempt.recovered.unique_no).filter(Boolean));
-        const moduleTag = `R-IROS-MULTILOT@${IROS_MODULE_VERSIONS.R_IROS_MULTILOT}`;
+        // 동↔지번 재배치로 큐에 들어온 행은 근거가 다르므로 태그를 구분한다.
+        const moduleTag = prior.dong_lot_relocate
+          ? `R-IROS-DONG-LOT-RELOCATE@${IROS_MODULE_VERSIONS.R_IROS_DONG_LOT_RELOCATE}`
+          : `R-IROS-MULTILOT@${IROS_MODULE_VERSIONS.R_IROS_MULTILOT}`;
 
         if (resolvedNos.size === 1 && multiple.length === 0) {
           const chosen = resolved[0].recovered;
@@ -4658,13 +4692,18 @@ function AddrRefineTestGui() {
             ...next[idx],
             reg: withIrosVersions({
               ...chosen,
+              ...(prior.dong_lot_relocate
+                ? { dong_lot_relocate: prior.dong_lot_relocate }
+                : {}),
               applied_modules: appliedModules,
               recovery_module: moduleTag,
               recovery_address: addresses[0] || "",
               recovery_addresses: addresses,
               recovery_pending: false,
               recovery_attempted: true,
-              message: "명시 대체지번 전체 조회가 한 고유번호로 수렴"
+              message: prior.dong_lot_relocate
+                ? "동↔지번 재배치 조회가 한 고유번호로 수렴"
+                : "명시 대체지번 전체 조회가 한 고유번호로 수렴"
             })
           };
           continue;
