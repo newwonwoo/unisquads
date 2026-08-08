@@ -21,6 +21,7 @@ import {
   matchedCandidateUnitVariant,
   selectDongAgnosticHoCandidate,
   selectFloorDisambiguatedCandidate,
+  selectFloorPrefixedHoCandidate,
   selectRawFloorHoCandidate,
   selectUniqueRawUnitCandidate,
   IROS_MODULE_VERSIONS
@@ -47,7 +48,8 @@ export const DECISION_MODULE_KEYS = Object.freeze([
   "UNIT_PROFILE",
   "FLOOR_DISAMBIG",
   "DONG_AGNOSTIC_HO",
-  "RAW_FLOOR_HO"
+  "RAW_FLOOR_HO",
+  "FLOOR_PREFIXED_HO"
 ]);
 
 // rawUnitVariants 원문 표기 복구 변형(있으면 R-IROS-RAW-UNIT이 열린다)
@@ -246,6 +248,20 @@ export function decideUnitCandidates({
   }
   stageCounts.raw_floor_ho = rawFloorHoRecovery ? 1 : 0;
 
+  // R-IROS-FLOOR-PREFIXED-HO: 원문이 "층 + 1층 기준 호수"로 적힌 행
+  // ("2102" = 2층 102호 ↔ 등기부 "202"). 아무것도 못 골랐을 때만,
+  // 층 정합성과 중의성 기권 조건을 모두 통과할 때 발화한다(광평동 실측).
+  let floorPrefixedRecovery = null;
+  if (enabled("FLOOR_PREFIXED_HO") && !cands.length && wantHo) {
+    const prefixed = selectFloorPrefixedHoCandidate(source, wantDong, wantHo);
+    if (prefixed?.candidate) {
+      cands = [prefixed.candidate];
+      floorPrefixedRecovery = prefixed;
+      applyModule("R-IROS-FLOOR-PREFIXED-HO", IROS_MODULE_VERSIONS.R_IROS_FLOOR_PREFIXED_HO);
+    }
+  }
+  stageCounts.floor_prefixed_ho = floorPrefixedRecovery ? 1 : 0;
+
   return {
     candidates: cands,
     appliedModules: applied,
@@ -255,6 +271,7 @@ export function decideUnitCandidates({
     floorDisambigRecovery,
     dongAgnosticRecovery,
     rawFloorHoRecovery,
+    floorPrefixedRecovery,
     stageCounts
   };
 }
