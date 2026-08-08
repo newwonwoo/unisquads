@@ -85,6 +85,10 @@ test("npm test가 회귀 감사를 먼저 돌린다", async () => {
     "npm test에서 전처리 감사가 빠졌다"
   );
   assert.ok(
+    pkg.scripts.test.includes("audit-refinement"),
+    "npm test에서 정제 판정 감사가 빠졌다"
+  );
+  assert.ok(
     pkg.scripts.test.includes("audit-module-interference"),
     "npm test에서 모듈 간섭 감사가 빠졌다"
   );
@@ -111,6 +115,24 @@ test("정제율 픽스처 코퍼스는 네 모듈을 전부 발화시킨다", as
   const corpus = JSON.parse(await readFile(
     new URL("./fixtures/address-requery-corpus.json", import.meta.url), "utf8"));
   assert.ok(corpus.scenarios.length >= 5, "시나리오가 너무 적다");
+});
+
+test("정제 판정 코퍼스는 확정·기각·검토를 전부 담고 있다", async () => {
+  // "정제 100건이 90건 되는" 회귀를 재려면 답안지에 확정 행이 실제로
+  // 있어야 하고(확정→비확정 변화를 볼 자리), 기각·검토도 있어야
+  // "잘못 확정으로 바뀌는 변화"도 보인다.
+  const corpus = JSON.parse(await readFile(
+    new URL("./fixtures/refinement-corpus.json", import.meta.url), "utf8"));
+  assert.ok(corpus.rows.length >= 100, `정제 표본 ${corpus.rows.length}행 — 너무 적다`);
+  const baseline = JSON.parse(await readFile(
+    new URL("./fixtures/refinement-baseline.json", import.meta.url), "utf8"));
+  const statuses = Object.values(baseline).map((sig) => sig.split("␞")[0]);
+  for (const wanted of ["CONFIRMED", "FAILED", "AMBIGUOUS"]) {
+    assert.ok(
+      statuses.filter((s) => s === wanted).length >= 10,
+      `정제 기준선에 ${wanted} 판정이 10건 미만 — 그 방향의 회귀를 못 본다`
+    );
+  }
 });
 
 test("판정 서명은 고유번호와 적용 모듈을 함께 담는다", () => {

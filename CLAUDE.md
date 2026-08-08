@@ -18,9 +18,12 @@
    재평가되지 않으므로, 그 비교의 "회귀 0건"은 *잠금이 작동했다*는 뜻일 뿐
    *규칙이 안전하다*는 뜻이 아니다. 이 구분을 흐린 적이 있고 문제가 됐다.
 
-2. **회귀 리스크는 네 층위로 잰다.** 전처리(`npm run audit:preprocess` —
-   실행 원본주소 19,819건 파싱 기준선) · 공통모듈(`npm run audit:common` —
-   원시함수 출력 7,523건 기준선) · 개별모듈(회귀 감사 + 단위 반례) ·
+2. **회귀 리스크는 다섯 층위로 잰다.** 전처리(`npm run audit:preprocess` —
+   실행 원본주소 19,819건 파싱 기준선) · 정제판정(`npm run audit:refine` —
+   실측 표본 146행의 얼린 JUSO 응답을 운영 `resolve()`로 재생, "확정이
+   기각으로 바뀌는" 정제율 회귀를 배포 전에 잡는다; 표본 확장은
+   `npm run corpus:refine -- <표본.json>`) · 공통모듈(`npm run audit:common` —
+   원시함수 출력 기준선) · 개별모듈(회귀 감사 + 단위 반례) ·
    모듈배치(간섭 감사 2종: `audit:interference` 등기 사다리,
    `audit:address` 정제율 체인). 판정을 바꾸는 규칙은 겹으로 막는다 —
    어느 하나만으로는 부족하다.
@@ -53,11 +56,13 @@
 ## 명령
 
 ```
-npm test              # 회귀 감사 + 단위·계약 테스트 (현재 346개 통과)
+npm test              # 감사 6종 + 단위·계약 테스트
 npm run audit:regression  # 실측 코퍼스로 판정 회귀만 검사 (11,808건)
 npm run audit:interference  # 모듈 간 충돌 검사 — 순서가 고유번호를 바꾸면 실패
 npm run audit:update      # 판정 변화를 의도했을 때만 기준선 갱신
-npm run corpus:build -- <프로브저장본.json>   # 감사 코퍼스에 새 지번 추가
+npm run corpus:build -- <프로브저장본.json>   # 등기 감사 코퍼스에 새 지번 추가
+npm run audit:refine  # 정제 판정 회귀 — 얼린 JUSO 응답 재생, 확정→기각이면 실패
+npm run corpus:refine -- <표본.json>   # 정제 표본에 실측 JUSO 응답 녹음 추가
 npm run test:iros     # IROS 세대매칭 E2E — 브라우저 띄워 실제 앱을 돌린다
 npm run probe:iros    # 실제 등기 브리지에 직접 붙어 후보와 매칭 판정을 본다
 npm run build         # build-info.js 생성 (배포 때 Vercel이 실행)
