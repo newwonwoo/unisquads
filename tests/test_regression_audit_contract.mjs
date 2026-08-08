@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { decideUnitCandidates, decisionSignature } from "../public/unit-decision.mjs";
+import {
+  DECISION_MODULE_KEYS,
+  decideUnitCandidates,
+  decisionSignature
+} from "../public/unit-decision.mjs";
 
 // 감사 자체가 무력화되는 것을 막는 계약. 감사가 "통과"만 하고 실제로는
 // 아무것도 재지 않는 상태(코퍼스 비었음·기준선 비었음·npm test에서 빠짐)를
@@ -33,17 +37,37 @@ test("기준선은 코퍼스 전체를 덮고 폴백 경로까지 포함한다",
   // 정확 매칭만 있으면 새 규칙(폴백 사다리)이 한 번도 안 열린다.
   // 기준선에 폴백 판정이 실제로 들어 있는지 확인한다.
   const signatures = lots.flatMap((id) => Object.values(baseline[id]));
-  const fallbackModules = [
-    "R-IROS-DONG-AGNOSTIC-HO", "R-IROS-FLOOR-DISAMBIG", "R-IROS-UNIT-PROFILE"
-  ];
-  for (const moduleId of fallbackModules) {
-    assert.ok(
-      signatures.some((s) => s.includes(moduleId)),
-      `기준선에 ${moduleId} 판정이 없다 — 감사가 그 규칙을 못 본다`
-    );
-  }
   // 미일치(NONE)도 있어야 "확정으로 바뀌는 변화"를 감지할 수 있다
   assert.ok(signatures.some((s) => s === "NONE"), "기준선에 미일치 판정이 없다");
+});
+
+// 사다리 키 → 판정 서명에 찍히는 모듈 태그. 새 사다리 모듈을 추가하면
+// 여기에도 태그를 적어야 하고, 그 모듈이 기준선에서 실제로 발화해야 한다
+// (발화 사례가 없으면 코퍼스 지번 또는 감사 요청 클래스를 함께 넣어라).
+// 이 두 검사가 "감사가 통과만 하고 새 모듈은 재지 않는 상태"를 막는다.
+const MODULE_KEY_TAGS = Object.freeze({
+  SHOP_DONG_EXCLUSION: "R-IROS-SHOP-DONG-EXCLUSION",
+  SINGLE_DONG: "R-IROS-SINGLE-DONG-HO",
+  DONG_AGNOSTIC: "R-IROS-DONG-AGNOSTIC",
+  HO_BUILDING: "R-IROS-HO-BUILDING",
+  RAW_UNIT: "R-IROS-RAW-UNIT",
+  UNIT_PROFILE: "R-IROS-UNIT-PROFILE",
+  FLOOR_DISAMBIG: "R-IROS-FLOOR-DISAMBIG",
+  DONG_AGNOSTIC_HO: "R-IROS-DONG-AGNOSTIC-HO",
+  RAW_FLOOR_HO: "R-IROS-RAW-FLOOR-HO"
+});
+
+test("사다리의 모든 모듈이 기준선에서 최소 1회 발화한다", () => {
+  const signatures = Object.keys(baseline).flatMap((id) => Object.values(baseline[id]));
+  for (const key of DECISION_MODULE_KEYS) {
+    const tag = MODULE_KEY_TAGS[key];
+    assert.ok(tag, `사다리 모듈 ${key}의 태그 매핑이 없다 — 이 테스트에 추가해라`);
+    assert.ok(
+      signatures.some((s) => s.includes(`${tag}@`)),
+      `기준선에 ${tag} 판정이 한 건도 없다 — 감사가 이 모듈의 회귀를 못 본다. ` +
+      `이 모듈이 발화하는 코퍼스 지번이나 감사 요청 클래스를 추가해라`
+    );
+  }
 });
 
 test("npm test가 회귀 감사를 먼저 돌린다", async () => {

@@ -14,6 +14,12 @@
 //   4. 원문에 층이 적힌 형태          층 유일화(R-IROS-FLOOR-DISAMBIG)
 //   5. 있는 동 + 없는 호              미일치·프로파일 복구 경로
 //   6. 있는 동 × 있는 호(짝 아님)     오확정이 생기는 자리
+//   7. 중복 동 표기("106동 1동")      원문 표기 복구(R-IROS-RAW-UNIT)
+//   8. 원문 지X-N 층-호               층-호 재해석(R-IROS-RAW-FLOOR-HO)
+//
+// 사다리의 모든 모듈이 기준선에서 최소 1회 발화해야 한다 — 계약 테스트
+// (test_regression_audit_contract)가 이를 강제하므로, 새 모듈을 추가하면
+// 그 모듈이 열리는 요청 클래스(또는 코퍼스 지번)도 함께 넣어야 통과한다.
 
 import { readFile } from "node:fs/promises";
 import { decideUnitCandidates } from "../public/unit-decision.mjs";
@@ -86,6 +92,35 @@ export function requestsFor(entry, otherDongs) {
       crossed += 1;
     }
     if (crossed >= MISS_CASE_LIMIT) break;
+  }
+
+  // 7. 중복 동 표기: "106동 1동 102호"를 전처리가 동1·호102로 읽던 실측
+  // (효자동 한신휴플러스)을 재현한다. 지번에 동 1이 실존하면 정확 매칭이
+  // 열려 복구 경로가 안 보이므로, 없는 지번에서만 만든다.
+  if (!dongs.has("1")) {
+    let dup = 0;
+    for (const candidate of candidates) {
+      if (dup >= MISS_CASE_LIMIT / 4) break;
+      const dong = String(candidate?.dong ?? "").trim();
+      const ho = String(candidate?.ho ?? "").trim();
+      if (!dong || !ho || !/^\d+$/.test(ho)) continue;
+      add("1", ho, `${base} ${dong}동 1동 ${ho}호`);
+      dup += 1;
+    }
+  }
+
+  // 8. 원문 지X-N 층-호: "지3-2"를 전처리가 동3·호2로 읽던 실측(갈산
+  // 하나상가)을 재현한다. 층이 숫자이고 호가 짧은 후보에서만 — 지하 중의
+  // 기권까지 함께 기준선에 남는다.
+  let flho = 0;
+  for (const candidate of candidates) {
+    if (flho >= MISS_CASE_LIMIT / 4) break;
+    const floor = String(candidate?.floor ?? "").trim();
+    const ho = String(candidate?.ho ?? "").trim();
+    const buldnm = String(candidate?.buldnm ?? "").trim();
+    if (!buldnm || !/^\d{1,2}$/.test(floor) || !/^\d{1,3}$/.test(ho)) continue;
+    add(String(Number(floor)), ho, `${base} ${buldnm} 지${Number(floor)}-${ho}`);
+    flho += 1;
   }
 
   return out.sort((a, b) =>
