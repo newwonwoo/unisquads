@@ -9,12 +9,17 @@
 //                              — Vercel이 실제로 빌드·배포한 시점 (배포 때 생성)
 // "고쳤다"와 "배포됐다"는 다른 사실이므로 한쪽만 보고 판단하지 않는다.
 
-export const APP_VERSION = "1.18.1";
+export const APP_VERSION = "1.19.0";
 
 // ISO 8601. 표시할 때만 KST로 바꾼다.
-export const RELEASED_AT = "2026-08-08T03:35:00+09:00";
+export const RELEASED_AT = "2026-08-08T04:10:00+09:00";
 
 export const CHANGELOG = Object.freeze([
+  Object.freeze({
+    version: "1.19.0",
+    released_at: "2026-08-08T04:10:00+09:00",
+    summary: "정제 판정 회귀 감사 신설 — 실측 표본 146행의 얼린 JUSO 응답을 운영 resolve()로 재생, 확정→기각 회귀를 배포 전 차단 (감사 5층위→6종)"
+  }),
   Object.freeze({
     version: "1.18.1",
     released_at: "2026-08-08T03:35:00+09:00",
