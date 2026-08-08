@@ -19,7 +19,8 @@ export const IROS_MODULE_VERSIONS = Object.freeze({
   R_IROS_NAMELESS_REGISTRY_EXACT: "1",
   R_IROS_SINGLE_DONG_HO: "1",
   R_IROS_DONG_LOT_RELOCATE: "1",
-  R_IROS_RAW_FLOOR_HO: "1"
+  R_IROS_RAW_FLOOR_HO: "1",
+  R_IROS_FLOOR_PREFIXED_HO: "1"
 });
 
 const DONG_ALIASES = Object.freeze({
@@ -379,6 +380,54 @@ export function selectRawFloorHoCandidate(pool, rawAddress, wantDong, wantHo) {
     candidate: [...unique.values()][0],
     matched_floor: floorNo,
     matched_ho: hoKey,
+    matched_candidate_count: matchedCount
+  };
+}
+
+// R-IROS-FLOOR-PREFIXED-HO: 원문이 "층 + 1층 기준 호수"로 적힌 행의 재해석
+// (구미 광평동 실측 17행).
+//
+// 원문 "101동 2102호" ↔ 등기부 "202호(층 2)". 원문은 2층의 102호를 "2102"로
+// 붙여 적었고, 등기부는 층+라인(202)으로 적는다 — 백의 자리 "1"이 원문에만
+// 있다. 실측 16칸이 전부 1:1로 대응했고 층까지 일치했다.
+//
+// 기권(무회귀):
+//   - 백의 자리가 "1"이 아니면 발화하지 않는다("1408호"류를 건드리지 않는다)
+//   - 원문을 "NA층 BC호"로 읽을 수 있는 층이 등기부에 실재하면 기권한다
+//     (11층이 있는 건물의 "1102"는 11층 02호일 수 있다 — 중의적)
+//   - 변환한 호가 등기부에 유일하지 않으면 기권
+//   - 그 후보의 층이 원문 첫 자리와 다르면 기권(층 정합성 검사)
+export function selectFloorPrefixedHoCandidate(pool, wantDong, wantHo) {
+  const ho = unitKey(wantHo, "ho");
+  const parsed = /^(\d)(\d)(\d{2})$/.exec(ho);
+  if (!parsed) return null;
+  const [, floorDigit, prefix, line] = parsed;
+  if (prefix !== "1") return null;
+  const wantFloor = String(Number(floorDigit));
+  const target = unitKey(`${floorDigit}${line}`, "ho");
+  if (!target || target === ho) return null;
+  const source = Array.isArray(pool) ? pool : [];
+  // 중의성 검사: "NA층"이 실재하면 원문이 그 층을 가리킬 수 있으므로 기권.
+  const altFloor = String(Number(`${floorDigit}${prefix}`));
+  const floorOf = (candidate) => String(candidate?.floor ?? "").trim();
+  if (source.some((candidate) => floorOf(candidate) === altFloor)) return null;
+  const dong = dongAliasKey(wantDong);
+  const unique = new Map();
+  let matchedCount = 0;
+  for (const candidate of source) {
+    if (dong && dongAliasKey(candidate?.dong) !== dong) continue;
+    if (unitKey(candidate?.ho, "ho") !== target) continue;
+    const floor = floorOf(candidate);
+    if (!/^\d+$/.test(floor) || String(Number(floor)) !== wantFloor) continue;
+    matchedCount += 1;
+    const key = candidateIdentity(candidate);
+    if (key && !unique.has(key)) unique.set(key, candidate);
+  }
+  if (unique.size !== 1) return null;
+  return {
+    candidate: [...unique.values()][0],
+    matched_ho: target,
+    matched_floor: wantFloor,
     matched_candidate_count: matchedCount
   };
 }

@@ -16,6 +16,7 @@
 //   6. 있는 동 × 있는 호(짝 아님)     오확정이 생기는 자리
 //   7. 중복 동 표기("106동 1동")      원문 표기 복구(R-IROS-RAW-UNIT)
 //   8. 원문 지X-N 층-호               층-호 재해석(R-IROS-RAW-FLOOR-HO)
+//   9. 층 + 1층 기준 호수              층 접두 호(R-IROS-FLOOR-PREFIXED-HO)
 //
 // 사다리의 모든 모듈이 기준선에서 최소 1회 발화해야 한다 — 계약 테스트
 // (test_regression_audit_contract)가 이를 강제하므로, 새 모듈을 추가하면
@@ -121,6 +122,18 @@ export function requestsFor(entry, otherDongs) {
     if (!buldnm || !/^\d{1,2}$/.test(floor) || !/^\d{1,3}$/.test(ho)) continue;
     add(String(Number(floor)), ho, `${base} ${buldnm} 지${Number(floor)}-${ho}`);
     flho += 1;
+  }
+
+  // 9. 층 접두 호: 등기부 "N02"(층 N)를 원문이 "N102"로 적던 실측(구미 광평동)을
+  // 재현한다. 층 한 자리 · 호 세 자리이고 호의 첫 자리가 층과 같은 후보에서만.
+  let prefixed = 0;
+  for (const candidate of candidates) {
+    if (prefixed >= MISS_CASE_LIMIT / 4) break;
+    const floor = String(candidate?.floor ?? "").trim();
+    const ho = String(candidate?.ho ?? "").trim();
+    if (!/^\d$/.test(floor) || !/^\d{3}$/.test(ho) || ho[0] !== floor) continue;
+    add(String(candidate?.dong ?? "").trim(), `${floor}1${ho.slice(1)}`, base);
+    prefixed += 1;
   }
 
   return out.sort((a, b) =>

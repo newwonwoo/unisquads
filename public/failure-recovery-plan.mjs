@@ -10,6 +10,7 @@ import {
   selectDongAgnosticHoCandidate,
   selectFloorDisambiguatedCandidate,
   selectNamelessRegistryExact,
+  selectFloorPrefixedHoCandidate,
   selectRawFloorHoCandidate,
   selectUniqueRawUnitCandidate
 } from "./unit-match.mjs";
@@ -162,6 +163,13 @@ export const FAILURE_RECOVERY_MODULES = Object.freeze({
     id: "IROS-CANDIDATE-NORMALIZE",
     phase: "IROS",
     version: "4",
+    automatic: true,
+    disposition: "AUTO_RETRY"
+  }),
+  I_FLOOR_PREFIXED_HO: Object.freeze({
+    id: "R-IROS-FLOOR-PREFIXED-HO",
+    phase: "IROS",
+    version: "1",
     automatic: true,
     disposition: "AUTO_RETRY"
   }),
@@ -396,6 +404,18 @@ export function needsHoTypePrefixRematch(row) {
       "ho_type_prefix";
 }
 
+// 원문이 "층 + 1층 기준 호수"로 적힌 행("2102" = 2층 102호). 층 정합성과
+// 중의성 검사를 모두 통과해 한 건으로 좁혀질 때만 재판정 대상으로 승격한다.
+export function needsFloorPrefixedHoRematch(row) {
+  const reg = row?.reg;
+  if (String(reg?.status || "") !== "REG_UNIT_NOT_FOUND" || reg?.complete !== true) return false;
+  const unit = row?.result?.unit || {};
+  if (!unit.ho) return false;
+  const typed = filterUnitPropertyCandidates(reg?.candidates || [], unit.dong || "", unit.ho);
+  if (!typed.verified) return false;
+  return Boolean(selectFloorPrefixedHoCandidate(typed.candidates, unit.dong || "", unit.ho));
+}
+
 // 원문 "지X-N"이 동X·호N으로 오파싱돼 세대를 못 찾은 행(갈산 하나상가 실측).
 // 층-호 재해석이 정확히 한 건으로 좁혀질 때만 재판정 대상으로 승격한다.
 export function needsRawFloorHoRematch(row) {
@@ -533,6 +553,12 @@ export function selectIrosRecoveryAction(row) {
     return moduleDecision(
       FAILURE_RECOVERY_MODULES.I_CANDIDATE_NORMALIZE,
       "IROS_HO_TYPE_PREFIX_REMATCH"
+    );
+  }
+  if (needsFloorPrefixedHoRematch(row)) {
+    return moduleDecision(
+      FAILURE_RECOVERY_MODULES.I_FLOOR_PREFIXED_HO,
+      "IROS_FLOOR_PREFIXED_HO_REMATCH"
     );
   }
   if (needsRawFloorHoRematch(row)) {
