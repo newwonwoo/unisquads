@@ -306,3 +306,39 @@ test("동무시 폴백이 판정 사다리의 마지막 관문이다", async () 
   const agnosticHo = source.indexOf('applyModule("R-IROS-DONG-AGNOSTIC-HO"');
   assert.equal(rawUnit < agnosticHo, true);
 });
+
+test("동무시 기권 — 원문 표기 변형이 실존 동을 가리키면 동을 무시하지 않는다", async () => {
+  // 간섭 감사 실측(요청 클래스 7 확장에서 발견): "101동 1동 101호"를 동1·호101로
+  // 읽은 요청에서, RAW_UNIT은 원문의 101동으로 복구하는데 동무시는 다른 무동
+  // 세대를 골라 서로 다른 고유번호를 냈다. 변형이 가리키는 동(101)이 등기부에
+  // 실존하면 동무시는 기권해야 한다 — RAW_UNIT이 차단돼도(감사 조건) 오확정
+  // 대신 미확정으로 남는 것이 무회귀다.
+  const { decideUnitCandidates, decisionSignature } =
+    await import("../public/unit-decision.mjs");
+  const { rawUnitRecoveryVariants } = await import("../public/unit-match.mjs");
+  const JIP = "집합건물";
+  const pool = [
+    { unique_no: "IN-101", dong: "101", ho: "101", real_cls_cd: JIP },
+    { unique_no: "NO-DONG", dong: "", ho: "101", real_cls_cd: JIP }
+  ];
+  const raw = "강원 삼척시 사직동 319 원조아파트 101동 1동 101호";
+  const unit = { dong: "1", ho: "101" };
+  const rawUnitVariants = rawUnitRecoveryVariants(raw, unit);
+  const base = { pool, wantDong: "1", wantHo: "101", raw, unit, rawUnitVariants };
+  // 전체 사다리: RAW_UNIT이 원문의 101동으로 복구한다
+  const full = decideUnitCandidates(base);
+  assert.equal(decisionSignature(full).startsWith("RESOLVED:IN-101"), true);
+  // RAW_UNIT 차단(간섭 감사 조건): 동무시가 대신 다른 세대를 고르면 충돌 —
+  // 기권해서 미확정으로 남아야 한다
+  const ablated = decideUnitCandidates(base, { disabled: ["RAW_UNIT"] });
+  assert.equal(decisionSignature(ablated), "NONE");
+  // 변형이 가리키는 동이 등기부에 없으면(정상적인 없는 동) 동무시는 그대로 산다
+  const noSuchDong = decideUnitCandidates({
+    ...base,
+    raw: "강원 삼척시 사직동 319 원조아파트 909동 101호",
+    wantDong: "909", unit: { dong: "909", ho: "101" },
+    rawUnitVariants: [],
+    pool: [{ unique_no: "ONLY", dong: "", ho: "101", real_cls_cd: JIP }]
+  });
+  assert.equal(decisionSignature(noSuchDong).startsWith("RESOLVED:ONLY"), true);
+});

@@ -9,12 +9,17 @@
 //                              — Vercel이 실제로 빌드·배포한 시점 (배포 때 생성)
 // "고쳤다"와 "배포됐다"는 다른 사실이므로 한쪽만 보고 판단하지 않는다.
 
-export const APP_VERSION = "1.18.0";
+export const APP_VERSION = "1.18.1";
 
 // ISO 8601. 표시할 때만 KST로 바꾼다.
-export const RELEASED_AT = "2026-08-08T03:05:00+09:00";
+export const RELEASED_AT = "2026-08-08T03:35:00+09:00";
 
 export const CHANGELOG = Object.freeze([
+  Object.freeze({
+    version: "1.18.1",
+    released_at: "2026-08-08T03:35:00+09:00",
+    summary: "감사 자기검증 강화 — 사다리 전 모듈 기준선 발화 강제(계약), 요청 클래스 2종 추가, 동무시 기권 가드(중복 동 표기 충돌 실측)"
+  }),
   Object.freeze({
     version: "1.18.0",
     released_at: "2026-08-08T03:05:00+09:00",

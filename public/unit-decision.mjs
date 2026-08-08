@@ -16,6 +16,7 @@ import {
   buildingKey,
   candidateHasNoDong,
   candidateMatchesUnit,
+  dongAliasKey,
   excludeShopDongForDonglessRequest,
   matchedCandidateUnitVariant,
   selectDongAgnosticHoCandidate,
@@ -204,8 +205,20 @@ export function decideUnitCandidates({
 
   // R-IROS-DONG-AGNOSTIC-HO: 마지막 수단. 요청 동이 등기부에 아예 없고
   // 요청한 호가 지번 전체에서 한 건일 때만 동을 무시한다.
+  //
+  // 무회귀 기권(간섭 감사 실측): 원문 표기 변형(중복 동 "101동 1동 101호")이
+  // 등기부에 실존하는 다른 동을 가리키면, 요청 동은 오파싱일 수 있고 그 동의
+  // 세대가 진짜 답이다 — 동무시가 다른 세대를 고르면 충돌이므로 기권한다.
   if (enabled("DONG_AGNOSTIC_HO") && !cands.length && wantDong && wantHo) {
-    const relaxed = selectDongAgnosticHoCandidate(source, wantDong, wantHo);
+    const wantDongKey = dongAliasKey(wantDong);
+    const variantDongExists = (rawUnitVariants || []).some((variant) => {
+      const dong = dongAliasKey(variant?.dong);
+      return dong && dong !== wantDongKey &&
+        source.some((candidate) => dongAliasKey(candidate?.dong) === dong);
+    });
+    const relaxed = variantDongExists
+      ? null
+      : selectDongAgnosticHoCandidate(source, wantDong, wantHo);
     if (relaxed?.candidate) {
       cands = [relaxed.candidate];
       dongAgnosticRecovery = relaxed;
