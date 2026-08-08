@@ -54,6 +54,7 @@ import {
   markDongLotRelocatePending,
   pickDongLotRelocateLot
 } from "./dong-lot-relocate.mjs";
+import { explainRowForHuman } from "./human-explanation.mjs";
 import {
   matchUnitByBuildingProfile,
   unitIntentSignature
@@ -5458,6 +5459,7 @@ function AddrRefineTestGui() {
         unitSrc,
         lookupAt: reg?.at || (reg ? (/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace("T", " ") : ""),
         note: okStatus ? failCode || "" : r.message || r.reason || failCode || "",
+        humanNote: explainRowForHuman(row),
         // ── 진단 열(2026-07-13): 전처리 오염 vs 원천 무결과를 눈으로 구분하기 위함 ──
         jusoQuery: r.jusoQuery || "",
         candCount: r.candCount ?? "",
@@ -5528,7 +5530,7 @@ function AddrRefineTestGui() {
     }
     return recs;
   }, [rows]);
-  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "처리판정", "복구모듈", "조회일시", "비고", "juso\uAC80\uC0C9\uC5B4", "\uD6C4\uBCF4\uAC74\uC218", "복수PNU후보", "복수PNU판정근거", "복수PNU그룹", "\uAC80\uC0C9\uACBD\uB85C", "\uC785\uB825\uC9C0\uC5ED", "\uACB0\uACFC\uC9C0\uC5ED", "\uAC80\uC99D\uC0C1\uD0DC", "\uAC80\uC99D\uC0AC\uC720", "\uAC80\uD1A0\uC720\uD615", "옛주소규칙", "옛주소맵버전", "옛주소입력", "옛주소현행", "주소상태", "세대상태", "파이프라인버전", "결과지문", "적용모듈", "의존성지문", "전파기준행", "전파근거해시", "주소매칭근거", "네이버지번주소", "네이버도로명주소", "검증배제후보지번주소", "검증배제후보도로명주소", "검증배제후보PNU", "최종IROS입력주소", "IROS전략", "IROS검색범위", "IROS부동산구분", "IROS총건수", "IROS원본수신수", "IROS파싱수", "IROS고유후보수", "IROS페이지수", "IROS유효PageUnit", "IROS완전여부", "IROS파서버전", "IROS매처버전", "IROS캐시해시", "IROS매칭근거"];
+  const HEADERS = ["원본주소", "정제상태", "시군구", "부동산구분", "주택유형", "지번주소", "도로명주소", "동", "호", "PNU", "건물관리번호", "등기고유번호", "중복여부", "중복그룹", "주소확정원천", "동호원천", "등기상태", "실패코드", "처리판정", "복구모듈", "조회일시", "비고", "처리설명", "juso\uAC80\uC0C9\uC5B4", "\uD6C4\uBCF4\uAC74\uC218", "복수PNU후보", "복수PNU판정근거", "복수PNU그룹", "\uAC80\uC0C9\uACBD\uB85C", "\uC785\uB825\uC9C0\uC5ED", "\uACB0\uACFC\uC9C0\uC5ED", "\uAC80\uC99D\uC0C1\uD0DC", "\uAC80\uC99D\uC0AC\uC720", "\uAC80\uD1A0\uC720\uD615", "옛주소규칙", "옛주소맵버전", "옛주소입력", "옛주소현행", "주소상태", "세대상태", "파이프라인버전", "결과지문", "적용모듈", "의존성지문", "전파기준행", "전파근거해시", "주소매칭근거", "네이버지번주소", "네이버도로명주소", "검증배제후보지번주소", "검증배제후보도로명주소", "검증배제후보PNU", "최종IROS입력주소", "IROS전략", "IROS검색범위", "IROS부동산구분", "IROS총건수", "IROS원본수신수", "IROS파싱수", "IROS고유후보수", "IROS페이지수", "IROS유효PageUnit", "IROS완전여부", "IROS파서버전", "IROS매처버전", "IROS캐시해시", "IROS매칭근거"];
   const recToRow = (rec) => [
     ...rec.extra,
     rec.raw,
@@ -5553,6 +5555,7 @@ function AddrRefineTestGui() {
     rec.recoveryModule,
     rec.lookupAt,
     rec.note,
+    rec.humanNote,
     rec.jusoQuery,
     rec.candCount,
     rec.multiPnuCandidates,
